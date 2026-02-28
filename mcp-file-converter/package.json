@@ -1,0 +1,20 @@
+{
+  "name": "mcp-file-converter",
+  "version": "1.0.0",
+  "description": "MCP server for converting structured data to various file formats with charts and images",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "exceljs": "^4.3.0",
+    "pdfkit": "^0.13.0",
+    "docx": "^8.0.0",
+    "pptxgenjs": "^3.10.0",
+    "axios": "^1.6.0",
+    "sharp": "^0.33.0",
+    "node-fetch": "^3.3.0"
+  }
+}

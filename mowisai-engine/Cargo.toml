@@ -1,0 +1,13 @@
+[package]
+name = "mowisai-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nix = { version = "0.27", features = ["mount", "sched", "process", "signal", "user", "resource", "fs", "hostname"] }
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+libc = "0.2"

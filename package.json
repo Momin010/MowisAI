@@ -1,0 +1,14 @@
+{
+  "name": "mowisai",
+  "version": "0.1.0",
+  "description": "Meta package for building and bootstrapping the MowisAI engine and bridge",
+  "scripts": {
+    "prereqs": "sudo apt update && sudo apt install -y curl tar skopeo build-essential pkg-config libssl-dev",
+    "build": "cd mowisai-engine && cargo build --release",
+    "bridge-install": "cd mowisai-bridge && npm install",
+    "install": "npm run prereqs && npm run build && npm run bridge-install",
+    "start": "bash ./start.sh"
+  },
+  "author": "Momin Aldahdouh",
+  "license": "ISC"
+}
