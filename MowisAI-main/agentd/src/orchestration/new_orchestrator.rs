@@ -44,6 +44,8 @@ pub struct OrchestratorConfig {
     pub merge_work_dir: PathBuf,
     pub max_agents: usize,
     pub max_verification_rounds: usize,
+    /// Optional staging directory for save-all functionality
+    pub staging_dir: Option<PathBuf>,
 }
 
 /// New 7-layer orchestrator
@@ -113,6 +115,9 @@ impl NewOrchestrator {
 
         let mut handles = Vec::new();
 
+        // Clone staging_dir before spawn to avoid lifetime issues
+        let staging_dir_clone: Option<PathBuf> = self.config.staging_dir.clone();
+
         for worker_id in 0..max_concurrent_agents {
             let scheduler_clone = scheduler.clone();
             let topology_clone = topology.clone();
@@ -120,6 +125,7 @@ impl NewOrchestrator {
             let results_clone = sandbox_agent_results.clone();
             let count_clone = agent_count.clone();
             let sandboxes = planner_output.sandbox_topology.sandboxes.clone();
+            let staging_dir_for_worker = staging_dir_clone.clone();
 
             let handle = tokio::spawn(async move {
                 loop {
@@ -213,6 +219,13 @@ impl NewOrchestrator {
                                     .entry(sandbox.name.clone())
                                     .or_insert_with(Vec::new)
                                     .push(result.clone());
+                            }
+
+                            // Stage workspace BEFORE destroying (for save-all functionality)
+                            if let Some(ref staging_dir) = staging_dir_for_worker {
+                                if let Err(e) = topology_clone.stage_agent_workspace(&agent.agent_id, staging_dir).await {
+                                    eprintln!("[Worker {}] Failed to stage workspace: {}", worker_id, e);
+                                }
                             }
 
                             // Cleanup agent layer

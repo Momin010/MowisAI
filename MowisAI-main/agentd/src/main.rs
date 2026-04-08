@@ -282,6 +282,15 @@ fn main() -> anyhow::Result<()> {
                 }
                 println!("═══════════════════════════════════════════════\n");
 
+                // Set up staging directory for save-all functionality
+                let staging_dir = if save_all {
+                    let staging = std::env::temp_dir().join("mowis-staging");
+                    std::fs::create_dir_all(&staging)?;
+                    Some(staging)
+                } else {
+                    None
+                };
+
                 let config = OrchestratorConfig {
                     project_id: project,
                     socket_path: socket,
@@ -291,6 +300,7 @@ fn main() -> anyhow::Result<()> {
                     merge_work_dir,
                     max_agents,
                     max_verification_rounds,
+                    staging_dir,
                 };
 
                 let orchestrator = NewOrchestrator::new(config);
@@ -337,23 +347,24 @@ fn main() -> anyhow::Result<()> {
                     println!("\n{}", output.merged_diff);
                 }
 
-                // Handle --save-all: copy agent changes to host
+                // Handle --save-all: export staged workspaces to host
                 if save_all {
                     if let Some(output_path) = output_dir.as_ref() {
                         println!("\n═══════════════════════════════════════════════");
                         println!("💾 Saving agent changes to host filesystem...");
                         println!("═══════════════════════════════════════════════\n");
-                        println!("  🔍 Scanning /tmp for container directories...");
+                        println!("  🔍 Exporting staged workspaces...");
 
-                        let summary = libagent::orchestration::sandbox_topology::export_container_workspaces_to_host(
-                            std::path::Path::new("/tmp"),
+                        let staging_dir = std::env::temp_dir().join("mowis-staging");
+                        let summary = libagent::orchestration::sandbox_topology::export_staged_workspaces_from_dir(
+                            &staging_dir,
                             output_path,
                         )?;
 
-                        println!("  📊 Total containers found: {}", summary.containers_found);
+                        println!("  📊 Total agents staged: {}", summary.containers_found);
 
                         if summary.workspaces_copied > 0 {
-                            println!("  ✅ Copied {} workspaces ({} files)", summary.workspaces_copied, summary.files_copied);
+                            println!("  ✅ Exported {} workspaces ({} files)", summary.workspaces_copied, summary.files_copied);
                             println!("\n  📂 Generated project saved to: {:?}", output_path);
 
                             println!("\n  📋 Files created:");
@@ -366,7 +377,7 @@ fn main() -> anyhow::Result<()> {
                                 println!("{}", String::from_utf8_lossy(&ls_output.stdout));
                             }
                         } else {
-                            println!("  ℹ️  No files found to save");
+                            println!("  ℹ️  No files found to save (staged workspaces may be empty)");
                         }
                     } else {
                         eprintln!("⚠️  --save-all requires --output-dir");
