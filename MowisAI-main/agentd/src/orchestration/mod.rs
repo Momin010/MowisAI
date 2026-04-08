@@ -7,6 +7,7 @@ pub mod scheduler;
 pub mod planner;
 pub mod checkpoint;
 pub mod merge_worker;
+pub mod merge_reviewer;
 pub mod verification;
 pub mod agent_execution;
 pub mod new_orchestrator;
