@@ -637,6 +637,7 @@ mod tests {
             merge_work_dir: temp_dir("e2e-merge"),
             max_agents: 10,
             max_verification_rounds: 1,
+            staging_dir: None,
         };
 
         let orchestrator = NewOrchestrator::new(config);

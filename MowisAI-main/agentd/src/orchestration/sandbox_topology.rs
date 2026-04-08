@@ -16,6 +16,15 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Staged workspace export before container destruction
+#[derive(Debug, Clone)]
+pub struct StagedWorkspace {
+    pub agent_id: String,
+    pub sandbox_name: String,
+    pub container_id: String,
+    pub staging_path: PathBuf,
+}
+
 /// Topology manager - coordinates with agentd socket
 #[derive(Debug)]
 pub struct TopologyManager {
@@ -36,6 +45,9 @@ pub struct TopologyManager {
 
     /// Project root path (for reference)
     project_root: PathBuf,
+
+    /// Staged workspaces for save-all (exported before container destruction)
+    staged_workspaces: Arc<RwLock<Vec<StagedWorkspace>>>,
 }
 
 impl TopologyManager {
@@ -55,6 +67,7 @@ impl TopologyManager {
             containers: Arc::new(RwLock::new(HashMap::new())),
             agent_sandboxes: Arc::new(RwLock::new(HashMap::new())),
             project_root,
+            staged_workspaces: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -424,6 +437,84 @@ impl TopologyManager {
         Ok(copied)
     }
 
+    /// Stage container workspace for later export (call this BEFORE destroy_agent_layer)
+    pub async fn stage_agent_workspace(&self, agent_id: &str, staging_root: &std::path::Path) -> Result<PathBuf> {
+        let containers = self.containers.read().await;
+        let container_id = containers
+            .get(agent_id)
+            .ok_or_else(|| anyhow!("Container not found for agent: {}", agent_id))?
+            .clone();
+        drop(containers);
+
+        let agent_sandboxes = self.agent_sandboxes.read().await;
+        let sandbox_name = agent_sandboxes
+            .get(agent_id)
+            .ok_or_else(|| anyhow!("Sandbox not found for agent: {}", agent_id))?
+            .clone();
+        drop(agent_sandboxes);
+
+        let sandboxes = self.sandboxes.read().await;
+        let sandbox_id = sandboxes
+            .get(&sandbox_name)
+            .ok_or_else(|| anyhow!("Sandbox not found: {}", sandbox_name))?
+            .clone();
+        drop(sandboxes);
+
+        // Create unique staging directory for this agent
+        let staging_dir = staging_root.join(format!("staged-{}", agent_id.replace(|c: char| !c.is_alphanumeric(), "_")));
+        std::fs::create_dir_all(&staging_dir)
+            .with_context(|| format!("Failed to create staging directory: {}", staging_dir.display()))?;
+
+        // Copy workspace contents via socket using read_file/list_files (synchronous via socket_roundtrip)
+        let files_copied = self.copy_workspace_dir_recursive(&sandbox_id, &container_id, "/workspace", &staging_dir)?;
+
+        // Record the staged workspace
+        let mut staged = self.staged_workspaces.write().await;
+        staged.push(StagedWorkspace {
+            agent_id: agent_id.to_string(),
+            sandbox_name: sandbox_name.clone(),
+            container_id: container_id.clone(),
+            staging_path: staging_dir.clone(),
+        });
+
+        println!("  📦 Staged {} files from agent {} workspace to {}", files_copied, &agent_id[..8], staging_dir.display());
+
+        Ok(staging_dir)
+    }
+
+    /// Export all staged workspaces to the final output directory
+    pub fn export_staged_workspaces(&self, output_dir: &std::path::Path) -> Result<HostWorkspaceExportSummary> {
+        std::fs::create_dir_all(output_dir)
+            .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+
+        // We need to block_on here because we're in a non-async context
+        let rt = tokio::runtime::Runtime::new()?;
+        let staged = rt.block_on(async {
+            self.staged_workspaces.read().await.clone()
+        });
+
+        let mut summary = HostWorkspaceExportSummary::default();
+        summary.containers_found = staged.len();
+
+        for staged_ws in staged {
+            if staged_ws.staging_path.exists() {
+                let files_copied = copy_dir_contents_recursive(&staged_ws.staging_path, output_dir)?;
+                summary.workspaces_copied += 1;
+                summary.files_copied += files_copied;
+                println!("  ✅ Exported staged workspace for agent {} ({} files)", &staged_ws.agent_id[..8], files_copied);
+            } else {
+                eprintln!("  ⚠️ Staged workspace not found: {}", staged_ws.staging_path.display());
+            }
+        }
+
+        Ok(summary)
+    }
+
+    /// Export from staging directory to output (used by CLI when staging was done during orchestration)
+    pub fn export_staged_to_output(&self, output_dir: &std::path::Path) -> Result<HostWorkspaceExportSummary> {
+        self.export_staged_workspaces(output_dir)
+    }
+
     /// Destroy agent layer (container) — called after agent completes task
     pub async fn destroy_agent_layer(&self, agent_id: &str) -> Result<()> {
         let mut containers = self.containers.write().await;
@@ -582,6 +673,44 @@ impl TopologyManager {
         // Not implemented - agentd doesn't expose agent count
         Ok(())
     }
+}
+
+/// Export staged workspaces from a staging directory to output (for CLI post-orchestration export)
+pub fn export_staged_workspaces_from_dir(
+    staging_dir: &std::path::Path,
+    output_dir: &std::path::Path,
+) -> Result<HostWorkspaceExportSummary> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+
+    if !staging_dir.exists() {
+        return Ok(HostWorkspaceExportSummary::default());
+    }
+
+    let mut summary = HostWorkspaceExportSummary::default();
+    let entries = std::fs::read_dir(staging_dir)
+        .with_context(|| format!("Failed to read staging directory: {}", staging_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        if !name.starts_with("staged-") || !path.is_dir() {
+            continue;
+        }
+
+        summary.containers_found += 1;
+
+        let files_copied = copy_dir_contents_recursive(&path, output_dir)?;
+        summary.workspaces_copied += 1;
+        summary.files_copied += files_copied;
+        println!("  ✅ Exported staged workspace {} ({} files)", name, files_copied);
+    }
+
+    Ok(summary)
 }
 
 /// Public info about sandbox layer
