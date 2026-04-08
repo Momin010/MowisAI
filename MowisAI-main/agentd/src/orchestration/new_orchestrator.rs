@@ -2,7 +2,7 @@
 
 use super::agent_execution::AgentExecutor;
 use super::checkpoint::CheckpointManager;
-use super::merge_worker::ParallelMergeCoordinator;
+use super::merge_reviewer::{AgentContribution, ConflictDetector, MergeReviewerAgent, parse_unified_diff};
 use super::planner::plan_task;
 use super::sandbox_topology::TopologyManager;
 use super::scheduler::{Scheduler, SchedulerStats};
@@ -46,6 +46,14 @@ pub struct OrchestratorConfig {
     pub max_verification_rounds: usize,
     /// Optional staging directory for save-all functionality
     pub staging_dir: Option<PathBuf>,
+}
+
+/// Carries an agent result alongside the human-readable task description
+/// so the merge reviewer can understand intent when resolving conflicts.
+#[derive(Debug, Clone)]
+struct AgentWorkResult {
+    result: AgentResult,
+    task_description: String,
 }
 
 /// New 7-layer orchestrator
@@ -106,7 +114,7 @@ impl NewOrchestrator {
         )?);
 
         let topology = Arc::new(topology);
-        let sandbox_agent_results = Arc::new(RwLock::new(HashMap::<SandboxName, Vec<AgentResult>>::new()));
+        let sandbox_agent_results = Arc::new(RwLock::new(HashMap::<SandboxName, Vec<AgentWorkResult>>::new()));
         let agent_count = Arc::new(RwLock::new(0usize));
 
         // Create a pool of agent worker tasks (TRUE PARALLELISM)
@@ -212,13 +220,16 @@ impl NewOrchestrator {
                                 eprintln!("[Worker {}] Failed to handle completion: {}", worker_id, e);
                             }
 
-                            // Store result
+                            // Store result alongside its task description for the merge reviewer
                             {
                                 let mut results = results_clone.write().await;
                                 results
                                     .entry(sandbox.name.clone())
                                     .or_insert_with(Vec::new)
-                                    .push(result.clone());
+                                    .push(AgentWorkResult {
+                                        result: result.clone(),
+                                        task_description: task_description.clone(),
+                                    });
                             }
 
                             // Stage workspace BEFORE destroying (for save-all functionality)
@@ -281,26 +292,32 @@ impl NewOrchestrator {
         let scheduler_stats = scheduler.get_stats().await;
         println!("  → Completed: {}/{} tasks", scheduler_stats.completed, scheduler_stats.total_tasks);
 
-        // Layer 5: Parallel Merge (per sandbox)
-        println!("Layer 5: Merging agent results per sandbox...");
-        let merge_coordinator = ParallelMergeCoordinator::new(
-            self.config.project_id.clone(),
-            self.config.merge_work_dir.clone(),
-            self.config.project_root.clone(),
-        )?;
-
+        // Layer 5: Intelligent Merge Review (per sandbox)
+        println!("Layer 5: Reviewing and merging agent contributions per sandbox...");
+        let reviewer = MergeReviewerAgent::new(self.config.project_id.clone());
         let mut sandbox_results = HashMap::new();
 
-        for (sandbox_name, agent_results) in &sandbox_agent_results {
-            let diffs: Vec<String> = agent_results
+        for (sandbox_name, agent_work_results) in &sandbox_agent_results {
+            // Build structured AgentContribution objects from work results
+            let contributions: Vec<AgentContribution> = agent_work_results
                 .iter()
-                .filter_map(|r| r.git_diff.clone())
-                .filter(|d| !d.is_empty()) // Skip empty diffs
+                .filter(|awr| awr.result.success)
+                .filter(|awr| awr.result.git_diff.as_ref().map_or(false, |d| !d.is_empty()))
+                .map(|awr| {
+                    let raw_diff = awr.result.git_diff.clone().unwrap_or_default();
+                    let file_changes = parse_unified_diff(&raw_diff);
+                    AgentContribution {
+                        agent_id: awr.result.task_id.clone(),
+                        task_id: awr.result.task_id.clone(),
+                        task_description: awr.task_description.clone(),
+                        file_changes,
+                        raw_diff,
+                    }
+                })
                 .collect();
 
-            if diffs.is_empty() {
+            if contributions.is_empty() {
                 println!("  → Sandbox {} has no changes", sandbox_name);
-                // Still create result even with no changes
                 sandbox_results.insert(
                     sandbox_name.clone(),
                     SandboxResult {
@@ -308,66 +325,66 @@ impl NewOrchestrator {
                         success: true,
                         merged_diff: None,
                         verification_status: VerificationStatus::NotStarted,
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
+                        timestamp: current_timestamp(),
                     },
                 );
                 continue;
             }
 
-            println!("  → Merging {} diffs for sandbox: {}", diffs.len(), sandbox_name);
+            println!(
+                "  → Reviewing {} agent contribution(s) for sandbox: {}",
+                contributions.len(),
+                sandbox_name
+            );
 
-            // Merge with timeout (5 minutes max per sandbox)
-            let merge_timeout = tokio::time::Duration::from_secs(300);
-            let merge_task = merge_coordinator.merge_diffs(diffs);
+            // Pre-collect raw diffs for fallback before consuming contributions
+            let fallback_diff = contributions
+                .iter()
+                .map(|c| c.raw_diff.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
 
-            match tokio::time::timeout(merge_timeout, merge_task).await {
-                Ok(Ok(merge_result)) => {
-                    sandbox_results.insert(
-                        sandbox_name.clone(),
-                        SandboxResult {
-                            sandbox_name: sandbox_name.clone(),
-                            success: merge_result.success,
-                            merged_diff: Some(merge_result.merged_diff),
-                            verification_status: VerificationStatus::NotStarted,
-                            timestamp: current_timestamp(),
-                        },
-                    );
+            // Detect conflicts between contributions
+            let conflicts = ConflictDetector::detect(&contributions);
+            if !conflicts.is_empty() {
+                println!("    → Detected {} conflict(s)", conflicts.len());
+            }
 
-                    println!(
-                        "    ✓ Merged with {} conflicts resolved",
-                        merge_result.conflicts_resolved
-                    );
+            // Review with 5-minute timeout
+            let review_timeout = tokio::time::Duration::from_secs(300);
+            let review_future = reviewer.review(contributions, conflicts);
+
+            let merged_diff = match tokio::time::timeout(review_timeout, review_future).await {
+                Ok(Ok(review_result)) => {
+                    println!("    ✓ {}", review_result.summary);
+                    review_result.final_diff
                 }
                 Ok(Err(e)) => {
-                    eprintln!("  ⚠️  Merge failed for {}: {}", sandbox_name, e);
-                    sandbox_results.insert(
-                        sandbox_name.clone(),
-                        SandboxResult {
-                            sandbox_name: sandbox_name.clone(),
-                            success: false,
-                            merged_diff: None,
-                            verification_status: VerificationStatus::Failed,
-                            timestamp: current_timestamp(),
-                        },
+                    eprintln!(
+                        "  ⚠️  Merge review failed for {}: {}. Falling back to concatenation.",
+                        sandbox_name, e
                     );
+                    fallback_diff
                 }
                 Err(_) => {
-                    eprintln!("  ⚠️  Merge timed out for {} after 5 minutes", sandbox_name);
-                    sandbox_results.insert(
-                        sandbox_name.clone(),
-                        SandboxResult {
-                            sandbox_name: sandbox_name.clone(),
-                            success: false,
-                            merged_diff: None,
-                            verification_status: VerificationStatus::Failed,
-                            timestamp: current_timestamp(),
-                        },
+                    eprintln!(
+                        "  ⚠️  Merge review timed out for {} after 5 minutes. Falling back to concatenation.",
+                        sandbox_name
                     );
+                    fallback_diff
                 }
-            }
+            };
+
+            sandbox_results.insert(
+                sandbox_name.clone(),
+                SandboxResult {
+                    sandbox_name: sandbox_name.clone(),
+                    success: true,
+                    merged_diff: Some(merged_diff),
+                    verification_status: VerificationStatus::NotStarted,
+                    timestamp: current_timestamp(),
+                },
+            );
         }
 
         // Layer 6: Verification Loop (SKIP for now - speeds up completion)
@@ -383,33 +400,66 @@ impl NewOrchestrator {
             verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
         }
 
-        // Layer 7: Cross-Sandbox Merge
-        println!("Layer 7: Final cross-sandbox merge...");
-        let all_sandbox_diffs: Vec<String> = sandbox_results
-            .values()
-            .filter_map(|r| r.merged_diff.clone())
-            .filter(|d| !d.is_empty())
+        // Layer 7: Cross-Sandbox Intelligent Merge
+        println!("Layer 7: Final cross-sandbox intelligent merge...");
+        let sandbox_diffs: Vec<(SandboxName, String)> = sandbox_results
+            .iter()
+            .filter_map(|(name, r)| {
+                r.merged_diff
+                    .as_ref()
+                    .filter(|d| !d.is_empty())
+                    .map(|d| (name.clone(), d.clone()))
+            })
             .collect();
 
-        let final_merge = if all_sandbox_diffs.len() > 1 {
-            println!("  → Merging {} sandbox results", all_sandbox_diffs.len());
-            // Merge with timeout
-            let merge_timeout = tokio::time::Duration::from_secs(300);
-            let merge_task = merge_coordinator.merge_diffs(all_sandbox_diffs.clone());
+        let final_merge = if sandbox_diffs.len() > 1 {
+            println!("  → Cross-sandbox review: {} sandbox diff(s)", sandbox_diffs.len());
 
-            match tokio::time::timeout(merge_timeout, merge_task).await {
-                Ok(Ok(merge_result)) => merge_result.merged_diff,
+            // Treat each sandbox's merged diff as an agent contribution
+            let cross_contributions: Vec<AgentContribution> = sandbox_diffs
+                .iter()
+                .map(|(sandbox_name, diff)| {
+                    let file_changes = parse_unified_diff(diff);
+                    AgentContribution {
+                        agent_id: sandbox_name.clone(),
+                        task_id: sandbox_name.clone(),
+                        task_description: format!("Merged output from sandbox '{}'", sandbox_name),
+                        file_changes,
+                        raw_diff: diff.clone(),
+                    }
+                })
+                .collect();
+
+            let fallback_diff = sandbox_diffs
+                .iter()
+                .map(|(_, d)| d.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let cross_conflicts = ConflictDetector::detect(&cross_contributions);
+            if !cross_conflicts.is_empty() {
+                println!("  → Detected {} cross-sandbox conflict(s)", cross_conflicts.len());
+            }
+
+            let merge_timeout = tokio::time::Duration::from_secs(300);
+            let review_future = reviewer.review(cross_contributions, cross_conflicts);
+
+            match tokio::time::timeout(merge_timeout, review_future).await {
+                Ok(Ok(review_result)) => {
+                    println!("  → {}", review_result.summary);
+                    review_result.final_diff
+                }
                 Ok(Err(e)) => {
-                    eprintln!("  ⚠️  Cross-sandbox merge failed: {}", e);
-                    all_sandbox_diffs.into_iter().next().unwrap_or_default()
+                    eprintln!("  ⚠️  Cross-sandbox review failed: {}. Using concatenation.", e);
+                    fallback_diff
                 }
                 Err(_) => {
-                    eprintln!("  ⚠️  Cross-sandbox merge timed out");
-                    all_sandbox_diffs.into_iter().next().unwrap_or_default()
+                    eprintln!("  ⚠️  Cross-sandbox review timed out. Using concatenation.");
+                    fallback_diff
                 }
             }
-        } else if all_sandbox_diffs.len() == 1 {
-            all_sandbox_diffs.into_iter().next().unwrap()
+        } else if sandbox_diffs.len() == 1 {
+            sandbox_diffs.into_iter().next().map(|(_, d)| d).unwrap_or_default()
         } else {
             String::new()
         };
