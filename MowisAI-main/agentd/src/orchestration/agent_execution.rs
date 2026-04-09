@@ -99,11 +99,26 @@ impl AgentExecutor {
                         e
                     );
 
-                    // Tier 2: Agent crash recovery
-                    // NOTE: Checkpoint restoration requires agentd API support
-                    // For now, we just log the attempt and continue
-                    if let Some(_last_checkpoint) = checkpoint_log.latest() {
-                        eprintln!("Note: Checkpoint restoration not yet implemented (requires agentd support)");
+                    // Tier 2: Restore from last checkpoint
+                    if let Some(last_checkpoint) = checkpoint_log.latest() {
+                        let upper_dir_str = format!(
+                            "/sandbox/{}/container/{}/upper",
+                            agent.sandbox_name, agent.container_id
+                        );
+                        let upper_dir = Path::new(&upper_dir_str);
+                        let snapshot_path = PathBuf::from(&last_checkpoint.layer_snapshot_path);
+
+                        if snapshot_path.exists() {
+                            match self.checkpoint_manager.restore_snapshot(upper_dir, &snapshot_path) {
+                                Ok(()) => {
+                                    println!("  ✓ Restored checkpoint {} for agent {}",
+                                        last_checkpoint.id, &agent.agent_id[..8]);
+                                }
+                                Err(restore_err) => {
+                                    eprintln!("  ⚠ Checkpoint restore failed: {}", restore_err);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
