@@ -18,7 +18,6 @@ pub mod guest_backend;
 pub mod vm_backend;
 pub mod memory;
 pub mod orchestration;
-pub mod orchestrator;
 pub mod persistence;
 pub mod protocol;
 pub mod sandbox;

@@ -63,20 +63,6 @@ enum Commands {
         #[arg(long, default_value = "/tmp/agentd.sock")]
         socket: String,
     },
-    /// Multi-sandbox orchestration (Gemini plan + parallel agents + synthesis) - OLD SYSTEM
-    Orchestrate {
-        #[arg(long)]
-        prompt: String,
-        #[arg(long)]
-        project: String,
-        #[arg(long, default_value = "/tmp/agentd.sock")]
-        socket: String,
-        #[arg(long, default_value_t = 10)]
-        max_agents: usize,
-        /// Verbose logging (HTTP/socket payloads, round timings, etc.)
-        #[arg(long, default_value_t = false)]
-        debug: bool,
-    },
     /// NEW 7-layer orchestration system (fast planner + event-driven scheduler + checkpoints)
     OrchestrateNew {
         #[arg(long)]
@@ -109,24 +95,6 @@ enum Commands {
         /// Save all agent changes to host filesystem (use with --output-dir)
         #[arg(long, default_value_t = false)]
         save_all: bool,
-    },
-    /// Same as orchestrate, but stay in-process: enter follow-ups without exiting (reuses sandboxes by team name)
-    OrchestrateInteractive {
-        #[arg(long)]
-        project: String,
-        #[arg(long, default_value = "/tmp/agentd.sock")]
-        socket: String,
-        #[arg(long, default_value_t = 10)]
-        max_agents: usize,
-        /// Persist transcript, context, sandbox map, and warm container ids (JSON). Also used with `--resume`.
-        #[arg(long, value_name = "PATH")]
-        session_file: Option<PathBuf>,
-        /// Load `--session-file` and continue the REPL (skips the initial task prompt).
-        #[arg(long, default_value_t = false)]
-        resume: bool,
-        /// Verbose logging (HTTP/socket payloads, round timings, etc.)
-        #[arg(long, default_value_t = false)]
-        debug: bool,
     },
     /// Run full orchestration simulation with mock agents (no LLM calls, $0 cost testing)
     Simulate {
@@ -197,18 +165,6 @@ fn main() -> anyhow::Result<()> {
             socket,
         } => {
             libagent::vertex_agent::run(&prompt, &project, &socket)?;
-        }
-        Commands::Orchestrate {
-            prompt: _,
-            project: _,
-            socket: _,
-            max_agents: _,
-            debug: _,
-        } => {
-            eprintln!("❌ ERROR: The old Orchestrate command is deprecated.");
-            eprintln!("   Please use 'orchestrate-new' instead:");
-            eprintln!("   agentd orchestrate-new --prompt \"...\" --project ... --socket ...");
-            std::process::exit(1);
         }
         Commands::OrchestrateNew {
             prompt,
@@ -342,6 +298,13 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
 
+                if !output.execution_errors.is_empty() {
+                    println!("\n🚨 Execution Errors ({}):", output.execution_errors.len());
+                    for error in &output.execution_errors {
+                        println!("  ❌ {}", error);
+                    }
+                }
+
                 if !output.merged_diff.is_empty() {
                     println!("\n📝 Final merged diff ({} bytes)", output.merged_diff.len());
                     println!("\n{}", output.merged_diff);
@@ -386,20 +349,6 @@ fn main() -> anyhow::Result<()> {
 
                 println!("\n✅ Orchestration complete!");
             }
-        }
-        Commands::OrchestrateInteractive {
-            project: _,
-            socket: _,
-            max_agents: _,
-            session_file: _,
-            resume: _,
-            debug: _,
-        } => {
-            eprintln!("❌ ERROR: The old OrchestrateInteractive command is deprecated.");
-            eprintln!("   The new 7-layer orchestration system doesn't support interactive mode yet.");
-            eprintln!("   Please use 'orchestrate-new' instead:");
-            eprintln!("   agentd orchestrate-new --prompt \"...\" --project ... --socket ...");
-            std::process::exit(1);
         }
         Commands::Simulate {
             socket,

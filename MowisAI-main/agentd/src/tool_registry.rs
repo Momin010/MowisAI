@@ -331,6 +331,21 @@ impl ToolRegistry {
         // Legacy echo tool
         tools.insert("echo", crate::tools::create_echo_tool as ToolFactory);
 
+        // Search tools (4)
+        tools.insert("grep", crate::tools::create_grep_tool as ToolFactory);
+        tools.insert(
+            "find_files",
+            crate::tools::create_find_files_tool as ToolFactory,
+        );
+        tools.insert(
+            "search_code",
+            crate::tools::create_search_code_tool as ToolFactory,
+        );
+        tools.insert(
+            "read_multiple_files",
+            crate::tools::create_read_multiple_files_tool as ToolFactory,
+        );
+
         ToolRegistry {
             tools: Mutex::new(tools),
         }

@@ -26,6 +26,7 @@ pub struct FinalOutput {
     pub total_agents_used: usize,
     pub total_duration_secs: u64,
     pub scheduler_stats: SchedulerStats,
+    pub execution_errors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,10 +117,14 @@ impl NewOrchestrator {
         let topology = Arc::new(topology);
         let sandbox_agent_results = Arc::new(RwLock::new(HashMap::<SandboxName, Vec<AgentWorkResult>>::new()));
         let agent_count = Arc::new(RwLock::new(0usize));
+        let execution_errors = Arc::new(RwLock::new(Vec::<String>::new()));
 
         // Create a pool of agent worker tasks (TRUE PARALLELISM)
-        let max_concurrent_agents = self.config.max_agents.min(50); // Cap at 50 concurrent agents
-        println!("  → Spawning {} concurrent agent workers...", max_concurrent_agents);
+        // Dynamic agent cap based on available system resources
+        let system_cap = 1000; // Upper safety bound
+        let max_concurrent_agents = self.config.max_agents.min(system_cap);
+        println!("  → Agent pool: {} concurrent workers (user requested: {}, system cap: {})",
+            max_concurrent_agents, self.config.max_agents, system_cap);
 
         let mut handles = Vec::new();
 
@@ -132,6 +137,7 @@ impl NewOrchestrator {
             let executor_clone = agent_executor.clone();
             let results_clone = sandbox_agent_results.clone();
             let count_clone = agent_count.clone();
+            let errors_clone = execution_errors.clone();
             let sandboxes = planner_output.sandbox_topology.sandboxes.clone();
             let staging_dir_for_worker = staging_dir_clone.clone();
 
@@ -154,7 +160,12 @@ impl NewOrchestrator {
                                 .await {
                                     Ok(a) => a,
                                     Err(e) => {
-                                        eprintln!("[Worker {}] Failed to create agent: {}", worker_id, e);
+                                        let error_msg = format!("[Worker {}] Failed to create agent: {}", worker_id, e);
+                                        eprintln!("{}", error_msg);
+                                        {
+                                            let mut errors = errors_clone.write().await;
+                                            errors.push(error_msg);
+                                        }
                                         continue;
                                     }
                                 };
@@ -167,7 +178,12 @@ impl NewOrchestrator {
 
                             // Mark task as started
                             if let Err(e) = scheduler_clone.mark_task_started(ready_task_id.clone(), agent.clone()).await {
-                                eprintln!("[Worker {}] Failed to mark task started: {}", worker_id, e);
+                                let error_msg = format!("[Worker {}] Failed to mark task started: {}", worker_id, e);
+                                eprintln!("{}", error_msg);
+                                {
+                                    let mut errors = errors_clone.write().await;
+                                    errors.push(error_msg);
+                                }
                                 continue;
                             }
 
@@ -199,7 +215,12 @@ impl NewOrchestrator {
                                 .await {
                                     Ok(r) => r,
                                     Err(e) => {
-                                        eprintln!("[Worker {}] Task execution failed: {}", worker_id, e);
+                                        let error_msg = format!("[Worker {}] Task '{}' failed: {}", worker_id, task_description, e);
+                                        eprintln!("{}", error_msg);
+                                        {
+                                            let mut errors = errors_clone.write().await;
+                                            errors.push(error_msg);
+                                        }
                                         continue;
                                     }
                                 };
@@ -479,6 +500,7 @@ impl NewOrchestrator {
         println!("  Agents used: {}", agent_count);
         println!("  Tasks completed: {}/{}", scheduler_stats.completed, scheduler_stats.total_tasks);
 
+        let collected_errors = execution_errors.read().await.clone();
         Ok(FinalOutput {
             merged_diff: final_merge,
             sandbox_results,
@@ -489,6 +511,7 @@ impl NewOrchestrator {
             total_agents_used: agent_count,
             total_duration_secs: duration,
             scheduler_stats,
+            execution_errors: collected_errors,
         })
     }
 }

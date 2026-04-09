@@ -1025,6 +1025,58 @@ pub(crate) fn gemini_tool_declarations() -> serde_json::Value {
                 },
                 "required": ["message"]
             }
+        },
+        {
+            "name": "grep",
+            "description": "Search files for a regex pattern recursively.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Regex pattern to search for" },
+                    "path": { "type": "string", "description": "Directory path to search" },
+                    "include": { "type": "string", "description": "Optional file glob filter (e.g. *.rs)" },
+                    "max_results": { "type": "integer", "description": "Optional max results (default 100)" }
+                },
+                "required": ["pattern", "path"]
+            }
+        },
+        {
+            "name": "find_files",
+            "description": "Find files matching a name pattern in a directory tree.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Glob/name pattern to match files" },
+                    "path": { "type": "string", "description": "Directory to search" },
+                    "max_depth": { "type": "integer", "description": "Optional max directory depth (default 10)" }
+                },
+                "required": ["pattern", "path"]
+            }
+        },
+        {
+            "name": "search_code",
+            "description": "Case-insensitive substring search across source files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search string (case-insensitive)" },
+                    "path": { "type": "string", "description": "Directory to search" },
+                    "include": { "type": "string", "description": "Optional file glob filter (e.g. *.rs)" },
+                    "context_lines": { "type": "integer", "description": "Optional context lines around match (default 2)" }
+                },
+                "required": ["query", "path"]
+            }
+        },
+        {
+            "name": "read_multiple_files",
+            "description": "Read multiple files in one call and return their contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": { "type": "array", "description": "Array of file paths to read" }
+                },
+                "required": ["paths"]
+            }
         }
     ])
 }
