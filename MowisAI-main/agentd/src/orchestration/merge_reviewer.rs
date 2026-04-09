@@ -463,7 +463,7 @@ impl MergeReviewerAgent {
                 "No conflicts detected. Auto-accepted {} files.",
                 files_accepted
             );
-            println!("✅ MergeReviewer: {}", summary);
+            log::info!("✅ MergeReviewer: {}", summary);
             return Ok(ReviewResult {
                 decisions: all_decisions,
                 final_diff,
@@ -475,7 +475,7 @@ impl MergeReviewerAgent {
         }
 
         // Phase 2 — Resolve conflicts with ONE Gemini call
-        println!(
+        log::info!(
             "🔍 MergeReviewer: Sending {} conflict(s) to Gemini for review...",
             conflicts.len()
         );
@@ -524,7 +524,7 @@ impl MergeReviewerAgent {
             files_rejected
         );
 
-        println!("✅ MergeReviewer: {}", summary);
+        log::info!("✅ MergeReviewer: {}", summary);
 
         Ok(ReviewResult {
             decisions: all_decisions,
@@ -663,7 +663,7 @@ Output ONLY the JSON array, no other text."#,
                 let body = response.text().await.unwrap_or_default();
                 let err = anyhow!("Gemini API returned {}: {}", status, body);
                 if attempt < self.max_retries - 1 {
-                    println!("⚠️  MergeReviewer attempt {}/{} failed: {}", attempt + 1, self.max_retries, status);
+                    log::info!("⚠️  MergeReviewer attempt {}/{} failed: {}", attempt + 1, self.max_retries, status);
                     tokio::time::sleep(tokio::time::Duration::from_secs(2u64.pow(attempt as u32))).await;
                     last_err = Some(err);
                     continue;
@@ -712,7 +712,7 @@ fn parse_llm_decisions(
     let items: Vec<serde_json::Value> = match serde_json::from_str(cleaned) {
         Ok(v) => v,
         Err(e) => {
-            println!("⚠️  MergeReviewer: failed to parse LLM JSON response: {}", e);
+            log::info!("⚠️  MergeReviewer: failed to parse LLM JSON response: {}", e);
             return fallback_decisions(conflicts);
         }
     };
@@ -758,7 +758,7 @@ fn parse_llm_decisions(
     for conflict in conflicts {
         if !decisions.iter().any(|d| d.file_path == conflict.file_path) {
             let fallback_agent = conflict.agents_involved.first().cloned().unwrap_or_default();
-            println!(
+            log::info!(
                 "⚠️  MergeReviewer: LLM did not decide on '{}' — falling back to first agent",
                 conflict.file_path
             );
@@ -858,26 +858,7 @@ fn synthesize_diff_from_content(file_path: &str, content: &str) -> String {
 mod tests {
     use super::*;
 
-    const SAMPLE_DIFF: &str = r#"diff --git a/src/main.rs b/src/main.rs
-index abc1234..def5678 100644
---- a/src/main.rs
-+++ b/src/main.rs
-@@ -1,5 +1,7 @@
- fn main() {
--    println!("hello");
-+    println!("hello, world");
-+    println!("goodbye");
- }
-diff --git a/src/lib.rs b/src/lib.rs
-new file mode 100644
-index 0000000..abc1234
---- /dev/null
-+++ b/src/lib.rs
-@@ -0,0 +1,3 @@
-+pub fn greet() {
-+    println!("hi");
-+}
-"#;
+    const SAMPLE_DIFF: &str = "diff --git a/src/main.rs b/src/main.rs\nindex abc1234..def5678 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,5 +1,7 @@\n fn main() {\n-    println!(\"hello\");\n+    println!(\"hello, world\");\n+    println!(\"goodbye\");\n }\ndiff --git a/src/lib.rs b/src/lib.rs\nnew file mode 100644\nindex 0000000..abc1234\n--- /dev/null\n+++ b/src/lib.rs\n@@ -0,0 +1,3 @@\n+pub fn greet() {\n+    println!(\"hi\");\n+}\n";
 
     #[test]
     fn test_parse_unified_diff_basic() {

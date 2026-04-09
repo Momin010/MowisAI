@@ -24,9 +24,9 @@ fn main() -> Result<()> {
     let socket_ready = start_socket_server(&socket_path);
 
     if !socket_ready {
-        eprintln!("  \u{26a0} Socket server failed to start at {}", socket_path);
-        eprintln!("  Chat mode will work, but orchestration requires the socket server.");
-        eprintln!("  Try running with sudo for overlayfs support.");
+        log::warn!("Socket server failed to start at {}", socket_path);
+        log::warn!("Chat mode will work, but orchestration requires the socket server.");
+        log::warn!("Try running with sudo for overlayfs support.");
     }
 
     libagent::tui::run_interactive(config)?;
@@ -42,7 +42,7 @@ fn start_socket_server(socket_path: &str) -> bool {
         .name("socket-server".into())
         .spawn(move || {
             if let Err(e) = libagent::socket_server::run_server(&path) {
-                eprintln!("Socket server error: {}", e);
+                log::error!("Socket server error: {}", e);
             }
         })
         .ok();

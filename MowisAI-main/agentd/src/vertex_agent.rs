@@ -28,23 +28,23 @@ pub fn run(prompt: &str, project_id: &str, socket_path: &str) -> Result<()> {
 
 #[cfg(unix)]
 fn run_inner(prompt: &str, project_id: &str, socket_path: &str) -> Result<()> {
-    println!("[vertex] creating sandbox via {} …", socket_path);
+    log::info!("[vertex] creating sandbox via {} …", socket_path);
     let create_sb = json!({
         "request_type": "create_sandbox",
         "image": "alpine"
     });
     let sb_resp = socket_roundtrip(socket_path, &create_sb)?;
     let sandbox_id = parse_ok_field(&sb_resp, "sandbox").context("create_sandbox")?;
-    println!("[vertex] sandbox id {}", sandbox_id);
+    log::info!("[vertex] sandbox id {}", sandbox_id);
 
-    println!("[vertex] creating container…");
+    log::info!("[vertex] creating container…");
     let create_ct = json!({
         "request_type": "create_container",
         "sandbox": &sandbox_id
     });
     let ct_resp = socket_roundtrip(socket_path, &create_ct)?;
     let container_id = parse_ok_field(&ct_resp, "container").context("create_container")?;
-    println!("[vertex] container id {}", container_id);
+    log::info!("[vertex] container id {}", container_id);
 
     let url = format!(
         "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent",
@@ -79,7 +79,7 @@ fn run_inner(prompt: &str, project_id: &str, socket_path: &str) -> Result<()> {
             }
         });
 
-        println!("[vertex] → Gemini (round {}) …", round + 1);
+        log::info!("[vertex] → Gemini (round {}) …", round + 1);
         let token = gcloud_access_token()?;
         let http_resp = client
             .post(&url)
@@ -130,12 +130,12 @@ fn run_inner(prompt: &str, project_id: &str, socket_path: &str) -> Result<()> {
                     .unwrap_or("")
                     .to_string();
                 let args = fc.get("args").cloned().unwrap_or(json!({}));
-                println!("[tool-call] {} {}", name, args);
+                log::info!("[tool-call] {} {}", name, args);
                 function_calls.push((name, args));
                 model_parts.push(part.clone());
             } else if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
                 if !t.is_empty() {
-                    println!("[model]\n{}", t);
+                    log::info!("[model]\n{}", t);
                 }
                 model_parts.push(part.clone());
             } else {
@@ -144,7 +144,7 @@ fn run_inner(prompt: &str, project_id: &str, socket_path: &str) -> Result<()> {
         }
 
         if function_calls.is_empty() {
-            println!("[vertex] done (no further tool calls).");
+            log::info!("[vertex] done (no further tool calls).");
             return Ok(());
         }
 
@@ -162,7 +162,7 @@ fn run_inner(prompt: &str, project_id: &str, socket_path: &str) -> Result<()> {
                 &name,
                 &args,
             )?;
-            println!("[tool-result] {} → {}", name, tool_result);
+            log::info!("[tool-result] {} → {}", name, tool_result);
             response_parts.push(json!({
                 "functionResponse": {
                     "name": name,

@@ -45,10 +45,10 @@ impl MockAgentExecutor {
         topology: &TopologyManager,
     ) -> Result<AgentResult> {
         if self.verbose {
-            println!("\n┌─────────────────────────────────────────────────────────");
-            println!("│ 🤖 MOCK AGENT: {}", &agent.agent_id[..8]);
-            println!("│ 📋 TASK: {} / {}", task_index + 1, total_tasks);
-            println!("└─────────────────────────────────────────────────────────");
+            log::info!("\n┌─────────────────────────────────────────────────────────");
+            log::info!("│ 🤖 MOCK AGENT: {}", &agent.agent_id[..8]);
+            log::info!("│ 📋 TASK: {} / {}", task_index + 1, total_tasks);
+            log::info!("└─────────────────────────────────────────────────────────");
         }
 
         let sandbox_id = &agent.sandbox_name;
@@ -83,8 +83,8 @@ impl MockAgentExecutor {
         let write_result = super::socket_roundtrip(topology.socket_path(), &write_request)?;
 
         if self.verbose {
-            println!("  🔧 Mock tool: write_file /workspace/file_{}.js", task_index);
-            println!("  ✅ Success");
+            log::info!("  🔧 Mock tool: write_file /workspace/file_{}.js", task_index);
+            log::info!("  ✅ Success");
         }
 
         checkpoints.push(Checkpoint {
@@ -113,8 +113,8 @@ impl MockAgentExecutor {
         let ls_result = super::socket_roundtrip(topology.socket_path(), &ls_request)?;
 
         if self.verbose {
-            println!("  🔧 Mock tool: run_command ls -la");
-            println!("  ✅ Success");
+            log::info!("  🔧 Mock tool: run_command ls -la");
+            log::info!("  ✅ Success");
         }
 
         checkpoints.push(Checkpoint {
@@ -143,14 +143,14 @@ impl MockAgentExecutor {
 
         if self.verbose {
             if !git_diff.is_empty() {
-                println!("\n  📝 DIFF GENERATED ({} bytes):", git_diff.len());
-                println!("  ┌─────────────────────────────────────────");
+                log::info!("\n  📝 DIFF GENERATED ({} bytes):", git_diff.len());
+                log::info!("  ┌─────────────────────────────────────────");
                 for line in git_diff.lines().take(10) {
-                    println!("  │ {}", line);
+                    log::info!("  │ {}", line);
                 }
-                println!("  └─────────────────────────────────────────");
+                log::info!("  └─────────────────────────────────────────");
             } else {
-                println!("\n  ℹ️  No changes detected");
+                log::info!("\n  ℹ️  No changes detected");
             }
         }
 

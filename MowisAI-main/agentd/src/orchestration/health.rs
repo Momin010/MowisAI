@@ -97,7 +97,7 @@ impl HealthMonitor {
 
         if cb.consecutive_failures >= self.failure_threshold {
             if cb.state != CircuitState::Open {
-                eprintln!(
+                log::warn!(
                     "[HealthMonitor] Circuit OPEN for sandbox {} after {} consecutive failures",
                     sandbox_name, cb.consecutive_failures
                 );
@@ -116,7 +116,7 @@ impl HealthMonitor {
         cb.consecutive_failures = 0;
 
         if cb.state == CircuitState::HalfOpen || cb.state == CircuitState::Open {
-            println!(
+            log::info!(
                 "[HealthMonitor] Circuit CLOSED for sandbox {} after success",
                 sandbox_name
             );
@@ -138,7 +138,7 @@ impl HealthMonitor {
             CircuitState::Open => {
                 // Transition to HalfOpen after recovery_timeout_secs
                 if now.saturating_sub(cb.last_failure_time) >= self.recovery_timeout_secs {
-                    println!(
+                    log::info!(
                         "[HealthMonitor] Circuit HALF-OPEN for sandbox {} (testing recovery)",
                         sandbox_name
                     );

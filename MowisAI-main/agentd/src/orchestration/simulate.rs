@@ -54,14 +54,14 @@ impl SimulateCommand {
     pub async fn run(&self) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        println!("🚀 MowisAI Orchestration Simulation");
-        println!("═══════════════════════════════════");
-        println!("📋 Tasks: {}", self.tasks);
-        println!("📦 Sandboxes: {}", self.sandboxes);
-        println!("🤖 Max agents: {}", self.max_agents);
-        println!("⚡ Failure rate: {}%", self.failure_rate * 100.0);
-        println!("⏱️  Tool delay: {}ms", self.tool_delay);
-        println!("═══════════════════════════════════\n");
+        log::info!("🚀 MowisAI Orchestration Simulation");
+        log::info!("═══════════════════════════════════");
+        log::info!("📋 Tasks: {}", self.tasks);
+        log::info!("📦 Sandboxes: {}", self.sandboxes);
+        log::info!("🤖 Max agents: {}", self.max_agents);
+        log::info!("⚡ Failure rate: {}%", self.failure_rate * 100.0);
+        log::info!("⏱️  Tool delay: {}ms", self.tool_delay);
+        log::info!("═══════════════════════════════════\n");
 
         // Create project directory if it doesn't exist
         std::fs::create_dir_all(&self.project_root)?;
@@ -89,7 +89,7 @@ impl SimulateCommand {
             .current_dir(&self.project_root)
             .output()?;
 
-        println!("Layer 1: Generating mock task graph...");
+        log::info!("Layer 1: Generating mock task graph...");
 
         // Generate mock task graph with dependencies
         let mut tasks = Vec::new();
@@ -119,9 +119,9 @@ impl SimulateCommand {
 
         let task_graph = TaskGraph { tasks };
 
-        println!("  → Generated {} tasks", task_graph.tasks.len());
+        log::info!("  → Generated {} tasks", task_graph.tasks.len());
 
-        println!("\nLayer 2: Creating sandbox topology...");
+        log::info!("\nLayer 2: Creating sandbox topology...");
 
         let topology = TopologyManager::new(
             self.project_root.clone(),
@@ -146,13 +146,13 @@ impl SimulateCommand {
             sandbox_configs.push(config);
         }
 
-        println!("\nLayer 3: Initializing scheduler...");
+        log::info!("\nLayer 3: Initializing scheduler...");
 
         let scheduler = Arc::new(Scheduler::new(task_graph, sandbox_hints)?);
 
-        println!("  → Scheduler ready");
+        log::info!("  → Scheduler ready");
 
-        println!("\nLayer 4: Executing tasks with mock agents...");
+        log::info!("\nLayer 4: Executing tasks with mock agents...");
 
         let mock_executor = Arc::new(MockAgentExecutor::new(
             self.failure_rate,
@@ -167,7 +167,7 @@ impl SimulateCommand {
 
         let mut handles = Vec::new();
 
-        println!("  → Spawning {} mock agent workers...", self.max_agents);
+        log::info!("  → Spawning {} mock agent workers...", self.max_agents);
 
         for worker_id in 0..self.max_agents {
             let scheduler_clone = scheduler.clone();
@@ -191,13 +191,13 @@ impl SimulateCommand {
                                 .await {
                                     Ok(a) => a,
                                     Err(e) => {
-                                        eprintln!("[Worker {}] Failed to create agent: {}", worker_id, e);
+                                        log::warn!("[Worker {}] Failed to create agent: {}", worker_id, e);
                                         continue;
                                     }
                                 };
 
                             if let Err(e) = scheduler_clone.mark_task_started(ready_task_id.clone(), agent.clone()).await {
-                                eprintln!("[Worker {}] Failed to mark task started: {}", worker_id, e);
+                                log::warn!("[Worker {}] Failed to mark task started: {}", worker_id, e);
                                 continue;
                             }
 
@@ -206,7 +206,7 @@ impl SimulateCommand {
                                 .await {
                                     Ok(r) => r,
                                     Err(e) => {
-                                        eprintln!("[Worker {}] Task execution failed: {}", worker_id, e);
+                                        log::warn!("[Worker {}] Task execution failed: {}", worker_id, e);
                                         continue;
                                     }
                                 };
@@ -216,19 +216,19 @@ impl SimulateCommand {
                                 if let Some(ref diff) = result.git_diff {
                                     if !diff.is_empty() {
                                         if let Err(e) = topology_clone.apply_diff_to_sandbox(&sandbox.name, diff).await {
-                                            eprintln!("[Worker {}] Failed to apply diff: {}", worker_id, e);
+                                            log::warn!("[Worker {}] Failed to apply diff: {}", worker_id, e);
                                         }
                                     }
                                 }
                             }
 
                             if let Err(e) = scheduler_clone.handle_task_completion(result.clone()).await {
-                                eprintln!("[Worker {}] Failed to handle completion: {}", worker_id, e);
+                                log::warn!("[Worker {}] Failed to handle completion: {}", worker_id, e);
                             }
 
                             let _ = topology_clone.destroy_agent_layer(&agent.agent_id).await;
 
-                            println!("    ✓ [Worker {}] Completed task {}", worker_id, idx + 1);
+                            log::info!("    ✓ [Worker {}] Completed task {}", worker_id, idx + 1);
 
                             break;
                         }
@@ -247,7 +247,7 @@ impl SimulateCommand {
             handles.push(handle);
         }
 
-        println!("  → Waiting for all tasks to complete...\n");
+        log::info!("  → Waiting for all tasks to complete...\n");
 
         for handle in handles {
             let _ = handle.await;
@@ -256,23 +256,23 @@ impl SimulateCommand {
         let stats = scheduler.get_stats().await;
         let duration = start_time.elapsed();
 
-        println!("\n✅ Simulation complete!");
-        println!("═══════════════════════════════════");
-        println!("⏱️  Total time: {:?}", duration);
-        println!("✅ Completed: {} tasks", stats.completed);
-        println!("❌ Failed: {} tasks", stats.failed);
-        println!("📊 Success rate: {:.1}%", (stats.completed as f64 / stats.total_tasks as f64) * 100.0);
-        println!("═══════════════════════════════════");
+        log::info!("\n✅ Simulation complete!");
+        log::info!("═══════════════════════════════════");
+        log::info!("⏱️  Total time: {:?}", duration);
+        log::info!("✅ Completed: {} tasks", stats.completed);
+        log::info!("❌ Failed: {} tasks", stats.failed);
+        log::info!("📊 Success rate: {:.1}%", (stats.completed as f64 / stats.total_tasks as f64) * 100.0);
+        log::info!("═══════════════════════════════════");
 
         if stats.failed > 0 {
-            println!("\nFailed tasks:");
+            log::info!("\nFailed tasks:");
             for (task_id, error) in scheduler.get_failed_tasks().await {
-                println!("  - {}: {}", task_id, error);
+                log::info!("  - {}: {}", task_id, error);
             }
         }
 
         // Cleanup
-        println!("\n🧹 Cleaning up sandboxes...");
+        log::info!("\n🧹 Cleaning up sandboxes...");
         for sandbox in &sandbox_configs {
             let _ = topology.destroy_sandbox_layer(&sandbox.name).await;
         }

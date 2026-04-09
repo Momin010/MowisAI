@@ -97,7 +97,7 @@ pub(crate) fn trace(msg: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    println!("[orchestration:{}] {}", ts, msg);
+    log::info!("[orchestration:{}] {}", ts, msg);
 }
 
 // ── Vertex / gcloud (shared by planner, agent_runner, orchestrator) ────────
@@ -1205,7 +1205,7 @@ pub(crate) fn socket_roundtrip(
 
         if status == "error" {
             if let Some(error_msg) = parsed.get("error").and_then(|e| e.as_str()) {
-                eprintln!("⚠️  Socket error for {}: {}", req_type, error_msg);
+                log::warn!("⚠️  Socket error for {}: {}", req_type, error_msg);
             }
         }
 

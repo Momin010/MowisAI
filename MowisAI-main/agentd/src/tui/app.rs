@@ -3,6 +3,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::mpsc;
 use super::event::{OrchActivityEvent, TuiEvent};
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum MainView {
+    Chat,
+    Orchestration,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: MessageRole,
@@ -41,6 +47,11 @@ pub struct App {
     pub orchestrating: bool,
     pub conversation_history: Vec<serde_json::Value>,
     pub cwd: String,
+    pub view_mode: MainView,
+    pub orch_log: Vec<String>,
+    pub orch_layer: u8,
+    pub orch_completed: usize,
+    pub orch_total: usize,
 }
 
 impl App {
@@ -64,6 +75,11 @@ impl App {
             orchestrating: false,
             conversation_history: Vec::new(),
             cwd,
+            view_mode: MainView::Chat,
+            orch_log: Vec::new(),
+            orch_layer: 0,
+            orch_completed: 0,
+            orch_total: 0,
         };
 
         app.messages.push(ChatMessage {
@@ -90,6 +106,15 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+
+        // Tab always toggles view during orchestration
+        if key.code == KeyCode::Tab && self.orchestrating {
+            self.view_mode = match self.view_mode {
+                MainView::Chat => MainView::Orchestration,
+                MainView::Orchestration => MainView::Chat,
+            };
             return;
         }
 
@@ -275,6 +300,11 @@ impl App {
         self.orchestrating = true;
         self.is_loading = true;
         self.agents.clear();
+        self.orch_log.clear();
+        self.orch_layer = 0;
+        self.orch_completed = 0;
+        self.orch_total = 0;
+        self.view_mode = MainView::Orchestration;
 
         let config = self.config.clone();
         let tx = self.event_tx.clone();
@@ -343,6 +373,13 @@ impl App {
                                     layer: *layer,
                                     message: message.clone(),
                                 }),
+                                crate::orchestration::OrchestratorEvent::StatsUpdate { stats } => {
+                                    TuiEvent::OrchEvent(OrchActivityEvent::StatsUpdate {
+                                        total: stats.total_tasks,
+                                        completed: stats.completed,
+                                        failed: stats.failed,
+                                    })
+                                }
                                 crate::orchestration::OrchestratorEvent::Done => continue,
                                 _ => continue,
                             };
@@ -439,9 +476,14 @@ impl App {
                     current_tool: None,
                     elapsed_secs: 0,
                 });
+                let msg = format!("\u{25b8} Agent started: {}", description);
+                self.orch_log.push(msg.clone());
+                if self.orch_log.len() > 200 {
+                    self.orch_log.remove(0);
+                }
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: format!("  \u{25b8} Agent started: {}", description),
+                    content: format!("  {}", msg),
                     timestamp: now(),
                 });
             }
@@ -450,28 +492,54 @@ impl App {
                     agent.status = "executing_tool".into();
                     agent.current_tool = Some(tool_name.clone());
                 }
+                let msg = format!("  \u{1f527} [{}] tool: {}", &agent_id[..agent_id.len().min(12)], tool_name);
+                self.orch_log.push(msg);
+                if self.orch_log.len() > 200 {
+                    self.orch_log.remove(0);
+                }
             }
             OrchActivityEvent::AgentCompleted { ref agent_id } => {
                 if let Some(agent) = self.agents.iter_mut().find(|a| &a.agent_id == agent_id) {
                     agent.status = "completed".into();
+                }
+                self.orch_completed += 1;
+                let msg = format!("\u{2713} Agent {} done", &agent_id[..agent_id.len().min(12)]);
+                self.orch_log.push(msg);
+                if self.orch_log.len() > 200 {
+                    self.orch_log.remove(0);
                 }
             }
             OrchActivityEvent::AgentFailed { ref agent_id, ref error } => {
                 if let Some(agent) = self.agents.iter_mut().find(|a| &a.agent_id == agent_id) {
                     agent.status = "failed".into();
                 }
+                let msg = format!("\u{2717} {} failed: {}", agent_id, error);
+                self.orch_log.push(msg.clone());
+                if self.orch_log.len() > 200 {
+                    self.orch_log.remove(0);
+                }
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: format!("  \u{2717} Agent {} failed: {}", agent_id, error),
+                    content: format!("  {}", msg),
                     timestamp: now(),
                 });
             }
             OrchActivityEvent::LayerProgress { layer, ref message } => {
+                self.orch_layer = layer;
+                let msg = format!("[Layer {}] {}", layer, message);
+                self.orch_log.push(msg.clone());
+                if self.orch_log.len() > 200 {
+                    self.orch_log.remove(0);
+                }
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!("  Layer {}: {}", layer, message),
                     timestamp: now(),
                 });
+            }
+            OrchActivityEvent::StatsUpdate { total, completed, failed: _ } => {
+                self.orch_total = total;
+                self.orch_completed = completed;
             }
         }
     }
@@ -480,6 +548,11 @@ impl App {
         self.orchestrating = false;
         self.is_loading = false;
         self.agents.clear();
+        self.orch_log.clear();
+        self.orch_layer = 0;
+        self.orch_completed = 0;
+        self.orch_total = 0;
+        self.view_mode = MainView::Chat;
     }
 
     pub fn on_gemini_error(&mut self, error: String) {
