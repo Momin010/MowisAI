@@ -8,6 +8,7 @@ pub mod git;
 pub mod http;
 pub mod kubernetes;
 pub mod package_managers;
+pub mod search;
 pub mod shell;
 pub mod storage;
 pub mod utils;
@@ -27,6 +28,7 @@ pub use git::*;
 pub use http::*;
 pub use kubernetes::*;
 pub use package_managers::*;
+pub use search::*;
 pub use shell::*;
 pub use storage::*;
 pub use utils::*;
@@ -276,4 +278,17 @@ pub fn create_format_tool() -> Box<dyn Tool> {
 
 pub fn create_echo_tool() -> Box<dyn Tool> {
     Box::new(utils::EchoTool)
+}
+
+pub fn create_grep_tool() -> Box<dyn Tool> {
+    Box::new(search::GrepTool)
+}
+pub fn create_find_files_tool() -> Box<dyn Tool> {
+    Box::new(search::FindFilesTool)
+}
+pub fn create_search_code_tool() -> Box<dyn Tool> {
+    Box::new(search::SearchCodeTool)
+}
+pub fn create_read_multiple_files_tool() -> Box<dyn Tool> {
+    Box::new(search::ReadMultipleFilesTool)
 }

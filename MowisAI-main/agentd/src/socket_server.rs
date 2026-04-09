@@ -16,9 +16,9 @@ use crate::tool_registry;
 use crate::{ResourceLimits, Sandbox};
 use crate::vm_backend::{boot_vm, exec_in_vm, stop_vm, VmHandle};
 
-const MAX_CONNECTIONS: usize = 128;
-const FAST_WORKERS: usize = 16;
-const SLOW_WORKERS: usize = 32;
+const MAX_CONNECTIONS: usize = 2048;
+const FAST_WORKERS: usize = 64;
+const SLOW_WORKERS: usize = 128;
 
 lazy_static! {
     // shared state across threads; wrap map in Arc for cheap cloning
