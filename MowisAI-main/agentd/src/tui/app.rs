@@ -1,7 +1,7 @@
 use crate::config::MowisConfig;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::mpsc;
-use super::event::TuiEvent;
+use super::event::{OrchActivityEvent, TuiEvent};
 
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
@@ -188,8 +188,22 @@ impl App {
             timestamp: now(),
         });
 
-        self.is_loading = true;
-        self.send_to_gemini(text);
+        let intent = crate::intent::classify_intent(&text);
+
+        match intent {
+            crate::intent::UserIntent::Chat => {
+                self.is_loading = true;
+                self.send_to_gemini(text);
+            }
+            crate::intent::UserIntent::Build => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "\u{1f528} Build request detected \u{2014} launching orchestration...".into(),
+                    timestamp: now(),
+                });
+                self.start_orchestration(text);
+            }
+        }
     }
 
     fn handle_command(&mut self, cmd: &str) {
@@ -197,6 +211,7 @@ impl App {
             "/quit" | "/exit" | "/q" => self.should_quit = true,
             "/clear" => {
                 self.messages.clear();
+                self.conversation_history.clear();
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: "Chat cleared.".into(),
@@ -245,17 +260,136 @@ impl App {
         let tx = self.event_tx.clone();
 
         std::thread::Builder::new()
-            .name("gemini-request".into())
+            .name("gemini-stream".into())
             .spawn(move || {
-                let result = call_gemini_batch(&project_id, &model, &contents);
                 if let Some(tx) = tx {
-                    match result {
-                        Ok(response_text) => {
-                            let _ = tx.send(TuiEvent::GeminiChunk(response_text));
-                            let _ = tx.send(TuiEvent::GeminiDone);
+                    if let Err(e) = call_gemini_streaming(&project_id, &model, &contents, tx.clone()) {
+                        let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                    }
+                }
+            })
+            .ok();
+    }
+
+    fn start_orchestration(&mut self, prompt: String) {
+        self.orchestrating = true;
+        self.is_loading = true;
+        self.agents.clear();
+
+        let config = self.config.clone();
+        let tx = self.event_tx.clone();
+
+        std::thread::Builder::new()
+            .name("orchestrator".into())
+            .spawn(move || {
+                let (orch_event_tx, orch_event_rx) = std::sync::mpsc::channel();
+
+                let project_root = std::env::current_dir().unwrap_or_default();
+                let orch_config = crate::orchestration::OrchestratorConfig {
+                    project_id: config.gcp_project_id.clone(),
+                    socket_path: config.socket_path.clone(),
+                    project_root,
+                    overlay_root: std::path::PathBuf::from(&config.overlay_root),
+                    checkpoint_root: std::path::PathBuf::from(&config.checkpoint_root),
+                    merge_work_dir: std::path::PathBuf::from(&config.merge_work_dir),
+                    max_agents: config.max_agents,
+                    max_verification_rounds: 3,
+                    staging_dir: None,
+                    event_tx: Some(orch_event_tx),
+                };
+
+                let orchestrator = crate::orchestration::NewOrchestrator::new(orch_config);
+
+                // Forward orchestrator events to TUI (skip Done — main thread sends OrchDone)
+                if let Some(ref tx) = tx {
+                    let tx_clone = tx.clone();
+                    std::thread::spawn(move || {
+                        for event in orch_event_rx {
+                            let tui_event = match &event {
+                                crate::orchestration::OrchestratorEvent::TaskStarted {
+                                    worker_id,
+                                    description,
+                                    ..
+                                } => TuiEvent::OrchEvent(OrchActivityEvent::AgentStarted {
+                                    agent_id: format!("agent-{}", worker_id),
+                                    description: description.clone(),
+                                }),
+                                crate::orchestration::OrchestratorEvent::ToolCall {
+                                    worker_id,
+                                    tool_name,
+                                    ..
+                                } => TuiEvent::OrchEvent(OrchActivityEvent::ToolCall {
+                                    agent_id: format!("agent-{}", worker_id),
+                                    tool_name: tool_name.clone(),
+                                }),
+                                crate::orchestration::OrchestratorEvent::TaskCompleted {
+                                    worker_id,
+                                    ..
+                                } => TuiEvent::OrchEvent(OrchActivityEvent::AgentCompleted {
+                                    agent_id: format!("agent-{}", worker_id),
+                                }),
+                                crate::orchestration::OrchestratorEvent::TaskFailed {
+                                    worker_id,
+                                    error,
+                                    ..
+                                } => TuiEvent::OrchEvent(OrchActivityEvent::AgentFailed {
+                                    agent_id: format!("agent-{}", worker_id),
+                                    error: error.clone(),
+                                }),
+                                crate::orchestration::OrchestratorEvent::LayerProgress {
+                                    layer,
+                                    message,
+                                } => TuiEvent::OrchEvent(OrchActivityEvent::LayerProgress {
+                                    layer: *layer,
+                                    message: message.clone(),
+                                }),
+                                crate::orchestration::OrchestratorEvent::Done => continue,
+                                _ => continue,
+                            };
+                            if tx_clone.send(tui_event).is_err() {
+                                break;
+                            }
                         }
-                        Err(e) => {
-                            let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                    });
+                }
+
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        if let Some(tx) = tx {
+                            let _ = tx.send(TuiEvent::GeminiError(
+                                format!("Failed to build tokio runtime: {}", e),
+                            ));
+                            let _ = tx.send(TuiEvent::OrchDone);
+                        }
+                        return;
+                    }
+                };
+
+                match runtime.block_on(orchestrator.run(&prompt)) {
+                    Ok(output) => {
+                        if let Some(ref tx) = tx {
+                            let summary = format!(
+                                "Orchestration complete!\n\nSummary: {}\nTasks: {} total, {} completed, {} failed",
+                                output.summary,
+                                output.scheduler_stats.total_tasks,
+                                output.scheduler_stats.completed,
+                                output.scheduler_stats.failed,
+                            );
+                            let _ = tx.send(TuiEvent::GeminiChunk(summary));
+                            let _ = tx.send(TuiEvent::GeminiDone);
+                            let _ = tx.send(TuiEvent::OrchDone);
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(ref tx) = tx {
+                            let _ = tx.send(TuiEvent::GeminiError(
+                                format!("Orchestration failed: {}", e),
+                            ));
+                            let _ = tx.send(TuiEvent::OrchDone);
                         }
                     }
                 }
@@ -264,6 +398,9 @@ impl App {
     }
 
     pub fn on_gemini_chunk(&mut self, text: String) {
+        if !self.is_loading {
+            return;
+        }
         if let Some(last) = self.messages.last_mut() {
             if last.role == MessageRole::Assistant {
                 last.content.push_str(&text);
@@ -278,7 +415,9 @@ impl App {
     }
 
     pub fn on_gemini_done(&mut self) {
-        self.is_loading = false;
+        if !self.orchestrating {
+            self.is_loading = false;
+        }
         if let Some(last) = self.messages.last() {
             if last.role == MessageRole::Assistant {
                 let content = last.content.clone();
@@ -288,6 +427,59 @@ impl App {
                 }));
             }
         }
+    }
+
+    pub fn on_orch_event(&mut self, event: OrchActivityEvent) {
+        match event {
+            OrchActivityEvent::AgentStarted { ref agent_id, ref description } => {
+                self.agents.push(AgentActivity {
+                    agent_id: agent_id.clone(),
+                    status: "thinking".into(),
+                    description: description.clone(),
+                    current_tool: None,
+                    elapsed_secs: 0,
+                });
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("  \u{25b8} Agent started: {}", description),
+                    timestamp: now(),
+                });
+            }
+            OrchActivityEvent::ToolCall { ref agent_id, ref tool_name } => {
+                if let Some(agent) = self.agents.iter_mut().find(|a| &a.agent_id == agent_id) {
+                    agent.status = "executing_tool".into();
+                    agent.current_tool = Some(tool_name.clone());
+                }
+            }
+            OrchActivityEvent::AgentCompleted { ref agent_id } => {
+                if let Some(agent) = self.agents.iter_mut().find(|a| &a.agent_id == agent_id) {
+                    agent.status = "completed".into();
+                }
+            }
+            OrchActivityEvent::AgentFailed { ref agent_id, ref error } => {
+                if let Some(agent) = self.agents.iter_mut().find(|a| &a.agent_id == agent_id) {
+                    agent.status = "failed".into();
+                }
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("  \u{2717} Agent {} failed: {}", agent_id, error),
+                    timestamp: now(),
+                });
+            }
+            OrchActivityEvent::LayerProgress { layer, ref message } => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("  Layer {}: {}", layer, message),
+                    timestamp: now(),
+                });
+            }
+        }
+    }
+
+    pub fn on_orch_done(&mut self) {
+        self.orchestrating = false;
+        self.is_loading = false;
+        self.agents.clear();
     }
 
     pub fn on_gemini_error(&mut self, error: String) {
@@ -307,26 +499,34 @@ fn now() -> u64 {
         .as_secs()
 }
 
-fn call_gemini_batch(project_id: &str, model: &str, contents: &[serde_json::Value]) -> anyhow::Result<String> {
-    use anyhow::{anyhow, Context};
-
-    let url = format!(
-        "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/{}:generateContent",
-        project_id, model
-    );
-
-    let token_output = std::process::Command::new("gcloud")
+fn get_access_token() -> anyhow::Result<String> {
+    use anyhow::Context;
+    let output = std::process::Command::new("gcloud")
         .args(["auth", "print-access-token"])
         .output()
         .context("gcloud not found")?;
-    if !token_output.status.success() {
-        return Err(anyhow!("gcloud auth failed"));
+    if !output.status.success() {
+        anyhow::bail!("gcloud auth failed");
     }
-    let token = String::from_utf8(token_output.stdout)?.trim().to_string();
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+fn call_gemini_streaming(
+    project_id: &str,
+    model: &str,
+    contents: &[serde_json::Value],
+    tx: mpsc::Sender<TuiEvent>,
+) -> anyhow::Result<()> {
+    let url = format!(
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/{}:streamGenerateContent?alt=sse",
+        project_id, model
+    );
+
+    let token = get_access_token()?;
 
     let system_instruction = serde_json::json!({
         "parts": [{
-            "text": "You are MowisAI, an AI coding assistant. You help users with software development tasks. For simple questions, answer directly. When the user asks you to build, create, or modify code, describe what you would do and how you would approach it. Be concise and technical."
+            "text": "You are MowisAI, an AI coding assistant. You help users with software development tasks. Be concise and technical. For simple questions, answer directly. When the user asks you to build, create, or modify code at scale, indicate that orchestration mode should be used."
         }]
     });
 
@@ -335,12 +535,12 @@ fn call_gemini_batch(project_id: &str, model: &str, contents: &[serde_json::Valu
         "systemInstruction": system_instruction,
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 8192
+            "maxOutputTokens": 16384
         }
     });
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
     let resp = client
@@ -348,21 +548,47 @@ fn call_gemini_batch(project_id: &str, model: &str, contents: &[serde_json::Valu
         .bearer_auth(&token)
         .header("Content-Type", "application/json")
         .json(&body)
-        .send()
-        .context("Gemini HTTP request failed")?;
+        .send()?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
-        return Err(anyhow!("Gemini API error {}: {}", status, text));
+        let _ = tx.send(TuiEvent::GeminiError(format!("API error {}: {}", status, text)));
+        return Ok(());
     }
 
-    let json: serde_json::Value = resp.json()?;
-    let text = json
-        .pointer("/candidates/0/content/parts/0/text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("(no response)")
-        .to_string();
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(resp);
 
-    Ok(text)
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = tx.send(TuiEvent::GeminiError(format!("Stream read error: {}", e)));
+                return Ok(());
+            }
+        };
+
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data.trim().is_empty() || data.trim() == "[DONE]" {
+                continue;
+            }
+            match serde_json::from_str::<serde_json::Value>(data) {
+                Ok(json) => {
+                    if let Some(text) = json
+                        .pointer("/candidates/0/content/parts/0/text")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !text.is_empty() {
+                            let _ = tx.send(TuiEvent::GeminiChunk(text.to_string()));
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    let _ = tx.send(TuiEvent::GeminiDone);
+    Ok(())
 }

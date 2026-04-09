@@ -4,12 +4,23 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
+pub enum OrchActivityEvent {
+    AgentStarted { agent_id: String, description: String },
+    ToolCall { agent_id: String, tool_name: String },
+    AgentCompleted { agent_id: String },
+    AgentFailed { agent_id: String, error: String },
+    LayerProgress { layer: u8, message: String },
+}
+
+#[derive(Debug, Clone)]
 pub enum TuiEvent {
     Key(KeyEvent),
     Tick,
     GeminiChunk(String),
     GeminiDone,
     GeminiError(String),
+    OrchEvent(OrchActivityEvent),
+    OrchDone,
 }
 
 pub fn spawn_event_thread(tx: mpsc::Sender<TuiEvent>, tick_rate: Duration) -> thread::JoinHandle<()> {

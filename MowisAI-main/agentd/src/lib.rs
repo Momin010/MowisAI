@@ -31,6 +31,7 @@ pub mod tool_registry;
 pub mod tools;
 pub mod vertex_agent;
 pub mod worker_agent;
+pub mod intent;
 
 /// Re-export infrastructure `Runtime` (crate `runtime`) for orchestration callers.
 pub mod runtime {
