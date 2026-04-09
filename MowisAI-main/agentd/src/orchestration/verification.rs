@@ -1,5 +1,7 @@
 //! Layer 6: Verification Loop — Test task generation and failure re-injection
 
+use super::agent_execution::AgentExecutor;
+use super::sandbox_topology::TopologyManager;
 use agentd_protocol::{SandboxName, Task, TaskGraph, TaskId, VerificationStatus};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -264,42 +266,131 @@ impl VerificationLoop {
         sandbox_name: &SandboxName,
         merged_diff: &str,
         original_tasks: &[Task],
+        topology: &TopologyManager,
+        agent_executor: &AgentExecutor,
     ) -> Result<VerificationResult> {
-        // Generate initial test tasks
-        let plan = self
-            .planner
-            .generate_test_tasks(sandbox_name, merged_diff, original_tasks)
-            .await?;
-
         let mut passed_tests = Vec::new();
         let mut failed_tests = Vec::new();
         let mut rounds_completed = 0;
 
-        // Verification rounds
         for round in 0..self.max_rounds {
             rounds_completed = round + 1;
+            println!("  → Verification round {}/{}", round + 1, self.max_rounds);
 
-            // In production, test tasks would be injected into scheduler and executed
-            // For now, we'll simulate test execution
-            // This is a placeholder - actual implementation would:
-            // 1. Inject test tasks into scheduler
-            // 2. Wait for completion
-            // 3. Collect results
-            // 4. Generate fix tasks for failures
-            // 5. Inject fix tasks
-            // 6. Re-run tests
+            // Generate test tasks (LLM call)
+            let plan = self.planner
+                .generate_test_tasks(sandbox_name, merged_diff, original_tasks)
+                .await?;
 
-            // Simulate: all tests pass on first round
-            for task in &plan.test_tasks.tasks {
-                passed_tests.push(task.id.clone());
+            // Execute each test task
+            let mut round_failures = Vec::new();
+            let test_tools = vec![
+                "run_command".to_string(),
+                "read_file".to_string(),
+                "list_files".to_string(),
+            ];
+
+            for test_task in &plan.test_tasks.tasks {
+                let agent = match topology
+                    .create_agent_layer(sandbox_name, Some(test_task.id.clone()))
+                    .await
+                {
+                    Ok(a) => a,
+                    Err(e) => {
+                        failed_tests.push(test_task.id.clone());
+                        round_failures.push((
+                            test_task.id.clone(),
+                            test_task.description.clone(),
+                            e.to_string(),
+                        ));
+                        continue;
+                    }
+                };
+
+                let test_prompt = format!(
+                    "You are a test verification agent. Run this test:\n{}\n\n\
+                    Use run_command to execute tests. Report success or failure.",
+                    test_task.description
+                );
+
+                let result = agent_executor
+                    .execute_task(&agent, &test_task.description, &test_tools, &test_prompt)
+                    .await;
+
+                let _ = topology.destroy_agent_layer(&agent.agent_id).await;
+
+                match result {
+                    Ok(r) if r.success => {
+                        passed_tests.push(test_task.id.clone());
+                    }
+                    Ok(r) => {
+                        let error = r.error.unwrap_or_else(|| "Test failed".to_string());
+                        failed_tests.push(test_task.id.clone());
+                        round_failures.push((
+                            test_task.id.clone(),
+                            test_task.description.clone(),
+                            error,
+                        ));
+                    }
+                    Err(e) => {
+                        failed_tests.push(test_task.id.clone());
+                        round_failures.push((
+                            test_task.id.clone(),
+                            test_task.description.clone(),
+                            e.to_string(),
+                        ));
+                    }
+                }
             }
 
-            break; // Exit after first successful round
+            if round_failures.is_empty() {
+                println!("  ✓ All {} tests passed in round {}", passed_tests.len(), round + 1);
+                break;
+            }
+
+            println!("  ⚠ {} tests failed in round {}", round_failures.len(), round + 1);
+
+            // Generate and execute fix tasks for failures
+            if round < self.max_rounds - 1 {
+                let fix_tools = vec![
+                    "read_file".to_string(),
+                    "write_file".to_string(),
+                    "run_command".to_string(),
+                    "grep".to_string(),
+                ];
+
+                for (test_id, desc, error) in &round_failures {
+                    let fix_tasks = self.planner
+                        .generate_fix_tasks(test_id, desc, error)
+                        .await
+                        .unwrap_or_default();
+
+                    for fix_task in fix_tasks {
+                        let agent = match topology
+                            .create_agent_layer(sandbox_name, Some(fix_task.id.clone()))
+                            .await
+                        {
+                            Ok(a) => a,
+                            Err(e) => {
+                                eprintln!("  ⚠ Failed to create fix agent: {}", e);
+                                continue;
+                            }
+                        };
+
+                        let fix_prompt = format!("Fix this issue: {}", fix_task.description);
+                        let _ = agent_executor
+                            .execute_task(&agent, &fix_task.description, &fix_tools, &fix_prompt)
+                            .await;
+
+                        let _ = topology.destroy_agent_layer(&agent.agent_id).await;
+                    }
+                }
+            }
         }
 
         let status = if failed_tests.is_empty() {
             VerificationStatus::Passed
-        } else if rounds_completed >= self.max_rounds {
+        } else if !passed_tests.is_empty() {
             VerificationStatus::PartiallyVerified
         } else {
             VerificationStatus::Failed

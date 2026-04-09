@@ -17,11 +17,12 @@ pub enum OrchestratorEvent {
 
 use super::agent_execution::AgentExecutor;
 use super::checkpoint::CheckpointManager;
+use super::health::HealthMonitor;
 use super::merge_reviewer::{AgentContribution, ConflictDetector, MergeReviewerAgent, parse_unified_diff};
 use super::planner::plan_task;
 use super::sandbox_topology::TopologyManager;
 use super::verification::{VerificationLoop, VerificationResult};
-use agentd_protocol::{AgentResult, SandboxName, SandboxResult, TaskId, VerificationStatus};
+use agentd_protocol::{AgentResult, SandboxName, SandboxResult, Task, TaskId, VerificationStatus};
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -145,6 +146,9 @@ impl NewOrchestrator {
         let agent_count = Arc::new(RwLock::new(0usize));
         let execution_errors = Arc::new(RwLock::new(Vec::<String>::new()));
 
+        // Health monitor: 5-minute heartbeat timeout, open circuit after 5 consecutive failures
+        let health_monitor = Arc::new(HealthMonitor::new(300, 5));
+
         // Create a pool of agent worker tasks (TRUE PARALLELISM)
         // Dynamic agent cap based on available system resources
         let system_cap = 1000; // Upper safety bound
@@ -168,6 +172,7 @@ impl NewOrchestrator {
             let sandboxes = planner_output.sandbox_topology.sandboxes.clone();
             let staging_dir_for_worker = staging_dir_clone.clone();
             let event_tx_for_worker = event_tx_clone.clone();
+            let health_clone = health_monitor.clone();
 
             let handle = tokio::spawn(async move {
                 loop {
@@ -178,13 +183,19 @@ impl NewOrchestrator {
                         if let Some(ready_task_id) = scheduler_clone.get_ready_task(&sandbox.name).await {
                             task_found = true;
 
+                            // Check circuit breaker before dispatching
+                            if !health_clone.is_sandbox_healthy(&sandbox.name).await {
+                                eprintln!("[Worker {}] Circuit open for sandbox {}, skipping", worker_id, sandbox.name);
+                                continue;
+                            }
+
                             // Find the task details
                             let task_description = scheduler_clone.get_task_description(&ready_task_id).await
                                 .unwrap_or_else(|| "Unknown task".to_string());
 
-                            // Create agent layer
+                            // Create agent layer (wake sleeping container or create fresh)
                             let agent = match topology_clone
-                                .create_agent_layer(&sandbox.name, Some(ready_task_id.clone()))
+                                .wake_or_create_agent_layer(&sandbox.name, Some(ready_task_id.clone()))
                                 .await {
                                     Ok(a) => a,
                                     Err(e) => {
@@ -203,6 +214,9 @@ impl NewOrchestrator {
                                 let mut count = count_clone.write().await;
                                 *count += 1;
                             }
+
+                            // Send heartbeat
+                            health_clone.heartbeat(&agent.agent_id).await;
 
                             // Notify TUI: task started
                             if let Some(ref tx) = event_tx_for_worker {
@@ -298,6 +312,14 @@ impl NewOrchestrator {
                                 eprintln!("[Worker {}] Failed to handle completion: {}", worker_id, e);
                             }
 
+                            // Record health outcome
+                            if result.success {
+                                health_clone.record_success(&sandbox.name).await;
+                            } else {
+                                health_clone.record_failure(&sandbox.name).await;
+                            }
+                            health_clone.remove_agent(&agent.agent_id).await;
+
                             // Store result alongside its task description for the merge reviewer
                             {
                                 let mut results = results_clone.write().await;
@@ -317,8 +339,8 @@ impl NewOrchestrator {
                                 }
                             }
 
-                            // Cleanup agent layer
-                            let _ = topology_clone.destroy_agent_layer(&agent.agent_id).await;
+                            // Sleep container instead of destroying (pool for reuse)
+                            let _ = topology_clone.sleep_agent_layer(&agent.agent_id, &sandbox.name).await;
 
                             println!("    ✓ [Worker {}] Completed: {}", worker_id, task_description);
 
@@ -376,6 +398,9 @@ impl NewOrchestrator {
             }
         }
         let _ = stats_handle.await;
+
+        // Cleanup sleeping container pool
+        let _ = topology.cleanup_sleeping_containers().await;
 
         let agent_count = *agent_count.read().await;
         let sandbox_agent_results = {
@@ -482,17 +507,69 @@ impl NewOrchestrator {
             );
         }
 
-        // Layer 6: Verification Loop (SKIP for now - speeds up completion)
+        // Layer 6: Verification Loop
+        send_event(OrchestratorEvent::LayerProgress { layer: 6, message: "Verifying sandbox results...".into() });
         println!("Layer 6: Verifying sandbox results...");
-        println!("  → Skipping verification (not yet implemented)");
+
+        let verification_loop = VerificationLoop::new(
+            self.config.project_id.clone(),
+            self.config.max_verification_rounds,
+        );
 
         let mut verification_status = HashMap::new();
         let known_issues = Vec::new();
 
-        // Mark all as passed without verification
         for (sandbox_name, sandbox_result) in &mut sandbox_results {
-            sandbox_result.verification_status = VerificationStatus::NotStarted;
-            verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
+            if let Some(ref diff) = sandbox_result.merged_diff.clone() {
+                if !diff.is_empty() {
+                    let original_tasks: Vec<agentd_protocol::Task> = planner_output
+                        .task_graph
+                        .tasks
+                        .iter()
+                        .filter(|t| {
+                            planner_output
+                                .sandbox_hints
+                                .get(&t.id)
+                                .map_or(false, |s| s == sandbox_name)
+                        })
+                        .cloned()
+                        .collect();
+
+                    match verification_loop
+                        .verify_sandbox(
+                            sandbox_name,
+                            diff,
+                            &original_tasks,
+                            &topology,
+                            &agent_executor,
+                        )
+                        .await
+                    {
+                        Ok(vr) => {
+                            println!(
+                                "  ✓ {} — {:?} ({} passed, {} failed)",
+                                sandbox_name,
+                                vr.status,
+                                vr.passed_tests.len(),
+                                vr.failed_tests.len()
+                            );
+                            sandbox_result.verification_status = vr.status.clone();
+                            verification_status.insert(sandbox_name.clone(), vr.status);
+                        }
+                        Err(e) => {
+                            eprintln!("  ⚠ Verification failed for {}: {}", sandbox_name, e);
+                            sandbox_result.verification_status = VerificationStatus::Failed;
+                            verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
+                        }
+                    }
+                } else {
+                    sandbox_result.verification_status = VerificationStatus::NotStarted;
+                    verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
+                }
+            } else {
+                sandbox_result.verification_status = VerificationStatus::NotStarted;
+                verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
+            }
         }
 
         // Layer 7: Cross-Sandbox Intelligent Merge
@@ -569,10 +646,16 @@ impl NewOrchestrator {
 
         let duration = start_time.elapsed().as_secs();
 
+        let health_status = health_monitor.get_status().await;
         println!("\n✓ Orchestration complete!");
         println!("  Total duration: {}s", duration);
         println!("  Agents used: {}", agent_count);
         println!("  Tasks completed: {}/{}", scheduler_stats.completed, scheduler_stats.total_tasks);
+        println!("  Health: {} dead agents, {} open circuits",
+            health_status.dead_agents.len(), health_status.open_circuits);
+        for (sandbox, state) in &health_status.sandbox_states {
+            println!("    {} circuit: {:?}", sandbox, state);
+        }
 
         // Signal TUI that orchestration is complete
         if let Some(ref tx) = event_tx_clone {
