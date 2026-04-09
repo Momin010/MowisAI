@@ -211,6 +211,7 @@ impl App {
             "/quit" | "/exit" | "/q" => self.should_quit = true,
             "/clear" => {
                 self.messages.clear();
+                self.conversation_history.clear();
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: "Chat cleared.".into(),
@@ -397,6 +398,9 @@ impl App {
     }
 
     pub fn on_gemini_chunk(&mut self, text: String) {
+        if !self.is_loading {
+            return;
+        }
         if let Some(last) = self.messages.last_mut() {
             if last.role == MessageRole::Assistant {
                 last.content.push_str(&text);
