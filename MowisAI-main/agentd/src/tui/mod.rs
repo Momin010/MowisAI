@@ -58,6 +58,8 @@ fn run_loop<B: ratatui::backend::Backend>(
             Ok(TuiEvent::GeminiChunk(text)) => app.on_gemini_chunk(text),
             Ok(TuiEvent::GeminiDone) => app.on_gemini_done(),
             Ok(TuiEvent::GeminiError(err)) => app.on_gemini_error(err),
+            Ok(TuiEvent::OrchEvent(ev)) => app.on_orch_event(ev),
+            Ok(TuiEvent::OrchDone) => app.on_orch_done(),
             _ => {}
         }
 

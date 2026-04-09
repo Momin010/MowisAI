@@ -29,10 +29,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_title(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let title = format!(
-        " MowisAI  \u{b7}  {}  \u{b7}  {}",
-        app.config.model, app.config.gcp_project_id
-    );
+    let title = if app.orchestrating {
+        let active = app.agents.iter().filter(|a| a.status == "thinking" || a.status == "executing_tool").count();
+        format!(
+            " MowisAI  \u{b7}  {}  \u{b7}  {}  \u{b7}  \u{1f528} Orchestrating \u{2014} {} agent{} active",
+            app.config.model,
+            app.config.gcp_project_id,
+            active,
+            if active == 1 { "" } else { "s" },
+        )
+    } else {
+        format!(
+            " MowisAI  \u{b7}  {}  \u{b7}  {}",
+            app.config.model, app.config.gcp_project_id
+        )
+    };
     let widget = Paragraph::new(title)
         .style(
             Style::default()
@@ -102,8 +113,9 @@ fn draw_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     if app.is_loading {
         let spinner = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
+        let label = if app.orchestrating { "Orchestrating..." } else { "Thinking..." };
         all_lines.push(Line::from(Span::styled(
-            format!("{} Thinking...", spinner),
+            format!("{} {}", spinner, label),
             Style::default()
                 .fg(Color::Rgb(0, 200, 140))
                 .add_modifier(Modifier::BOLD),
