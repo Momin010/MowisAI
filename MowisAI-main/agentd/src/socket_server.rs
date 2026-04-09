@@ -143,13 +143,13 @@ fn chroot_run_streaming(root: &std::path::Path, cmd: &str) -> Result<()> {
     // Stream stdout
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().flatten() {
-            println!("  [sandbox] {}", line);
+            log::info!("[sandbox] {}", line);
         }
     }
     // Stream stderr
     if let Some(stderr) = child.stderr.take() {
         for line in BufReader::new(stderr).lines().flatten() {
-            eprintln!("  [sandbox] {}", line);
+            log::warn!("[sandbox] {}", line);
         }
     }
 
@@ -189,7 +189,7 @@ fn install_packages_in_image(
         v
     };
 
-    println!("  [sandbox] Installing packages: {}", all_packages.join(" "));
+    log::info!("[sandbox] Installing packages: {}", all_packages.join(" "));
 
     let install_cmd = if is_alpine {
         // For Alpine, set up repositories to use HTTP instead of HTTPS to avoid TLS bootstrap issues
@@ -286,7 +286,7 @@ fn install_packages_in_image(
     chroot_run_streaming(root, &install_cmd)
         .context("package installation failed")?;
 
-    println!("  [sandbox] Packages installed.");
+    log::info!("[sandbox] Packages installed.");
     Ok(())
 }
 
@@ -413,7 +413,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             let extra = req.packages.as_deref().unwrap_or(&[]);
 
             log::info!("sandbox created: {}", id);
-            println!("[agentd] Setting up sandbox {} with image '{}'", id, image);
+            log::info!("[agentd] Setting up sandbox {} with image '{}'", id, image);
 
             if let Err(e) = install_packages_in_image(&root, &image, extra) {
                 log::warn!("sandbox {} package install warning: {}", id, e);
@@ -423,7 +423,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
 
             // Optional: seed a repository into sandbox baseline so all containers share it.
             if let Some(repo_url) = seed_repo_url.as_ref() {
-                println!(
+                log::info!(
                     "[agentd] Seeding repo {} into sandbox {} ...",
                     repo_url, id
                 );
@@ -472,7 +472,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                             log::warn!("sandbox {} failed to bind-mount project root: {}", id, e);
                         } else {
                             let scope_info = req.scope.as_ref().map(|s| format!(" (scope: {})", s)).unwrap_or_default();
-                            println!("[agentd] Mounted {} into sandbox {} /workspace{}", mount_source.display(), id, scope_info);
+                            log::info!("[agentd] Mounted {} into sandbox {} /workspace{}", mount_source.display(), id, scope_info);
                         }
                     }
                 } else {
@@ -494,7 +494,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                 match boot_vm(id.to_string(), &root, &image) {
                     Ok(handle) => {
                         VM_HANDLES.insert(id, handle);
-                        println!("[agentd] guest_vm QEMU boot pid={} sandbox={} port=?", id, id);
+                        log::info!("[agentd] guest_vm QEMU boot pid={} sandbox={} port=?", id, id);
                     }
                     Err(e) => {
                         log::warn!("guest_vm boot failed sandbox={} (continuing): {}", id, e);
@@ -508,7 +508,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                     .with_result("success"),
             );
 
-            println!("[agentd] Sandbox {} ready.", id);
+            log::info!("[agentd] Sandbox {} ready.", id);
             SocketResponse::ok(Some(json!({ "sandbox": id.to_string(), "backend": backend })))
         }
 
@@ -1053,7 +1053,7 @@ fn spawn_worker_pool(
                     match job {
                         Ok(job) => {
                             if let Err(e) = process_job(job) {
-                                eprintln!("connection error: {}", e);
+                                log::warn!("connection error: {}", e);
                             }
                         }
                         Err(_) => break,
@@ -1089,7 +1089,7 @@ pub fn run_server(path: &str) -> Result<()> {
     let _fast_workers = spawn_worker_pool("socket-fast", FAST_WORKERS, Arc::clone(&fast_rx));
     let _slow_workers = spawn_worker_pool("socket-slow", SLOW_WORKERS, Arc::clone(&slow_rx));
 
-    println!("Socket server listening on {}", path);
+    log::info!("Socket server listening on {}", path);
 
     for stream in listener.incoming() {
         match stream {
@@ -1102,13 +1102,13 @@ pub fn run_server(path: &str) -> Result<()> {
                         RequestLane::Slow => slow_tx.send(job),
                     };
                     if let Err(e) = send_result {
-                        eprintln!("dispatch error: {}", e);
+                        log::warn!("dispatch error: {}", e);
                     }
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("connection error: {}", e),
+                Err(e) => log::warn!("connection error: {}", e),
             },
-            Err(e) => eprintln!("accept error: {}", e),
+            Err(e) => log::warn!("accept error: {}", e),
         }
     }
     Ok(())

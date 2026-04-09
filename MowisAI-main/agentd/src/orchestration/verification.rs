@@ -275,7 +275,7 @@ impl VerificationLoop {
 
         for round in 0..self.max_rounds {
             rounds_completed = round + 1;
-            println!("  → Verification round {}/{}", round + 1, self.max_rounds);
+            log::info!("  → Verification round {}/{}", round + 1, self.max_rounds);
 
             // Generate test tasks (LLM call)
             let plan = self.planner
@@ -344,11 +344,11 @@ impl VerificationLoop {
             }
 
             if round_failures.is_empty() {
-                println!("  ✓ All {} tests passed in round {}", passed_tests.len(), round + 1);
+                log::info!("  ✓ All {} tests passed in round {}", passed_tests.len(), round + 1);
                 break;
             }
 
-            println!("  ⚠ {} tests failed in round {}", round_failures.len(), round + 1);
+            log::info!("  ⚠ {} tests failed in round {}", round_failures.len(), round + 1);
 
             // Generate and execute fix tasks for failures
             if round < self.max_rounds - 1 {
@@ -372,7 +372,7 @@ impl VerificationLoop {
                         {
                             Ok(a) => a,
                             Err(e) => {
-                                eprintln!("  ⚠ Failed to create fix agent: {}", e);
+                                log::warn!("  ⚠ Failed to create fix agent: {}", e);
                                 continue;
                             }
                         };

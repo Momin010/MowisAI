@@ -117,7 +117,7 @@ impl TopologyManager {
         scopes.insert(config.name.clone(), config.scope.clone());
         drop(scopes);
 
-        println!("  → Created sandbox: {} (id: {}) with scope: {}",
+        log::info!("  → Created sandbox: {} (id: {}) with scope: {}",
                  config.name, sandbox_id, config.scope);
 
         Ok(())
@@ -161,7 +161,7 @@ impl TopologyManager {
 
         // Initialize git repo in /workspace before agent starts
         // This creates the "base" commit that diffs will be taken against
-        println!("  → Initializing git repo in container {}", &container_id[..8]);
+        log::info!("  → Initializing git repo in container {}", &container_id[..8]);
 
         // Step 1: git init
         let init_request = json!({
@@ -206,7 +206,7 @@ impl TopologyManager {
         // The sandbox already has the current git state including all previously applied changes.
         // Agents will diff against whatever the current HEAD is.
 
-        println!("  → Git repo initialized with base commit");
+        log::info!("  → Git repo initialized with base commit");
 
         // Create AgentHandle
         // IMPORTANT: We use sandbox_id as sandbox_name here because tools need the numeric ID
@@ -349,14 +349,14 @@ impl TopologyManager {
 
     /// Copy workspace files directly from container to host (for --save-all)
     pub async fn copy_workspace_to_host(&self, container_id: &str, sandbox_id: &str, output_dir: &std::path::Path) -> Result<()> {
-        println!("  📦 Copying workspace from container {} to {:?}", &container_id[..8], output_dir);
+        log::info!("  📦 Copying workspace from container {} to {:?}", &container_id[..8], output_dir);
 
         std::fs::create_dir_all(output_dir)
             .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
 
         let files_copied = self.copy_workspace_dir_recursive(sandbox_id, container_id, "/workspace", output_dir)?;
 
-        println!("  ✅ Copied {} files to host", files_copied);
+        log::info!("  ✅ Copied {} files to host", files_copied);
         Ok(())
     }
 
@@ -491,7 +491,7 @@ impl TopologyManager {
             staging_path: staging_dir.clone(),
         });
 
-        println!("  📦 Staged {} files from agent {} workspace to {}", files_copied, &agent_id[..8], staging_dir.display());
+        log::info!("  📦 Staged {} files from agent {} workspace to {}", files_copied, &agent_id[..8], staging_dir.display());
 
         Ok(staging_dir)
     }
@@ -515,9 +515,9 @@ impl TopologyManager {
                 let files_copied = copy_dir_contents_recursive(&staged_ws.staging_path, output_dir)?;
                 summary.workspaces_copied += 1;
                 summary.files_copied += files_copied;
-                println!("  ✅ Exported staged workspace for agent {} ({} files)", &staged_ws.agent_id[..8], files_copied);
+                log::info!("  ✅ Exported staged workspace for agent {} ({} files)", &staged_ws.agent_id[..8], files_copied);
             } else {
-                eprintln!("  ⚠️ Staged workspace not found: {}", staged_ws.staging_path.display());
+                log::warn!("  ⚠️ Staged workspace not found: {}", staged_ws.staging_path.display());
             }
         }
 
@@ -579,7 +579,7 @@ impl TopologyManager {
             .or_insert_with(Vec::new)
             .push(sleeping);
 
-        println!("  → Container for agent {} sleeping in pool for sandbox {}", &agent_id[..8], sandbox_name);
+        log::info!("  → Container for agent {} sleeping in pool for sandbox {}", &agent_id[..8], sandbox_name);
         Ok(())
     }
 
@@ -606,7 +606,7 @@ impl TopologyManager {
             agent_sandboxes.insert(new_agent_id.clone(), sandbox_name.clone());
             drop(agent_sandboxes);
 
-            println!("  → Woke container {} for sandbox {} (new agent {})",
+            log::info!("  → Woke container {} for sandbox {} (new agent {})",
                 &sc.container_id[..8], sandbox_name, &new_agent_id[..8]);
 
             let handle = AgentHandle {
@@ -641,8 +641,8 @@ impl TopologyManager {
                 "container": sc.container_id,
             });
             match super::socket_roundtrip(&self.socket_path, &request) {
-                Ok(_) => println!("  → Cleaned up sleeping container {}", &sc.container_id[..8]),
-                Err(e) => eprintln!("  ⚠ Failed to clean up sleeping container {}: {}", &sc.container_id[..8], e),
+                Ok(_) => log::info!("  → Cleaned up sleeping container {}", &sc.container_id[..8]),
+                Err(e) => log::warn!("  ⚠ Failed to clean up sleeping container {}: {}", &sc.container_id[..8], e),
             }
         }
         Ok(())
@@ -680,12 +680,12 @@ impl TopologyManager {
         // Call agentd to destroy the container
         match super::socket_roundtrip(&self.socket_path, &request) {
             Ok(_) => {
-                println!("  → Destroyed container {} for agent {}", &container_id[..8], &agent_id[..8]);
+                log::info!("  → Destroyed container {} for agent {}", &container_id[..8], &agent_id[..8]);
                 Ok(())
             }
             Err(e) => {
                 // Log error but don't fail — container will be cleaned up with sandbox
-                eprintln!("  ⚠ Failed to destroy container {}: {}", &container_id[..8], e);
+                log::warn!("  ⚠ Failed to destroy container {}: {}", &container_id[..8], e);
                 Ok(())
             }
         }
@@ -770,7 +770,7 @@ impl TopologyManager {
 
         super::socket_roundtrip(&self.socket_path, &request)?;
 
-        println!("  → Destroyed sandbox: {}", sandbox_name);
+        log::info!("  → Destroyed sandbox: {}", sandbox_name);
 
         Ok(())
     }
@@ -840,7 +840,7 @@ pub fn export_staged_workspaces_from_dir(
         let files_copied = copy_dir_contents_recursive(&path, output_dir)?;
         summary.workspaces_copied += 1;
         summary.files_copied += files_copied;
-        println!("  ✅ Exported staged workspace {} ({} files)", name, files_copied);
+        log::info!("  ✅ Exported staged workspace {} ({} files)", name, files_copied);
     }
 
     Ok(summary)

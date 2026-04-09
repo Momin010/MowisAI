@@ -10,6 +10,7 @@ pub enum OrchActivityEvent {
     AgentCompleted { agent_id: String },
     AgentFailed { agent_id: String, error: String },
     LayerProgress { layer: u8, message: String },
+    StatsUpdate { total: usize, completed: usize, failed: usize },
 }
 
 #[derive(Debug, Clone)]

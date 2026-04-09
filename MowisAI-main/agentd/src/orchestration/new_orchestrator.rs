@@ -96,12 +96,12 @@ impl NewOrchestrator {
 
         // Layer 1: Fast Planner
         send_event(OrchestratorEvent::LayerProgress { layer: 1, message: "Planning tasks...".into() });
-        println!("Layer 1: Planning tasks...");
+        log::info!("Layer 1: Planning tasks...");
         let planner_output = plan_task(prompt, &self.config.project_root, &self.config.project_id)
             .await
             .context("Fast planner failed")?;
 
-        println!(
+        log::info!(
             "  → Generated {} tasks across {} sandboxes",
             planner_output.task_graph.tasks.len(),
             planner_output.sandbox_topology.sandboxes.len()
@@ -109,7 +109,7 @@ impl NewOrchestrator {
 
         // Layer 2: Overlayfs Topology
         send_event(OrchestratorEvent::LayerProgress { layer: 2, message: "Creating sandbox topology...".into() });
-        println!("Layer 2: Creating sandbox topology...");
+        log::info!("Layer 2: Creating sandbox topology...");
         let topology = TopologyManager::new(
             self.config.project_root.clone(),
             self.config.socket_path.clone(),
@@ -117,12 +117,12 @@ impl NewOrchestrator {
 
         for sandbox in &planner_output.sandbox_topology.sandboxes {
             topology.create_sandbox_layer(sandbox).await?;
-            println!("  → Created sandbox: {}", sandbox.name);
+            log::info!("  → Created sandbox: {}", sandbox.name);
         }
 
         // Layer 3: Scheduler
         send_event(OrchestratorEvent::LayerProgress { layer: 3, message: "Initializing scheduler...".into() });
-        println!("Layer 3: Initializing scheduler...");
+        log::info!("Layer 3: Initializing scheduler...");
         let scheduler = Arc::new(
             Scheduler::new(
                 planner_output.task_graph.clone(),
@@ -130,11 +130,11 @@ impl NewOrchestrator {
             )?
         );
 
-        println!("  → Scheduler ready with {} tasks", planner_output.task_graph.tasks.len());
+        log::info!("  → Scheduler ready with {} tasks", planner_output.task_graph.tasks.len());
 
         // Layer 4: Agent Execution (TRUE PARALLELISM)
         send_event(OrchestratorEvent::LayerProgress { layer: 4, message: "Executing tasks with agents...".into() });
-        println!("Layer 4: Executing tasks with agents...");
+        log::info!("Layer 4: Executing tasks with agents...");
         let agent_executor = Arc::new(AgentExecutor::new(
             self.config.project_id.clone(),
             self.config.socket_path.clone(),
@@ -153,7 +153,7 @@ impl NewOrchestrator {
         // Dynamic agent cap based on available system resources
         let system_cap = 1000; // Upper safety bound
         let max_concurrent_agents = self.config.max_agents.min(system_cap);
-        println!("  → Agent pool: {} concurrent workers (user requested: {}, system cap: {})",
+        log::info!("  → Agent pool: {} concurrent workers (user requested: {}, system cap: {})",
             max_concurrent_agents, self.config.max_agents, system_cap);
 
         let mut handles = Vec::new();
@@ -185,7 +185,7 @@ impl NewOrchestrator {
 
                             // Check circuit breaker before dispatching
                             if !health_clone.is_sandbox_healthy(&sandbox.name).await {
-                                eprintln!("[Worker {}] Circuit open for sandbox {}, skipping", worker_id, sandbox.name);
+                                log::warn!("[Worker {}] Circuit open for sandbox {}, skipping", worker_id, sandbox.name);
                                 continue;
                             }
 
@@ -200,7 +200,7 @@ impl NewOrchestrator {
                                     Ok(a) => a,
                                     Err(e) => {
                                         let error_msg = format!("[Worker {}] Failed to create agent: {}", worker_id, e);
-                                        eprintln!("{}", error_msg);
+                                        log::warn!("{}", error_msg);
                                         {
                                             let mut errors = errors_clone.write().await;
                                             errors.push(error_msg);
@@ -231,7 +231,7 @@ impl NewOrchestrator {
                             // Mark task as started
                             if let Err(e) = scheduler_clone.mark_task_started(ready_task_id.clone(), agent.clone()).await {
                                 let error_msg = format!("[Worker {}] Failed to mark task started: {}", worker_id, e);
-                                eprintln!("{}", error_msg);
+                                log::warn!("{}", error_msg);
                                 {
                                     let mut errors = errors_clone.write().await;
                                     errors.push(error_msg);
@@ -268,7 +268,7 @@ impl NewOrchestrator {
                                     Ok(r) => r,
                                     Err(e) => {
                                         let error_msg = format!("[Worker {}] Task '{}' failed: {}", worker_id, task_description, e);
-                                        eprintln!("{}", error_msg);
+                                        log::warn!("{}", error_msg);
                                         {
                                             let mut errors = errors_clone.write().await;
                                             errors.push(error_msg);
@@ -282,7 +282,7 @@ impl NewOrchestrator {
                                 if let Some(ref diff) = result.git_diff {
                                     if !diff.is_empty() {
                                         if let Err(e) = topology_clone.apply_diff_to_sandbox(&sandbox.name, diff).await {
-                                            eprintln!("[Worker {}] Failed to apply diff to sandbox: {}", worker_id, e);
+                                            log::warn!("[Worker {}] Failed to apply diff to sandbox: {}", worker_id, e);
                                         }
                                     }
                                 }
@@ -309,7 +309,7 @@ impl NewOrchestrator {
 
                             // Handle completion
                             if let Err(e) = scheduler_clone.handle_task_completion(result.clone()).await {
-                                eprintln!("[Worker {}] Failed to handle completion: {}", worker_id, e);
+                                log::warn!("[Worker {}] Failed to handle completion: {}", worker_id, e);
                             }
 
                             // Record health outcome
@@ -335,14 +335,14 @@ impl NewOrchestrator {
                             // Stage workspace BEFORE destroying (for save-all functionality)
                             if let Some(ref staging_dir) = staging_dir_for_worker {
                                 if let Err(e) = topology_clone.stage_agent_workspace(&agent.agent_id, staging_dir).await {
-                                    eprintln!("[Worker {}] Failed to stage workspace: {}", worker_id, e);
+                                    log::warn!("[Worker {}] Failed to stage workspace: {}", worker_id, e);
                                 }
                             }
 
                             // Sleep container instead of destroying (pool for reuse)
                             let _ = topology_clone.sleep_agent_layer(&agent.agent_id, &sandbox.name).await;
 
-                            println!("    ✓ [Worker {}] Completed: {}", worker_id, task_description);
+                            log::info!("    ✓ [Worker {}] Completed: {}", worker_id, task_description);
 
                             // Break inner loop to try getting another task
                             break;
@@ -383,7 +383,7 @@ impl NewOrchestrator {
 
         // Wait for all workers to complete with timeout
         let worker_timeout = tokio::time::Duration::from_secs(1800); // 30 minute max
-        println!("  → Waiting for all workers to complete (max 30 minutes)...");
+        log::info!("  → Waiting for all workers to complete (max 30 minutes)...");
 
         let all_workers = async {
             for handle in handles {
@@ -392,9 +392,9 @@ impl NewOrchestrator {
         };
 
         match tokio::time::timeout(worker_timeout, all_workers).await {
-            Ok(_) => println!("  → All workers completed successfully"),
+            Ok(_) => log::info!("  → All workers completed successfully"),
             Err(_) => {
-                eprintln!("  ⚠️  Workers timed out after 30 minutes");
+                log::warn!("  ⚠️  Workers timed out after 30 minutes");
             }
         }
         let _ = stats_handle.await;
@@ -410,10 +410,10 @@ impl NewOrchestrator {
 
         // Get scheduler stats
         let scheduler_stats = scheduler.get_stats().await;
-        println!("  → Completed: {}/{} tasks", scheduler_stats.completed, scheduler_stats.total_tasks);
+        log::info!("  → Completed: {}/{} tasks", scheduler_stats.completed, scheduler_stats.total_tasks);
 
         // Layer 5: Intelligent Merge Review (per sandbox)
-        println!("Layer 5: Reviewing and merging agent contributions per sandbox...");
+        log::info!("Layer 5: Reviewing and merging agent contributions per sandbox...");
         let reviewer = MergeReviewerAgent::new(self.config.project_id.clone());
         let mut sandbox_results = HashMap::new();
 
@@ -437,7 +437,7 @@ impl NewOrchestrator {
                 .collect();
 
             if contributions.is_empty() {
-                println!("  → Sandbox {} has no changes", sandbox_name);
+                log::info!("  → Sandbox {} has no changes", sandbox_name);
                 sandbox_results.insert(
                     sandbox_name.clone(),
                     SandboxResult {
@@ -451,7 +451,7 @@ impl NewOrchestrator {
                 continue;
             }
 
-            println!(
+            log::info!(
                 "  → Reviewing {} agent contribution(s) for sandbox: {}",
                 contributions.len(),
                 sandbox_name
@@ -467,7 +467,7 @@ impl NewOrchestrator {
             // Detect conflicts between contributions
             let conflicts = ConflictDetector::detect(&contributions);
             if !conflicts.is_empty() {
-                println!("    → Detected {} conflict(s)", conflicts.len());
+                log::info!("    → Detected {} conflict(s)", conflicts.len());
             }
 
             // Review with 5-minute timeout
@@ -476,18 +476,18 @@ impl NewOrchestrator {
 
             let merged_diff = match tokio::time::timeout(review_timeout, review_future).await {
                 Ok(Ok(review_result)) => {
-                    println!("    ✓ {}", review_result.summary);
+                    log::info!("    ✓ {}", review_result.summary);
                     review_result.final_diff
                 }
                 Ok(Err(e)) => {
-                    eprintln!(
+                    log::warn!(
                         "  ⚠️  Merge review failed for {}: {}. Falling back to concatenation.",
                         sandbox_name, e
                     );
                     fallback_diff
                 }
                 Err(_) => {
-                    eprintln!(
+                    log::warn!(
                         "  ⚠️  Merge review timed out for {} after 5 minutes. Falling back to concatenation.",
                         sandbox_name
                     );
@@ -509,7 +509,7 @@ impl NewOrchestrator {
 
         // Layer 6: Verification Loop
         send_event(OrchestratorEvent::LayerProgress { layer: 6, message: "Verifying sandbox results...".into() });
-        println!("Layer 6: Verifying sandbox results...");
+        log::info!("Layer 6: Verifying sandbox results...");
 
         let verification_loop = VerificationLoop::new(
             self.config.project_id.clone(),
@@ -546,7 +546,7 @@ impl NewOrchestrator {
                         .await
                     {
                         Ok(vr) => {
-                            println!(
+                            log::info!(
                                 "  ✓ {} — {:?} ({} passed, {} failed)",
                                 sandbox_name,
                                 vr.status,
@@ -557,7 +557,7 @@ impl NewOrchestrator {
                             verification_status.insert(sandbox_name.clone(), vr.status);
                         }
                         Err(e) => {
-                            eprintln!("  ⚠ Verification failed for {}: {}", sandbox_name, e);
+                            log::warn!("  ⚠ Verification failed for {}: {}", sandbox_name, e);
                             sandbox_result.verification_status = VerificationStatus::Failed;
                             verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
                         }
@@ -573,7 +573,7 @@ impl NewOrchestrator {
         }
 
         // Layer 7: Cross-Sandbox Intelligent Merge
-        println!("Layer 7: Final cross-sandbox intelligent merge...");
+        log::info!("Layer 7: Final cross-sandbox intelligent merge...");
         let sandbox_diffs: Vec<(SandboxName, String)> = sandbox_results
             .iter()
             .filter_map(|(name, r)| {
@@ -585,7 +585,7 @@ impl NewOrchestrator {
             .collect();
 
         let final_merge = if sandbox_diffs.len() > 1 {
-            println!("  → Cross-sandbox review: {} sandbox diff(s)", sandbox_diffs.len());
+            log::info!("  → Cross-sandbox review: {} sandbox diff(s)", sandbox_diffs.len());
 
             // Treat each sandbox's merged diff as an agent contribution
             let cross_contributions: Vec<AgentContribution> = sandbox_diffs
@@ -610,7 +610,7 @@ impl NewOrchestrator {
 
             let cross_conflicts = ConflictDetector::detect(&cross_contributions);
             if !cross_conflicts.is_empty() {
-                println!("  → Detected {} cross-sandbox conflict(s)", cross_conflicts.len());
+                log::info!("  → Detected {} cross-sandbox conflict(s)", cross_conflicts.len());
             }
 
             let merge_timeout = tokio::time::Duration::from_secs(300);
@@ -618,15 +618,15 @@ impl NewOrchestrator {
 
             match tokio::time::timeout(merge_timeout, review_future).await {
                 Ok(Ok(review_result)) => {
-                    println!("  → {}", review_result.summary);
+                    log::info!("  → {}", review_result.summary);
                     review_result.final_diff
                 }
                 Ok(Err(e)) => {
-                    eprintln!("  ⚠️  Cross-sandbox review failed: {}. Using concatenation.", e);
+                    log::warn!("  ⚠️  Cross-sandbox review failed: {}. Using concatenation.", e);
                     fallback_diff
                 }
                 Err(_) => {
-                    eprintln!("  ⚠️  Cross-sandbox review timed out. Using concatenation.");
+                    log::warn!("  ⚠️  Cross-sandbox review timed out. Using concatenation.");
                     fallback_diff
                 }
             }
@@ -647,14 +647,14 @@ impl NewOrchestrator {
         let duration = start_time.elapsed().as_secs();
 
         let health_status = health_monitor.get_status().await;
-        println!("\n✓ Orchestration complete!");
-        println!("  Total duration: {}s", duration);
-        println!("  Agents used: {}", agent_count);
-        println!("  Tasks completed: {}/{}", scheduler_stats.completed, scheduler_stats.total_tasks);
-        println!("  Health: {} dead agents, {} open circuits",
+        log::info!("\n✓ Orchestration complete!");
+        log::info!("  Total duration: {}s", duration);
+        log::info!("  Agents used: {}", agent_count);
+        log::info!("  Tasks completed: {}/{}", scheduler_stats.completed, scheduler_stats.total_tasks);
+        log::info!("  Health: {} dead agents, {} open circuits",
             health_status.dead_agents.len(), health_status.open_circuits);
         for (sandbox, state) in &health_status.sandbox_states {
-            println!("    {} circuit: {:?}", sandbox, state);
+            log::info!("    {} circuit: {:?}", sandbox, state);
         }
 
         // Signal TUI that orchestration is complete

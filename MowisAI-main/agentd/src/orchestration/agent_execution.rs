@@ -57,11 +57,11 @@ impl AgentExecutor {
         system_prompt: &str,
     ) -> Result<AgentResult> {
         if is_verbose() {
-            println!("\n┌─────────────────────────────────────────────────────────");
-            println!("│ 🤖 AGENT: {}", &agent.agent_id[..8]);
-            println!("│ 📋 TASK: {}", task_description);
-            println!("│ 🛠️  TOOLS: {:?}", tools);
-            println!("└─────────────────────────────────────────────────────────");
+            log::info!("\n┌─────────────────────────────────────────────────────────");
+            log::info!("│ 🤖 AGENT: {}", &agent.agent_id[..8]);
+            log::info!("│ 📋 TASK: {}", task_description);
+            log::info!("│ 🛠️  TOOLS: {:?}", tools);
+            log::info!("└─────────────────────────────────────────────────────────");
         }
         let log_dir = self.checkpoint_manager.get_checkpoint_dir(&agent.agent_id);
         std::fs::create_dir_all(&log_dir)?;
@@ -92,7 +92,7 @@ impl AgentExecutor {
                     return Ok(result);
                 }
                 Err(e) if tier2_attempt < self.max_tier2_retries => {
-                    eprintln!(
+                    log::warn!(
                         "Agent execution failed (tier 2 retry {}/{}): {}",
                         tier2_attempt + 1,
                         self.max_tier2_retries,
@@ -111,11 +111,11 @@ impl AgentExecutor {
                         if snapshot_path.exists() {
                             match self.checkpoint_manager.restore_snapshot(upper_dir, &snapshot_path) {
                                 Ok(()) => {
-                                    println!("  ✓ Restored checkpoint {} for agent {}",
+                                    log::info!("  ✓ Restored checkpoint {} for agent {}",
                                         last_checkpoint.id, &agent.agent_id[..8]);
                                 }
                                 Err(restore_err) => {
-                                    eprintln!("  ⚠ Checkpoint restore failed: {}", restore_err);
+                                    log::warn!("  ⚠ Checkpoint restore failed: {}", restore_err);
                                 }
                             }
                         }
@@ -290,7 +290,7 @@ impl AgentExecutor {
                         .unwrap_or(json!({}));
 
                     if is_verbose() {
-                        println!("  🔧 Calling tool: {} with args: {}", tool_name, tool_args);
+                        log::info!("  🔧 Calling tool: {} with args: {}", tool_name, tool_args);
                     }
 
                     // Execute tool with tier 1 retry support
@@ -335,7 +335,7 @@ impl AgentExecutor {
                         } else {
                             result_str
                         };
-                        println!("  ✅ Result: {}", preview);
+                        log::info!("  ✅ Result: {}", preview);
                     }
 
                     function_responses.push(json!({
@@ -355,7 +355,7 @@ impl AgentExecutor {
                     .unwrap_or("");
 
                 if is_verbose() {
-                    println!("\n  💬 Agent says: {}", final_text);
+                    log::info!("\n  💬 Agent says: {}", final_text);
                 }
 
                 // Capture git diff from agent's layer
@@ -363,17 +363,17 @@ impl AgentExecutor {
 
                 if is_verbose() {
                     if let Some(ref diff) = git_diff {
-                        println!("\n  📝 DIFF GENERATED ({} bytes):", diff.len());
-                        println!("  ┌─────────────────────────────────────────");
+                        log::info!("\n  📝 DIFF GENERATED ({} bytes):", diff.len());
+                        log::info!("  ┌─────────────────────────────────────────");
                         for line in diff.lines().take(20) {
-                            println!("  │ {}", line);
+                            log::info!("  │ {}", line);
                         }
                         if diff.lines().count() > 20 {
-                            println!("  │ ... ({} more lines)", diff.lines().count() - 20);
+                            log::info!("  │ ... ({} more lines)", diff.lines().count() - 20);
                         }
-                        println!("  └─────────────────────────────────────────");
+                        log::info!("  └─────────────────────────────────────────");
                     } else {
-                        println!("\n  ⚠️  No git diff generated");
+                        log::info!("\n  ⚠️  No git diff generated");
                     }
                 }
 
@@ -414,7 +414,7 @@ impl AgentExecutor {
             {
                 Ok(result) => return Ok(result),
                 Err(e) if attempt < self.max_tier1_retries => {
-                    eprintln!(
+                    log::warn!(
                         "Tool {} failed (tier 1 retry {}/{}): {}",
                         tool_name,
                         attempt + 1,
@@ -472,11 +472,11 @@ impl AgentExecutor {
         let add_response = super::socket_roundtrip(&self.socket_path, &add_request)?;
 
         if is_verbose() {
-            println!("  🔧 Staging all changes with git add -A");
+            log::info!("  🔧 Staging all changes with git add -A");
             if let Some(result) = add_response.get("result") {
                 if let Some(stderr) = result.get("stderr").and_then(|s| s.as_str()) {
                     if !stderr.trim().is_empty() {
-                        println!("  ℹ️  git add stderr: {}", stderr);
+                        log::info!("  ℹ️  git add stderr: {}", stderr);
                     }
                 }
             }
@@ -502,7 +502,7 @@ impl AgentExecutor {
             if let Some(stdout) = result.get("stdout").and_then(|o| o.as_str()) {
                 if !stdout.trim().is_empty() {
                     if is_verbose() {
-                        println!("  ✅ Captured {} bytes of diff", stdout.len());
+                        log::info!("  ✅ Captured {} bytes of diff", stdout.len());
                     }
                     return Ok(stdout.to_string());
                 }
@@ -518,7 +518,7 @@ impl AgentExecutor {
 
         // No diff found (agent made no changes)
         if is_verbose() {
-            println!("  ℹ️  No changes detected (empty diff)");
+            log::info!("  ℹ️  No changes detected (empty diff)");
         }
         Ok(String::new())
     }

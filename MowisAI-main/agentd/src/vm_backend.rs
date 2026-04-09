@@ -90,7 +90,7 @@ pub fn stop_vm(handle: &VmHandle) -> anyhow::Result<()> {
     // Cleanup
     let _ = fs::remove_file(&handle.rootfs_path);
     let _ = fs::remove_dir_all(handle.ssh_key.parent().unwrap());
-    println!("[vm_backend] VM stopped sandbox={}", handle.sandbox_id);
+    log::info!("[vm_backend] VM stopped sandbox={}", handle.sandbox_id);
     Ok(())
 }
 
