@@ -15,7 +15,7 @@ pub mod mock_agent;
 pub mod simulate;
 
 // Re-export main types
-pub use new_orchestrator::{NewOrchestrator, OrchestratorConfig, FinalOutput};
+pub use new_orchestrator::{NewOrchestrator, OrchestratorConfig, FinalOutput, OrchestratorEvent};
 pub use agent_execution::{set_verbose, is_verbose};
 
 // KEEP: Still needed files

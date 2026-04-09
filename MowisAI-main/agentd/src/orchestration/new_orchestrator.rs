@@ -1,11 +1,25 @@
 //! New 7-layer orchestration system entry point
 
+use super::scheduler::{Scheduler, SchedulerStats};
+
+/// Events emitted by the orchestrator for real-time TUI updates.
+#[derive(Debug, Clone)]
+pub enum OrchestratorEvent {
+    TaskStarted { worker_id: usize, task_id: String, description: String, sandbox: String },
+    ToolCall { worker_id: usize, tool_name: String, args_preview: String },
+    ToolResult { worker_id: usize, tool_name: String, success: bool, preview: String },
+    TaskCompleted { worker_id: usize, task_id: String, success: bool, diff_size: usize },
+    TaskFailed { worker_id: usize, task_id: String, error: String },
+    StatsUpdate { stats: SchedulerStats },
+    LayerProgress { layer: u8, message: String },
+    Done,
+}
+
 use super::agent_execution::AgentExecutor;
 use super::checkpoint::CheckpointManager;
 use super::merge_reviewer::{AgentContribution, ConflictDetector, MergeReviewerAgent, parse_unified_diff};
 use super::planner::plan_task;
 use super::sandbox_topology::TopologyManager;
-use super::scheduler::{Scheduler, SchedulerStats};
 use super::verification::{VerificationLoop, VerificationResult};
 use agentd_protocol::{AgentResult, SandboxName, SandboxResult, TaskId, VerificationStatus};
 use anyhow::{anyhow, Context, Result};
@@ -47,6 +61,8 @@ pub struct OrchestratorConfig {
     pub max_verification_rounds: usize,
     /// Optional staging directory for save-all functionality
     pub staging_dir: Option<PathBuf>,
+    /// Optional channel sender for real-time TUI progress events
+    pub event_tx: Option<std::sync::mpsc::Sender<OrchestratorEvent>>,
 }
 
 /// Carries an agent result alongside the human-readable task description
@@ -71,7 +87,14 @@ impl NewOrchestrator {
     pub async fn run(&self, prompt: &str) -> Result<FinalOutput> {
         let start_time = std::time::Instant::now();
 
+        let send_event = |ev: OrchestratorEvent| {
+            if let Some(ref tx) = self.config.event_tx {
+                let _ = tx.send(ev);
+            }
+        };
+
         // Layer 1: Fast Planner
+        send_event(OrchestratorEvent::LayerProgress { layer: 1, message: "Planning tasks...".into() });
         println!("Layer 1: Planning tasks...");
         let planner_output = plan_task(prompt, &self.config.project_root, &self.config.project_id)
             .await
@@ -84,6 +107,7 @@ impl NewOrchestrator {
         );
 
         // Layer 2: Overlayfs Topology
+        send_event(OrchestratorEvent::LayerProgress { layer: 2, message: "Creating sandbox topology...".into() });
         println!("Layer 2: Creating sandbox topology...");
         let topology = TopologyManager::new(
             self.config.project_root.clone(),
@@ -96,6 +120,7 @@ impl NewOrchestrator {
         }
 
         // Layer 3: Scheduler
+        send_event(OrchestratorEvent::LayerProgress { layer: 3, message: "Initializing scheduler...".into() });
         println!("Layer 3: Initializing scheduler...");
         let scheduler = Arc::new(
             Scheduler::new(
@@ -107,6 +132,7 @@ impl NewOrchestrator {
         println!("  → Scheduler ready with {} tasks", planner_output.task_graph.tasks.len());
 
         // Layer 4: Agent Execution (TRUE PARALLELISM)
+        send_event(OrchestratorEvent::LayerProgress { layer: 4, message: "Executing tasks with agents...".into() });
         println!("Layer 4: Executing tasks with agents...");
         let agent_executor = Arc::new(AgentExecutor::new(
             self.config.project_id.clone(),
@@ -128,8 +154,9 @@ impl NewOrchestrator {
 
         let mut handles = Vec::new();
 
-        // Clone staging_dir before spawn to avoid lifetime issues
+        // Clone staging_dir and event_tx before spawn to avoid lifetime issues
         let staging_dir_clone: Option<PathBuf> = self.config.staging_dir.clone();
+        let event_tx_clone: Option<std::sync::mpsc::Sender<OrchestratorEvent>> = self.config.event_tx.clone();
 
         for worker_id in 0..max_concurrent_agents {
             let scheduler_clone = scheduler.clone();
@@ -140,6 +167,7 @@ impl NewOrchestrator {
             let errors_clone = execution_errors.clone();
             let sandboxes = planner_output.sandbox_topology.sandboxes.clone();
             let staging_dir_for_worker = staging_dir_clone.clone();
+            let event_tx_for_worker = event_tx_clone.clone();
 
             let handle = tokio::spawn(async move {
                 loop {
@@ -174,6 +202,16 @@ impl NewOrchestrator {
                             {
                                 let mut count = count_clone.write().await;
                                 *count += 1;
+                            }
+
+                            // Notify TUI: task started
+                            if let Some(ref tx) = event_tx_for_worker {
+                                let _ = tx.send(OrchestratorEvent::TaskStarted {
+                                    worker_id,
+                                    task_id: ready_task_id.clone(),
+                                    description: task_description.clone(),
+                                    sandbox: sandbox.name.clone(),
+                                });
                             }
 
                             // Mark task as started
@@ -236,6 +274,25 @@ impl NewOrchestrator {
                                 }
                             }
 
+                            // Notify TUI: task result
+                            if let Some(ref tx) = event_tx_for_worker {
+                                let diff_size = result.git_diff.as_ref().map(|d| d.len()).unwrap_or(0);
+                                if result.success {
+                                    let _ = tx.send(OrchestratorEvent::TaskCompleted {
+                                        worker_id,
+                                        task_id: ready_task_id.clone(),
+                                        success: true,
+                                        diff_size,
+                                    });
+                                } else {
+                                    let _ = tx.send(OrchestratorEvent::TaskFailed {
+                                        worker_id,
+                                        task_id: ready_task_id.clone(),
+                                        error: result.error.clone().unwrap_or_default(),
+                                    });
+                                }
+                            }
+
                             // Handle completion
                             if let Err(e) = scheduler_clone.handle_task_completion(result.clone()).await {
                                 eprintln!("[Worker {}] Failed to handle completion: {}", worker_id, e);
@@ -286,6 +343,22 @@ impl NewOrchestrator {
             handles.push(handle);
         }
 
+        // Periodic stats updates to TUI
+        let scheduler_for_stats = scheduler.clone();
+        let event_tx_for_stats = event_tx_clone.clone();
+        let stats_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                let stats = scheduler_for_stats.get_stats().await;
+                if let Some(ref tx) = event_tx_for_stats {
+                    let _ = tx.send(OrchestratorEvent::StatsUpdate { stats: stats.clone() });
+                }
+                if stats.completed + stats.failed >= stats.total_tasks && stats.total_tasks > 0 {
+                    break;
+                }
+            }
+        });
+
         // Wait for all workers to complete with timeout
         let worker_timeout = tokio::time::Duration::from_secs(1800); // 30 minute max
         println!("  → Waiting for all workers to complete (max 30 minutes)...");
@@ -302,6 +375,7 @@ impl NewOrchestrator {
                 eprintln!("  ⚠️  Workers timed out after 30 minutes");
             }
         }
+        let _ = stats_handle.await;
 
         let agent_count = *agent_count.read().await;
         let sandbox_agent_results = {
@@ -499,6 +573,11 @@ impl NewOrchestrator {
         println!("  Total duration: {}s", duration);
         println!("  Agents used: {}", agent_count);
         println!("  Tasks completed: {}/{}", scheduler_stats.completed, scheduler_stats.total_tasks);
+
+        // Signal TUI that orchestration is complete
+        if let Some(ref tx) = event_tx_clone {
+            let _ = tx.send(OrchestratorEvent::Done);
+        }
 
         let collected_errors = execution_errors.read().await.clone();
         Ok(FinalOutput {
