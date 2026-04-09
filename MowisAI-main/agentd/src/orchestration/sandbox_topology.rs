@@ -13,8 +13,18 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// Sleeping container that can be reused
+#[derive(Debug, Clone)]
+pub struct SleepingContainer {
+    pub agent_id: String,
+    pub container_id: String,
+    pub sandbox_id: String,
+    pub paused_at: u64,
+}
 
 /// Staged workspace export before container destruction
 #[derive(Debug, Clone)]
@@ -48,6 +58,9 @@ pub struct TopologyManager {
 
     /// Staged workspaces for save-all (exported before container destruction)
     staged_workspaces: Arc<RwLock<Vec<StagedWorkspace>>>,
+
+    /// Pool of sleeping containers available for reuse (sandbox_name -> containers)
+    sleeping_containers: Arc<RwLock<HashMap<SandboxName, Vec<SleepingContainer>>>>,
 }
 
 impl TopologyManager {
@@ -68,6 +81,7 @@ impl TopologyManager {
             agent_sandboxes: Arc::new(RwLock::new(HashMap::new())),
             project_root,
             staged_workspaces: Arc::new(RwLock::new(Vec::new())),
+            sleeping_containers: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -513,6 +527,125 @@ impl TopologyManager {
     /// Export from staging directory to output (used by CLI when staging was done during orchestration)
     pub fn export_staged_to_output(&self, output_dir: &std::path::Path) -> Result<HostWorkspaceExportSummary> {
         self.export_staged_workspaces(output_dir)
+    }
+
+    /// Put a completed agent's container to sleep (keep alive for reuse)
+    pub async fn sleep_agent_layer(&self, agent_id: &str, sandbox_name: &SandboxName) -> Result<()> {
+        let mut containers = self.containers.write().await;
+        let container_id = match containers.remove(agent_id) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        drop(containers);
+
+        let mut agent_sandboxes = self.agent_sandboxes.write().await;
+        agent_sandboxes.remove(agent_id);
+        drop(agent_sandboxes);
+
+        let sandboxes = self.sandboxes.read().await;
+        let sandbox_id = sandboxes
+            .get(sandbox_name)
+            .ok_or_else(|| anyhow!("Sandbox not found: {}", sandbox_name))?
+            .clone();
+        drop(sandboxes);
+
+        // Reset workspace to a clean state for reuse
+        let reset_request = json!({
+            "request_type": "invoke_tool",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "name": "run_command",
+            "input": {
+                "cmd": "cd /workspace && (git reset --hard HEAD 2>/dev/null || true) && (git clean -fd 2>/dev/null || true) && git add -A 2>/dev/null || true",
+                "timeout": 15
+            }
+        });
+        let _ = super::socket_roundtrip(&self.socket_path, &reset_request);
+
+        let paused_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let sleeping = SleepingContainer {
+            agent_id: agent_id.to_string(),
+            container_id,
+            sandbox_id,
+            paused_at,
+        };
+
+        let mut pool = self.sleeping_containers.write().await;
+        pool.entry(sandbox_name.clone())
+            .or_insert_with(Vec::new)
+            .push(sleeping);
+
+        println!("  → Container for agent {} sleeping in pool for sandbox {}", &agent_id[..8], sandbox_name);
+        Ok(())
+    }
+
+    /// Wake a sleeping container or create a new one if none available
+    pub async fn wake_or_create_agent_layer(
+        &self,
+        sandbox_name: &SandboxName,
+        task_id: Option<TaskId>,
+    ) -> Result<AgentHandle> {
+        let sleeping = {
+            let mut pool = self.sleeping_containers.write().await;
+            pool.get_mut(sandbox_name)
+                .and_then(|v| if v.is_empty() { None } else { Some(v.remove(0)) })
+        };
+
+        if let Some(sc) = sleeping {
+            let new_agent_id = Uuid::new_v4().to_string();
+
+            let mut containers = self.containers.write().await;
+            containers.insert(new_agent_id.clone(), sc.container_id.clone());
+            drop(containers);
+
+            let mut agent_sandboxes = self.agent_sandboxes.write().await;
+            agent_sandboxes.insert(new_agent_id.clone(), sandbox_name.clone());
+            drop(agent_sandboxes);
+
+            println!("  → Woke container {} for sandbox {} (new agent {})",
+                &sc.container_id[..8], sandbox_name, &new_agent_id[..8]);
+
+            let handle = AgentHandle {
+                agent_id: new_agent_id,
+                sandbox_name: sc.sandbox_id.clone(),
+                container_id: sc.container_id.clone(),
+                task_id,
+                layer: OverlayfsLayer {
+                    level: LayerLevel::Agent,
+                    mount_path: format!("/sandbox/{}/container/{}", sc.sandbox_id, sc.container_id),
+                    upper_dir: format!("/sandbox/{}/container/{}/upper", sc.sandbox_id, sc.container_id),
+                    work_dir: format!("/sandbox/{}/container/{}/work", sc.sandbox_id, sc.container_id),
+                    lower_dirs: vec![format!("/sandbox/{}/upper", sc.sandbox_id)],
+                },
+            };
+            return Ok(handle);
+        }
+
+        self.create_agent_layer(sandbox_name, task_id).await
+    }
+
+    /// Destroy all sleeping containers (call on shutdown)
+    pub async fn cleanup_sleeping_containers(&self) -> Result<()> {
+        let mut pool = self.sleeping_containers.write().await;
+        let all: Vec<SleepingContainer> = pool.drain().flat_map(|(_, v)| v).collect();
+        drop(pool);
+
+        for sc in all {
+            let request = json!({
+                "request_type": "destroy_container",
+                "sandbox": sc.sandbox_id,
+                "container": sc.container_id,
+            });
+            match super::socket_roundtrip(&self.socket_path, &request) {
+                Ok(_) => println!("  → Cleaned up sleeping container {}", &sc.container_id[..8]),
+                Err(e) => eprintln!("  ⚠ Failed to clean up sleeping container {}: {}", &sc.container_id[..8], e),
+            }
+        }
+        Ok(())
     }
 
     /// Destroy agent layer (container) — called after agent completes task
