@@ -109,8 +109,13 @@ impl App {
             KeyCode::Enter => self.submit_input(),
             KeyCode::Backspace => {
                 if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                    self.input_text.remove(self.input_cursor);
+                    let prev = self.input_text[..self.input_cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.input_text.remove(prev);
+                    self.input_cursor = prev;
                 }
             }
             KeyCode::Delete => {
@@ -119,11 +124,21 @@ impl App {
                 }
             }
             KeyCode::Left => {
-                self.input_cursor = self.input_cursor.saturating_sub(1);
+                if self.input_cursor > 0 {
+                    self.input_cursor = self.input_text[..self.input_cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                }
             }
             KeyCode::Right => {
                 if self.input_cursor < self.input_text.len() {
-                    self.input_cursor += 1;
+                    self.input_cursor = self.input_text[self.input_cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| self.input_cursor + i)
+                        .unwrap_or(self.input_text.len());
                 }
             }
             KeyCode::Home => self.input_cursor = 0,
@@ -142,7 +157,7 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.input_text.insert(self.input_cursor, c);
-                self.input_cursor += 1;
+                self.input_cursor += c.len_utf8();
             }
             KeyCode::Tab => {
                 self.input_text.insert_str(self.input_cursor, "  ");
@@ -225,13 +240,14 @@ impl App {
         }));
 
         let project_id = self.config.gcp_project_id.clone();
+        let model = self.config.model.clone();
         let contents = self.conversation_history.clone();
         let tx = self.event_tx.clone();
 
         std::thread::Builder::new()
             .name("gemini-request".into())
             .spawn(move || {
-                let result = call_gemini_batch(&project_id, &contents);
+                let result = call_gemini_batch(&project_id, &model, &contents);
                 if let Some(tx) = tx {
                     match result {
                         Ok(response_text) => {
@@ -291,12 +307,12 @@ fn now() -> u64 {
         .as_secs()
 }
 
-fn call_gemini_batch(project_id: &str, contents: &[serde_json::Value]) -> anyhow::Result<String> {
+fn call_gemini_batch(project_id: &str, model: &str, contents: &[serde_json::Value]) -> anyhow::Result<String> {
     use anyhow::{anyhow, Context};
 
     let url = format!(
-        "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent",
-        project_id
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/{}:generateContent",
+        project_id, model
     );
 
     let token_output = std::process::Command::new("gcloud")
