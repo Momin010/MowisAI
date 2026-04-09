@@ -513,6 +513,7 @@ impl App {
                 if let Some(agent) = self.agents.iter_mut().find(|a| &a.agent_id == agent_id) {
                     agent.status = "failed".into();
                 }
+                self.orch_completed += 1;
                 let msg = format!("\u{2717} {} failed: {}", agent_id, error);
                 self.orch_log.push(msg.clone());
                 if self.orch_log.len() > 200 {
