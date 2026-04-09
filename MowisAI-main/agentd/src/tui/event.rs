@@ -1,4 +1,4 @@
-use crossterm::event::{Event as CEvent, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event as CEvent, KeyEvent};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 pub enum TuiEvent {
     Key(KeyEvent),
     Tick,
+    GeminiChunk(String),
+    GeminiDone,
+    GeminiError(String),
 }
 
-/// Spawn a background thread that polls crossterm events and sends them on `tx`.
-/// Sends a `Tick` event every `tick_rate` if no key event arrives.
 pub fn spawn_event_thread(tx: mpsc::Sender<TuiEvent>, tick_rate: Duration) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut last_tick = Instant::now();

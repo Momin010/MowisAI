@@ -1,417 +1,352 @@
-use crate::orchestration::new_orchestrator::OrchestratorEvent;
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::config::MowisConfig;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::sync::mpsc;
+use super::event::TuiEvent;
+
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: MessageRole,
+    pub content: String,
+    pub timestamp: u64,
+}
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AppView {
-    Overview,
-    SandboxDetail(String),
-    AgentDetail(String),
-    CommandInput,
-    ErrorLog,
+pub enum MessageRole {
+    User,
+    Assistant,
+    System,
 }
 
 #[derive(Debug, Clone)]
-pub struct SandboxState {
-    pub name: String,
-    pub active_agents: usize,
-    pub completed_tasks: usize,
-    pub failed_tasks: usize,
+pub struct AgentActivity {
+    pub agent_id: String,
     pub status: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentState {
-    pub worker_id: usize,
-    pub id: String,
-    pub sandbox: String,
-    pub task_description: String,
-    pub status: String,
+    pub description: String,
     pub current_tool: Option<String>,
-    pub tool_history: Vec<ToolCallEntry>,
     pub elapsed_secs: u64,
-    pub diff_size: usize,
-    pub started_tick: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolCallEntry {
-    pub tool_name: String,
-    pub timestamp: u64,
-    pub success: bool,
-    pub preview: String,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct OrchestratorStats {
-    pub total_tasks: usize,
-    pub completed: usize,
-    pub failed: usize,
-    pub running: usize,
-    pub pending: usize,
-    pub elapsed_secs: u64,
-    pub agents_spawned: usize,
 }
 
 pub struct App {
-    pub view: AppView,
-    pub sandboxes: Vec<SandboxState>,
-    pub agents: Vec<AgentState>,
-    pub stats: OrchestratorStats,
-    pub errors: Vec<String>,
-    pub command_history: Vec<String>,
-    pub current_command: String,
+    pub config: MowisConfig,
+    pub messages: Vec<ChatMessage>,
+    pub input_text: String,
+    pub input_cursor: usize,
     pub should_quit: bool,
-    pub selected_index: usize,
+    pub is_loading: bool,
+    pub spinner_frame: usize,
     pub scroll_offset: usize,
-    pub activity_log: Vec<String>,
-    pub orchestrator_done: bool,
     pub tick_count: u64,
-    pub layer_messages: Vec<String>,
+    pub event_tx: Option<mpsc::Sender<TuiEvent>>,
+    pub agents: Vec<AgentActivity>,
+    pub orchestrating: bool,
+    pub conversation_history: Vec<serde_json::Value>,
+    pub cwd: String,
 }
 
 impl App {
-    pub fn new() -> Self {
-        Self {
-            view: AppView::Overview,
-            sandboxes: Vec::new(),
-            agents: Vec::new(),
-            stats: OrchestratorStats::default(),
-            errors: Vec::new(),
-            command_history: Vec::new(),
-            current_command: String::new(),
+    pub fn new(config: MowisConfig) -> Self {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+
+        let mut app = Self {
+            config,
+            messages: Vec::new(),
+            input_text: String::new(),
+            input_cursor: 0,
             should_quit: false,
-            selected_index: 0,
+            is_loading: false,
+            spinner_frame: 0,
             scroll_offset: 0,
-            activity_log: Vec::new(),
-            orchestrator_done: false,
             tick_count: 0,
-            layer_messages: Vec::new(),
-        }
+            event_tx: None,
+            agents: Vec::new(),
+            orchestrating: false,
+            conversation_history: Vec::new(),
+            cwd,
+        };
+
+        app.messages.push(ChatMessage {
+            role: MessageRole::System,
+            content: format!(
+                "Welcome to MowisAI! Type your message below and press Enter.\n\
+                 Project: {} | Model: {}\n\
+                 Type /help for commands, /quit or Ctrl+C to exit.",
+                app.config.gcp_project_id, app.config.model
+            ),
+            timestamp: now(),
+        });
+
+        app
     }
 
     pub fn on_tick(&mut self) {
         self.tick_count += 1;
-        self.stats.elapsed_secs = self.tick_count / 10; // 100ms ticks → seconds
-
-        // Update elapsed for running agents
-        for agent in &mut self.agents {
-            if agent.status == "thinking" || agent.status == "executing_tool" {
-                agent.elapsed_secs = self.tick_count.saturating_sub(agent.started_tick) / 10;
-            }
+        if self.is_loading {
+            self.spinner_frame = (self.spinner_frame + 1) % 8;
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
-        match &self.view {
-            AppView::Overview => self.handle_overview_key(key),
-            AppView::SandboxDetail(_) => self.handle_detail_key(key),
-            AppView::AgentDetail(_) => self.handle_agent_detail_key(key),
-            AppView::CommandInput => self.handle_command_key(key),
-            AppView::ErrorLog => self.handle_error_log_key(key),
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return;
         }
-    }
 
-    fn handle_overview_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => self.should_quit = true,
-            KeyCode::Char('/') => {
-                self.view = AppView::CommandInput;
-                self.current_command.clear();
+        if self.is_loading {
+            if key.code == KeyCode::Esc {
+                self.is_loading = false;
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "Request cancelled.".into(),
+                    timestamp: now(),
+                });
             }
-            KeyCode::Char('e') => self.view = AppView::ErrorLog,
-            KeyCode::Tab => {}
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected_index = self.selected_index.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let max = self.sandboxes.len().saturating_sub(1);
-                if self.selected_index < max {
-                    self.selected_index += 1;
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(sb) = self.sandboxes.get(self.selected_index) {
-                    let name = sb.name.clone();
-                    self.view = AppView::SandboxDetail(name);
-                    self.selected_index = 0;
-                }
-            }
-            _ => {}
+            return;
         }
-    }
 
-    fn handle_detail_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => self.should_quit = true,
-            KeyCode::Esc => {
-                self.view = AppView::Overview;
-                self.selected_index = 0;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected_index = self.selected_index.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let AppView::SandboxDetail(ref sb_name) = self.view.clone() {
-                    let count = self.agents_for_sandbox(sb_name).len().saturating_sub(1);
-                    if self.selected_index < count {
-                        self.selected_index += 1;
-                    }
-                }
-            }
-            KeyCode::Enter => {
-                if let AppView::SandboxDetail(ref sb_name) = self.view.clone() {
-                    let agents = self.agents_for_sandbox(sb_name);
-                    if let Some(agent) = agents.get(self.selected_index) {
-                        let agent_id = agent.id.clone();
-                        self.view = AppView::AgentDetail(agent_id);
-                        self.selected_index = 0;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_agent_detail_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => self.should_quit = true,
-            KeyCode::Esc => {
-                let prev_sandbox = self
-                    .agents
-                    .iter()
-                    .find(|a| {
-                        if let AppView::AgentDetail(ref id) = self.view {
-                            a.id == *id
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|a| a.sandbox.clone())
-                    .unwrap_or_default();
-                self.view = if prev_sandbox.is_empty() {
-                    AppView::Overview
-                } else {
-                    AppView::SandboxDetail(prev_sandbox)
-                };
-                self.selected_index = 0;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.scroll_offset += 1;
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_command_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.view = AppView::Overview;
-                self.current_command.clear();
-            }
-            KeyCode::Enter => {
-                let cmd = self.current_command.trim().to_string();
-                if !cmd.is_empty() {
-                    self.command_history.push(cmd);
-                    self.current_command.clear();
-                }
-                self.view = AppView::Overview;
-            }
+            KeyCode::Enter => self.submit_input(),
             KeyCode::Backspace => {
-                self.current_command.pop();
+                if self.input_cursor > 0 {
+                    self.input_cursor -= 1;
+                    self.input_text.remove(self.input_cursor);
+                }
+            }
+            KeyCode::Delete => {
+                if self.input_cursor < self.input_text.len() {
+                    self.input_text.remove(self.input_cursor);
+                }
+            }
+            KeyCode::Left => {
+                self.input_cursor = self.input_cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                if self.input_cursor < self.input_text.len() {
+                    self.input_cursor += 1;
+                }
+            }
+            KeyCode::Home => self.input_cursor = 0,
+            KeyCode::End => self.input_cursor = self.input_text.len(),
+            KeyCode::Up => {
+                self.scroll_offset = self.scroll_offset.saturating_add(3);
+            }
+            KeyCode::Down => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+            }
+            KeyCode::PageUp => {
+                self.scroll_offset = self.scroll_offset.saturating_add(10);
+            }
+            KeyCode::PageDown => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(10);
             }
             KeyCode::Char(c) => {
-                self.current_command.push(c);
+                self.input_text.insert(self.input_cursor, c);
+                self.input_cursor += 1;
+            }
+            KeyCode::Tab => {
+                self.input_text.insert_str(self.input_cursor, "  ");
+                self.input_cursor += 2;
             }
             _ => {}
         }
     }
 
-    fn handle_error_log_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
-                self.view = AppView::Overview;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.scroll_offset += 1;
-            }
-            _ => {}
+    fn submit_input(&mut self) {
+        let text = self.input_text.trim().to_string();
+        if text.is_empty() {
+            return;
         }
+
+        self.input_text.clear();
+        self.input_cursor = 0;
+        self.scroll_offset = 0;
+
+        if text.starts_with('/') {
+            self.handle_command(&text);
+            return;
+        }
+
+        self.messages.push(ChatMessage {
+            role: MessageRole::User,
+            content: text.clone(),
+            timestamp: now(),
+        });
+
+        self.is_loading = true;
+        self.send_to_gemini(text);
     }
 
-    pub fn agents_for_sandbox<'a>(&'a self, sandbox_name: &str) -> Vec<&'a AgentState> {
-        self.agents
-            .iter()
-            .filter(|a| a.sandbox == sandbox_name)
-            .collect()
-    }
-
-    pub fn handle_orchestrator_event(&mut self, event: OrchestratorEvent) {
-        match event {
-            OrchestratorEvent::TaskStarted {
-                worker_id,
-                task_id,
-                description,
-                sandbox,
-            } => {
-                // Ensure sandbox exists in sandboxes list
-                if !self.sandboxes.iter().any(|s| s.name == sandbox) {
-                    self.sandboxes.push(SandboxState {
-                        name: sandbox.clone(),
-                        active_agents: 0,
-                        completed_tasks: 0,
-                        failed_tasks: 0,
-                        status: "active".to_string(),
-                    });
-                }
-                // Increment active agents
-                if let Some(sb) = self.sandboxes.iter_mut().find(|s| s.name == sandbox) {
-                    sb.active_agents += 1;
-                    sb.status = "active".to_string();
-                }
-                // Add agent
-                let short_id = format!("{}..{}", &task_id[..task_id.len().min(4)], worker_id);
-                self.agents.push(AgentState {
-                    worker_id,
-                    id: short_id,
-                    sandbox: sandbox.clone(),
-                    task_description: description.clone(),
-                    status: "thinking".to_string(),
-                    current_tool: None,
-                    tool_history: Vec::new(),
-                    elapsed_secs: 0,
-                    diff_size: 0,
-                    started_tick: self.tick_count,
+    fn handle_command(&mut self, cmd: &str) {
+        match cmd {
+            "/quit" | "/exit" | "/q" => self.should_quit = true,
+            "/clear" => {
+                self.messages.clear();
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "Chat cleared.".into(),
+                    timestamp: now(),
                 });
-                self.stats.agents_spawned += 1;
-                self.activity_log
-                    .push(format!("Worker {}: started \"{}\"", worker_id, description));
-                // Keep log bounded
-                if self.activity_log.len() > 100 {
-                    self.activity_log.remove(0);
-                }
             }
-            OrchestratorEvent::ToolCall {
-                worker_id,
-                tool_name,
-                args_preview,
-            } => {
-                if let Some(agent) = self.agents.iter_mut().find(|a| a.worker_id == worker_id) {
-                    agent.current_tool = Some(tool_name.clone());
-                    agent.status = "executing_tool".to_string();
-                }
-                self.activity_log.push(format!(
-                    "Worker {}: {} {}",
-                    worker_id, tool_name, args_preview
-                ));
-                if self.activity_log.len() > 100 {
-                    self.activity_log.remove(0);
-                }
+            "/help" => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "Commands:\n  /quit     \u{2014} Exit MowisAI\n  /clear    \u{2014} Clear chat history\n  /config   \u{2014} Show current configuration\n  /help     \u{2014} Show this message".into(),
+                    timestamp: now(),
+                });
             }
-            OrchestratorEvent::ToolResult {
-                worker_id,
-                tool_name,
-                success,
-                preview,
-            } => {
-                let now = self.tick_count;
-                if let Some(agent) = self.agents.iter_mut().find(|a| a.worker_id == worker_id) {
-                    agent.tool_history.push(ToolCallEntry {
-                        tool_name: tool_name.clone(),
-                        timestamp: now,
-                        success,
-                        preview: preview.chars().take(100).collect(),
-                    });
-                    agent.current_tool = None;
-                    agent.status = "thinking".to_string();
-                }
+            "/config" => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "Configuration:\n  Project: {}\n  Model: {}\n  Socket: {}\n  Max Agents: {}",
+                        self.config.gcp_project_id,
+                        self.config.model,
+                        self.config.socket_path,
+                        self.config.max_agents
+                    ),
+                    timestamp: now(),
+                });
             }
-            OrchestratorEvent::TaskCompleted {
-                worker_id,
-                task_id: _,
-                success: _,
-                diff_size,
-            } => {
-                let sandbox_name = self
-                    .agents
-                    .iter()
-                    .find(|a| a.worker_id == worker_id)
-                    .map(|a| a.sandbox.clone());
-                if let Some(agent) = self.agents.iter_mut().find(|a| a.worker_id == worker_id) {
-                    agent.status = "completed".to_string();
-                    agent.diff_size = diff_size;
-                    agent.current_tool = None;
-                }
-                if let Some(sb_name) = sandbox_name {
-                    if let Some(sb) = self.sandboxes.iter_mut().find(|s| s.name == sb_name) {
-                        sb.active_agents = sb.active_agents.saturating_sub(1);
-                        sb.completed_tasks += 1;
-                        if sb.active_agents == 0 {
-                            sb.status = "idle".to_string();
+            _ => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("Unknown command: {}. Type /help for available commands.", cmd),
+                    timestamp: now(),
+                });
+            }
+        }
+    }
+
+    fn send_to_gemini(&mut self, user_text: String) {
+        self.conversation_history.push(serde_json::json!({
+            "role": "user",
+            "parts": [{ "text": &user_text }]
+        }));
+
+        let project_id = self.config.gcp_project_id.clone();
+        let contents = self.conversation_history.clone();
+        let tx = self.event_tx.clone();
+
+        std::thread::Builder::new()
+            .name("gemini-request".into())
+            .spawn(move || {
+                let result = call_gemini_batch(&project_id, &contents);
+                if let Some(tx) = tx {
+                    match result {
+                        Ok(response_text) => {
+                            let _ = tx.send(TuiEvent::GeminiChunk(response_text));
+                            let _ = tx.send(TuiEvent::GeminiDone);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
                         }
                     }
                 }
-                self.stats.completed += 1;
+            })
+            .ok();
+    }
+
+    pub fn on_gemini_chunk(&mut self, text: String) {
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == MessageRole::Assistant {
+                last.content.push_str(&text);
+                return;
             }
-            OrchestratorEvent::TaskFailed {
-                worker_id,
-                task_id,
-                error,
-            } => {
-                let sandbox_name = self
-                    .agents
-                    .iter()
-                    .find(|a| a.worker_id == worker_id)
-                    .map(|a| a.sandbox.clone());
-                if let Some(agent) = self.agents.iter_mut().find(|a| a.worker_id == worker_id) {
-                    agent.status = "failed".to_string();
-                }
-                if let Some(sb_name) = sandbox_name {
-                    if let Some(sb) = self.sandboxes.iter_mut().find(|s| s.name == sb_name) {
-                        sb.active_agents = sb.active_agents.saturating_sub(1);
-                        sb.failed_tasks += 1;
-                    }
-                }
-                self.stats.failed += 1;
-                self.errors
-                    .push(format!("Task {}: {}", task_id, error));
-            }
-            OrchestratorEvent::StatsUpdate { stats } => {
-                self.stats.total_tasks = stats.total_tasks;
-                self.stats.completed = stats.completed;
-                self.stats.failed = stats.failed;
-                self.stats.running = stats.running;
-                self.stats.pending = stats.pending;
-            }
-            OrchestratorEvent::LayerProgress { layer, message } => {
-                let msg = format!("Layer {}: {}", layer, message);
-                self.layer_messages.push(msg.clone());
-                if self.layer_messages.len() > 20 {
-                    self.layer_messages.remove(0);
-                }
-                self.activity_log.push(msg);
-                if self.activity_log.len() > 100 {
-                    self.activity_log.remove(0);
-                }
-            }
-            OrchestratorEvent::Done => {
-                self.orchestrator_done = true;
-                self.activity_log
-                    .push("Orchestration complete. Press 'q' to quit.".to_string());
+        }
+        self.messages.push(ChatMessage {
+            role: MessageRole::Assistant,
+            content: text,
+            timestamp: now(),
+        });
+    }
+
+    pub fn on_gemini_done(&mut self) {
+        self.is_loading = false;
+        if let Some(last) = self.messages.last() {
+            if last.role == MessageRole::Assistant {
+                let content = last.content.clone();
+                self.conversation_history.push(serde_json::json!({
+                    "role": "model",
+                    "parts": [{ "text": content }]
+                }));
             }
         }
     }
 
-    /// Progress percentage (0–100)
-    pub fn progress_percent(&self) -> u16 {
-        if self.stats.total_tasks == 0 {
-            return 0;
-        }
-        ((self.stats.completed * 100) / self.stats.total_tasks) as u16
+    pub fn on_gemini_error(&mut self, error: String) {
+        self.is_loading = false;
+        self.messages.push(ChatMessage {
+            role: MessageRole::System,
+            content: format!("Error: {}", error),
+            timestamp: now(),
+        });
     }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn call_gemini_batch(project_id: &str, contents: &[serde_json::Value]) -> anyhow::Result<String> {
+    use anyhow::{anyhow, Context};
+
+    let url = format!(
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent",
+        project_id
+    );
+
+    let token_output = std::process::Command::new("gcloud")
+        .args(["auth", "print-access-token"])
+        .output()
+        .context("gcloud not found")?;
+    if !token_output.status.success() {
+        return Err(anyhow!("gcloud auth failed"));
+    }
+    let token = String::from_utf8(token_output.stdout)?.trim().to_string();
+
+    let system_instruction = serde_json::json!({
+        "parts": [{
+            "text": "You are MowisAI, an AI coding assistant. You help users with software development tasks. For simple questions, answer directly. When the user asks you to build, create, or modify code, describe what you would do and how you would approach it. Be concise and technical."
+        }]
+    });
+
+    let body = serde_json::json!({
+        "contents": contents,
+        "systemInstruction": system_instruction,
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 8192
+        }
+    });
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .context("Gemini HTTP request failed")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        return Err(anyhow!("Gemini API error {}: {}", status, text));
+    }
+
+    let json: serde_json::Value = resp.json()?;
+    let text = json
+        .pointer("/candidates/0/content/parts/0/text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no response)")
+        .to_string();
+
+    Ok(text)
 }

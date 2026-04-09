@@ -3,12 +3,17 @@ name = "agentd"
 version = "0.1.0"
 edition = "2021"
 authors = ["MowisAI <info@mowis.ai>"]
-description = "Low-level runtime and API library for MowisAI agent sandbox engine."
+description = "MowisAI — AI agent orchestration engine"
+
+[[bin]]
+name = "mowisai"
+path = "src/main.rs"
 
 [lib]
 name = "libagent"
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
+
 
 [dependencies]
 agentd-protocol = { path = "../agentd-protocol" }
@@ -41,3 +46,4 @@ walkdir = "2"
 ratatui = "0.26"
 crossterm = "0.27"
 tui-textarea = "0.4"
+toml = "0.8"
