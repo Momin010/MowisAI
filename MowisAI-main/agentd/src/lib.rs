@@ -4,6 +4,8 @@
 //! This library implements the low-level runtime, the high-level API objects, and
 //! exposes a minimal C-compatible FFI.
 
+pub mod config;
+pub mod setup;
 pub mod logging;
 pub mod tui;
 pub mod agent;
