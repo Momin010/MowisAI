@@ -638,6 +638,7 @@ mod tests {
             max_agents: 10,
             max_verification_rounds: 1,
             staging_dir: None,
+            event_tx: None,
         };
 
         let orchestrator = NewOrchestrator::new(config);
