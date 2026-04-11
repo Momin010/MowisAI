@@ -52,6 +52,7 @@ pub struct App {
     pub orch_layer: u8,
     pub orch_completed: usize,
     pub orch_total: usize,
+    pub orchestrator_mode_enabled: bool,
 }
 
 impl App {
@@ -80,6 +81,7 @@ impl App {
             orch_layer: 0,
             orch_completed: 0,
             orch_total: 0,
+            orchestrator_mode_enabled: false,
         };
 
         app.messages.push(ChatMessage {
@@ -215,6 +217,13 @@ impl App {
 
         let intent = crate::intent::classify_intent(&text);
 
+        // Override intent if orchestrator mode is enabled
+        let intent = if self.orchestrator_mode_enabled {
+            crate::intent::UserIntent::Build
+        } else {
+            intent
+        };
+
         match intent {
             crate::intent::UserIntent::Chat => {
                 self.is_loading = true;
@@ -246,7 +255,7 @@ impl App {
             "/help" => {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "Commands:\n  /quit     \u{2014} Exit MowisAI\n  /clear    \u{2014} Clear chat history\n  /config   \u{2014} Show current configuration\n  /help     \u{2014} Show this message".into(),
+                    content: "Commands:\n  /quit                  — Exit MowisAI\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /orchestrator          — Enable orchestration mode (forces all prompts to use orchestrator)\n  /help                  — Show this message".into(),
                     timestamp: now(),
                 });
             }
@@ -254,11 +263,26 @@ impl App {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!(
-                        "Configuration:\n  Project: {}\n  Model: {}\n  Socket: {}\n  Max Agents: {}",
+                        "Configuration:\n  Project: {}\n  Model: {}\n  Socket: {}\n  Max Agents: {}\n  Orchestrator Mode: {}",
                         self.config.gcp_project_id,
                         self.config.model,
                         self.config.socket_path,
-                        self.config.max_agents
+                        self.config.max_agents,
+                        if self.orchestrator_mode_enabled { "ON ✓" } else { "OFF" }
+                    ),
+                    timestamp: now(),
+                });
+            }
+            "/orchestrator" => {
+                self.orchestrator_mode_enabled = !self.orchestrator_mode_enabled;
+                let status = if self.orchestrator_mode_enabled { "ON ✓" } else { "OFF" };
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "🔧 Orchestrator Mode: {}\n\
+                         All subsequent prompts will trigger the 7-phase orchestration pipeline.\n\
+                         Use /orchestrator again to disable.",
+                        status
                     ),
                     timestamp: now(),
                 });
