@@ -73,10 +73,10 @@ pub fn socket_is_responsive(socket_path: &str) -> bool {
     }
 }
 
-/// Get the PID of the socket server process (by checking for agentd socket process)
+/// Get the PID of the socket server process (by checking for mowisai socket process)
 pub fn get_socket_server_pid() -> Result<u32> {
     let output = Command::new("pgrep")
-        .args(["-f", "agentd.*socket"])
+        .args(["-f", "mowisai.*socket"])
         .output()?;
 
     if output.status.success() {
@@ -113,10 +113,28 @@ pub fn start_socket_server_daemon(socket_path: &str) -> Result<u32> {
     log::info!("Attempting to start socket server at {} with sudo...", socket_path);
 
     // Try to start socket server as background process with sudo
+    // Get the directory of the current executable to find the correct binary path
+    let current_exe = std::env::current_exe().unwrap_or_default();
+    let bin_dir = current_exe.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let release_binary = bin_dir.join("mowisai");
+    let debug_binary = std::path::PathBuf::from("target/debug/mowisai");
+    
+    // Prefer release binary if it exists, fall back to debug
+    let binary_path = if release_binary.exists() {
+        release_binary.to_string_lossy().to_string()
+    } else if debug_binary.exists() {
+        debug_binary.to_string_lossy().to_string()
+    } else {
+        // Try to find mowisai in PATH
+        "mowisai".to_string()
+    };
+    
+    log::info!("Starting socket server using binary: {}", binary_path);
+    
     let result = Command::new("sudo")
         .args([
             "-n", // non-interactive (use cached credentials)
-            "target/debug/agentd",
+            &binary_path,
             "socket",
             "--path",
             socket_path,
@@ -166,7 +184,7 @@ pub fn start_socket_server_daemon(socket_path: &str) -> Result<u32> {
             // Fall back to interactive sudo (will prompt user)
             let result = Command::new("sudo")
                 .args([
-                    "target/debug/agentd",
+                    &binary_path,
                     "socket",
                     "--path",
                     socket_path,
