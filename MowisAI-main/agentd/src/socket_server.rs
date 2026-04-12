@@ -88,6 +88,10 @@ pub struct SocketRequest {
     /// Execution backend for the sandbox lifecycle (e.g. "chroot", "guest_vm").
     /// If omitted, defaults to "chroot".
     pub backend: Option<String>,
+    /// Checkpoint ID for create_checkpoint and restore_checkpoint operations
+    pub checkpoint_id: Option<u64>,
+    /// Checkpoint directory path for create_checkpoint and restore_checkpoint
+    pub checkpoint_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -331,6 +335,28 @@ fn validate_request(req: &SocketRequest) -> Result<(), String> {
                 Err("destroy_container: missing sandbox id".to_string())
             } else if req.container.is_none() {
                 Err("destroy_container: missing container id".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        "create_checkpoint" => {
+            if req.sandbox.is_none() {
+                Err("create_checkpoint: missing sandbox id".to_string())
+            } else if req.container.is_none() {
+                Err("create_checkpoint: missing container id".to_string())
+            } else if req.checkpoint_dir.is_none() {
+                Err("create_checkpoint: missing checkpoint_dir".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        "restore_checkpoint" => {
+            if req.sandbox.is_none() {
+                Err("restore_checkpoint: missing sandbox id".to_string())
+            } else if req.container.is_none() {
+                Err("restore_checkpoint: missing container id".to_string())
+            } else if req.checkpoint_dir.is_none() {
+                Err("restore_checkpoint: missing checkpoint_dir".to_string())
             } else {
                 Ok(())
             }
@@ -942,6 +968,62 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             match COORDINATOR.get_agent_status(agent_id) {
                 Some(status) => SocketResponse::ok(Some(status)),
                 None => SocketResponse::err(format!("agent {} not found", agent_id)),
+            }
+        }
+
+        // ── create_checkpoint ───────────────────────────────────────────────
+        // Creates a checkpoint snapshot of a container's upper layer.
+        // This runs in the privileged agentd context, so it can access root-owned files.
+        "create_checkpoint" => {
+            let sandbox_id = match req.sandbox.as_ref().and_then(parse_id) {
+                Some(id) => id,
+                None => return SocketResponse::err("missing sandbox id"),
+            };
+            let container_id = match req.container.as_ref().and_then(parse_id) {
+                Some(id) => id,
+                None => return SocketResponse::err("missing container id"),
+            };
+            let checkpoint_dir = match req.checkpoint_dir.as_ref() {
+                Some(d) => std::path::PathBuf::from(d),
+                None => return SocketResponse::err("missing checkpoint_dir"),
+            };
+
+            match SANDBOXES.get(&sandbox_id) {
+                Some(sb) => match sb.checkpoint_container(container_id, &checkpoint_dir) {
+                    Ok(_) => SocketResponse::ok(Some(json!({
+                        "checkpoint_dir": checkpoint_dir.to_string_lossy().to_string()
+                    }))),
+                    Err(e) => SocketResponse::err(format!("checkpoint failed: {}", e)),
+                }
+                None => SocketResponse::err(format!("sandbox {} not found", sandbox_id)),
+            }
+        }
+
+        // ── restore_checkpoint ──────────────────────────────────────────────
+        // Restores a container's upper layer from a checkpoint snapshot.
+        // This runs in the privileged agentd context.
+        "restore_checkpoint" => {
+            let sandbox_id = match req.sandbox.as_ref().and_then(parse_id) {
+                Some(id) => id,
+                None => return SocketResponse::err("missing sandbox id"),
+            };
+            let container_id = match req.container.as_ref().and_then(parse_id) {
+                Some(id) => id,
+                None => return SocketResponse::err("missing container id"),
+            };
+            let checkpoint_dir = match req.checkpoint_dir.as_ref() {
+                Some(d) => std::path::PathBuf::from(d),
+                None => return SocketResponse::err("missing checkpoint_dir"),
+            };
+
+            match SANDBOXES.get(&sandbox_id) {
+                Some(sb) => match sb.restore_container(container_id, &checkpoint_dir) {
+                    Ok(_) => SocketResponse::ok(Some(json!({
+                        "restored_from": checkpoint_dir.to_string_lossy().to_string()
+                    }))),
+                    Err(e) => SocketResponse::err(format!("restore failed: {}", e)),
+                }
+                None => SocketResponse::err(format!("sandbox {} not found", sandbox_id)),
             }
         }
 

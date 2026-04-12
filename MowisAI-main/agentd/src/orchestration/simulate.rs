@@ -159,6 +159,7 @@ impl SimulateCommand {
             self.tool_delay,
             self.verbose,
             self.project_root.join(".checkpoints"),
+            self.socket.clone(),
         )?);
 
         let topology = Arc::new(topology);

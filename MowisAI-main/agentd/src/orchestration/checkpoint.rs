@@ -1,10 +1,15 @@
 //! Layer 4: Checkpoint system — Save/restore agent state after every tool call
+//!
+//! IMPORTANT: Checkpoint operations are delegated to agentd via socket API
+//! because agentd runs as root (required for overlayfs mounts/chroot) and
+//! can access root-owned files in the container's upper layer.
+//! The orchestrator runs as a non-root user, so direct file access would fail.
 
 use agentd_protocol::Checkpoint;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Checkpoint log containing all checkpoints for an agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,91 +84,104 @@ impl CheckpointLog {
     }
 }
 
-/// Checkpoint manager for creating/restoring snapshots
+/// Checkpoint manager that delegates to agentd via socket API
+/// 
+/// The agentd socket server runs as root (required for overlayfs/chroot)
+/// and can access the root-owned files in container upper directories.
+/// The orchestrator (running as a regular user) cannot access these files
+/// directly, so we delegate all checkpoint operations to agentd.
 pub struct CheckpointManager {
     checkpoint_root: PathBuf,
+    socket_path: String,
 }
 
 impl CheckpointManager {
-    pub fn new(checkpoint_root: PathBuf) -> Result<Self> {
+    pub fn new(checkpoint_root: PathBuf, socket_path: String) -> Result<Self> {
         std::fs::create_dir_all(&checkpoint_root)
             .context("Failed to create checkpoint root directory")?;
 
-        Ok(Self { checkpoint_root })
+        Ok(Self {
+            checkpoint_root,
+            socket_path,
+        })
     }
 
     /// Create checkpoint snapshot of agent's upper dir
+    /// 
+    /// This delegates to agentd via socket API because agentd runs as root
+    /// and can access the root-owned files in the container's upper layer.
     pub fn create_snapshot(
         &self,
         agent_id: &str,
         checkpoint_id: u64,
-        upper_dir: &Path,
+        sandbox_id: &str,
+        container_id: &str,
     ) -> Result<PathBuf> {
         let snapshot_dir = self
             .checkpoint_root
             .join(agent_id)
             .join(format!("checkpoint-{}", checkpoint_id));
 
+        // Create the parent directory first (this runs as user, that's fine)
         std::fs::create_dir_all(&snapshot_dir)
             .context("Failed to create snapshot directory")?;
 
-        #[cfg(target_os = "linux")]
-        {
-            // Use cp -al for hard-link copy (fast, low disk usage)
-            let cp_result = Command::new("cp")
-                .arg("-al")
-                .arg(upper_dir)
-                .arg(&snapshot_dir)
-                .output()
-                .context("Failed to execute cp command")?;
+        // Delegate the actual snapshot to agentd via socket
+        let request = json!({
+            "request_type": "create_checkpoint",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "checkpoint_dir": snapshot_dir.to_string_lossy().to_string()
+        });
 
-            if !cp_result.status.success() {
-                return Err(anyhow!(
-                    "Checkpoint snapshot failed: {}",
-                    String::from_utf8_lossy(&cp_result.stderr)
-                ));
-            }
-        }
+        let response = super::socket_roundtrip(&self.socket_path, &request)
+            .context("Failed to call create_checkpoint via socket")?;
 
-        #[cfg(not(target_os = "linux"))]
-        {
-            // Windows fallback - copy directory
-            copy_dir_recursive(upper_dir, &snapshot_dir)?;
+        if response.get("status").and_then(|s| s.as_str()) != Some("ok") {
+            let error = response
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("checkpoint failed");
+            return Err(anyhow!("Checkpoint snapshot failed: {}", error));
         }
 
         Ok(snapshot_dir)
     }
 
     /// Restore agent's upper dir from checkpoint snapshot
-    pub fn restore_snapshot(&self, upper_dir: &Path, snapshot_path: &Path) -> Result<()> {
-        // Remove current upper dir contents
-        if upper_dir.exists() {
-            std::fs::remove_dir_all(upper_dir).context("Failed to remove current upper dir")?;
-        }
-        std::fs::create_dir_all(upper_dir).context("Failed to recreate upper dir")?;
-
-        #[cfg(target_os = "linux")]
-        {
-            // Restore using cp -al
-            let restore_result = Command::new("cp")
-                .arg("-al")
-                .arg(format!("{}/*", snapshot_path.display()))
-                .arg(upper_dir)
-                .output()
-                .context("Failed to execute cp command")?;
-
-            if !restore_result.status.success() {
-                return Err(anyhow!(
-                    "Checkpoint restore failed: {}",
-                    String::from_utf8_lossy(&restore_result.stderr)
-                ));
-            }
+    /// 
+    /// This delegates to agentd via socket API because agentd runs as root
+    /// and can modify the root-owned files in the container's upper layer.
+    pub fn restore_snapshot(
+        &self,
+        sandbox_id: &str,
+        container_id: &str,
+        snapshot_path: &Path,
+    ) -> Result<()> {
+        if !snapshot_path.exists() {
+            return Err(anyhow!(
+                "Snapshot path does not exist: {}",
+                snapshot_path.display()
+            ));
         }
 
-        #[cfg(not(target_os = "linux"))]
-        {
-            // Windows fallback - copy directory
-            copy_dir_recursive(snapshot_path, upper_dir)?;
+        // Delegate the restore to agentd via socket
+        let request = json!({
+            "request_type": "restore_checkpoint",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "checkpoint_dir": snapshot_path.to_string_lossy().to_string()
+        });
+
+        let response = super::socket_roundtrip(&self.socket_path, &request)
+            .context("Failed to call restore_checkpoint via socket")?;
+
+        if response.get("status").and_then(|s| s.as_str()) != Some("ok") {
+            let error = response
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("restore failed");
+            return Err(anyhow!("Checkpoint restore failed: {}", error));
         }
 
         Ok(())
@@ -195,26 +213,6 @@ impl CheckpointManager {
         }
         Ok(())
     }
-}
-
-/// Recursive directory copy (Windows fallback)
-#[cfg(not(target_os = "linux"))]
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -254,9 +252,9 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_manager() {
-        let temp_dir = std::env::temp_dir().join("test_checkpoint_manager");
-        let manager = CheckpointManager::new(temp_dir.clone()).unwrap();
+    fn test_checkpoint_manager_paths() {
+        let temp_dir = std::env::temp_dir().join("test_checkpoint_manager_paths");
+        let manager = CheckpointManager::new(temp_dir.clone(), "/tmp/test.sock".to_string()).unwrap();
 
         let checkpoint_dir = manager.get_checkpoint_dir("agent-123");
         assert!(checkpoint_dir.to_string_lossy().contains("agent-123"));
