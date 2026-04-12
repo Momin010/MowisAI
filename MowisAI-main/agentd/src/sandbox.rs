@@ -15,6 +15,7 @@ use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use nix::sched;
 use nix::sys::resource::{setrlimit, Resource};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -626,6 +627,17 @@ impl Sandbox {
         fs::create_dir_all(&upper)?;
         fs::create_dir_all(&work)?;
         fs::create_dir_all(&root)?;
+
+        // Make container directories readable by all users so orchestration can checkpoint
+        #[cfg(unix)]
+        {
+            let perms = std::fs::Permissions::from_mode(0o755);
+            let _ = std::fs::set_permissions(&upper, perms.clone());
+            let _ = std::fs::set_permissions(&work, perms.clone());
+            let _ = std::fs::set_permissions(&root, perms);
+            // Also set permissions on the base directory itself
+            let _ = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755));
+        }
 
         // build the filesystem for the new container. when the sandbox was
         // created with an image we mount an overlay using that image as the
