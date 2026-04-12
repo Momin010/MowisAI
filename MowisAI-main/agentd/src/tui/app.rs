@@ -53,10 +53,11 @@ pub struct App {
     pub orch_completed: usize,
     pub orch_total: usize,
     pub orchestrator_mode_enabled: bool,
+    pub socket_pid: Option<u32>,
 }
 
 impl App {
-    pub fn new(config: MowisConfig) -> Self {
+    pub fn new(config: MowisConfig, socket_pid: Option<u32>) -> Self {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".to_string());
@@ -82,6 +83,7 @@ impl App {
             orch_completed: 0,
             orch_total: 0,
             orchestrator_mode_enabled: false,
+            socket_pid,
         };
 
         app.messages.push(ChatMessage {
@@ -242,7 +244,16 @@ impl App {
 
     fn handle_command(&mut self, cmd: &str) {
         match cmd {
-            "/quit" | "/exit" | "/q" => self.should_quit = true,
+            "/quit" | "/exit" | "/q" => {
+                // Kill socket server and exit
+                crate::request_quit_with_socket_cleanup(self.socket_pid);
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "Everything stopped. Goodbye!".into(),
+                    timestamp: now(),
+                });
+                self.should_quit = true;
+            }
             "/clear" => {
                 self.messages.clear();
                 self.conversation_history.clear();
@@ -255,7 +266,7 @@ impl App {
             "/help" => {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "Commands:\n  /quit                  — Exit MowisAI\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /orchestrator          — Enable orchestration mode (forces all prompts to use orchestrator)\n  /help                  — Show this message".into(),
+                    content: "Commands:\n  /quit                  — Exit MowisAI (kills socket server)\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /orchestrator          — Enable orchestration mode (forces all prompts to use orchestrator)\n  /kill-socket           — Explicitly kill the socket server\n  /socket status         — Show socket server status\n  /socket restart        — Restart the socket server\n  /help                  — Show this message".into(),
                     timestamp: now(),
                 });
             }
@@ -263,12 +274,13 @@ impl App {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!(
-                        "Configuration:\n  Project: {}\n  Model: {}\n  Socket: {}\n  Max Agents: {}\n  Orchestrator Mode: {}",
+                        "Configuration:\n  Project: {}\n  Model: {}\n  Socket: {}\n  Max Agents: {}\n  Orchestrator Mode: {}\n  Socket PID: {}",
                         self.config.gcp_project_id,
                         self.config.model,
                         self.config.socket_path,
                         self.config.max_agents,
-                        if self.orchestrator_mode_enabled { "ON ✓" } else { "OFF" }
+                        if self.orchestrator_mode_enabled { "ON ✓" } else { "OFF" },
+                        self.socket_pid.map_or("unknown".to_string(), |p| p.to_string())
                     ),
                     timestamp: now(),
                 });
@@ -286,6 +298,132 @@ impl App {
                     ),
                     timestamp: now(),
                 });
+            }
+            "/kill-socket" => {
+                if let Some(pid) = self.socket_pid {
+                    log::info!("Killing socket server (PID: {})", pid);
+                    let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+                    // Delete PID file
+                    if let Ok(config_dir) = std::env::home_dir() {
+                        let pid_file = config_dir.join(".mowisai").join(".socket-server.pid");
+                        let _ = std::fs::remove_file(pid_file);
+                    }
+                    self.socket_pid = None;
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "Socket server stopped. Run /launch to restart.".into(),
+                        timestamp: now(),
+                    });
+                } else {
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "Socket server is not running.".into(),
+                        timestamp: now(),
+                    });
+                }
+            }
+            "/socket status" => {
+                let status = if self.socket_pid.is_some() { "RUNNING ✓" } else { "STOPPED ✗" };
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "Socket Server Status:\n  Status: {}\n  PID: {}\n  Path: {}",
+                        status,
+                        self.socket_pid.map_or("N/A".to_string(), |p| p.to_string()),
+                        self.config.socket_path
+                    ),
+                    timestamp: now(),
+                });
+            }
+            "/socket restart" => {
+                if let Some(pid) = self.socket_pid {
+                    log::info!("Restarting socket server (PID: {})", pid);
+                    let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+                    // Delete PID file
+                    if let Ok(config_dir) = std::env::home_dir() {
+                        let pid_file = config_dir.join(".mowisai").join(".socket-server.pid");
+                        let _ = std::fs::remove_file(pid_file);
+                    }
+                    self.socket_pid = None;
+
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+
+                    // Start new socket server
+                    match crate::start_socket_server_daemon(&self.config.socket_path) {
+                        Ok(new_pid) => {
+                            self.socket_pid = Some(new_pid);
+                            self.messages.push(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("✓ Socket server restarted successfully (PID: {})", new_pid),
+                                timestamp: now(),
+                            });
+                        }
+                        Err(e) => {
+                            self.messages.push(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("✗ Failed to restart socket server: {}", e),
+                                timestamp: now(),
+                            });
+                        }
+                    }
+                } else {
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "Socket server is not running. Use /launch to start it.".into(),
+                        timestamp: now(),
+                    });
+                }
+            }
+            "/launch" => {
+                if self.socket_pid.is_some() {
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "Socket server is already running.".into(),
+                        timestamp: now(),
+                    });
+                } else {
+                    // Check if socket is responsive (might be running but we don't have PID)
+                    if crate::socket_is_responsive(&self.config.socket_path) {
+                        // Try to get the PID
+                        match crate::get_socket_server_pid() {
+                            Ok(pid) => {
+                                self.socket_pid = Some(pid);
+                                let _ = crate::save_socket_pid(pid);
+                                self.messages.push(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: format!("✓ Connected to existing socket server (PID: {})", pid),
+                                    timestamp: now(),
+                                });
+                            }
+                            Err(_) => {
+                                self.messages.push(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: "✓ Socket server is responsive but PID unknown".into(),
+                                    timestamp: now(),
+                                });
+                            }
+                        }
+                    } else {
+                        // Start new socket server
+                        match crate::start_socket_server_daemon(&self.config.socket_path) {
+                            Ok(pid) => {
+                                self.socket_pid = Some(pid);
+                                self.messages.push(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: format!("🚀 Socket server started successfully (PID: {})", pid),
+                                    timestamp: now(),
+                                });
+                            }
+                            Err(e) => {
+                                self.messages.push(ChatMessage {
+                                    role: MessageRole::System,
+                                    content: format!("✗ Failed to start socket server: {}", e),
+                                    timestamp: now(),
+                                });
+                            }
+                        }
+                    }
+                }
             }
             _ => {
                 self.messages.push(ChatMessage {

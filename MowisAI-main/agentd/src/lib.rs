@@ -33,6 +33,174 @@ pub mod vertex_agent;
 pub mod worker_agent;
 pub mod intent;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global shutdown flag for signal handling
+pub static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Check if shutdown was requested via signal
+pub fn is_shutdown_requested() -> bool {
+    SHUTDOWN_FLAG.load(Ordering::Acquire)
+}
+
+/// Set shutdown flag
+pub fn set_shutdown() {
+    SHUTDOWN_FLAG.store(true, Ordering::Release);
+}
+
+// Socket server management utilities
+use std::path::Path;
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
+use anyhow::Result;
+use std::fs;
+
+/// Check if socket server is responsive
+pub fn socket_is_responsive(socket_path: &str) -> bool {
+    use std::os::unix::net::UnixStream;
+
+    if !Path::new(socket_path).exists() {
+        return false;
+    }
+
+    match UnixStream::connect(socket_path) {
+        Ok(stream) => {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Get the PID of the socket server process (by checking for agentd socket process)
+pub fn get_socket_server_pid() -> Result<u32> {
+    let output = Command::new("pgrep")
+        .args(["-f", "agentd.*socket"])
+        .output()?;
+
+    if output.status.success() {
+        let pid_str = String::from_utf8_lossy(&output.stdout);
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            return Ok(pid);
+        }
+    }
+
+    Err(anyhow::anyhow!("Could not determine socket server PID"))
+}
+
+/// Save socket server PID to file
+pub fn save_socket_pid(pid: u32) -> Result<()> {
+    let config_dir = crate::config::MowisConfig::config_dir();
+    let pid_file = config_dir.join(".socket-server.pid");
+    fs::write(&pid_file, pid.to_string())?;
+    Ok(())
+}
+
+/// Read saved socket server PID from file
+pub fn read_socket_pid() -> Result<u32> {
+    let config_dir = crate::config::MowisConfig::config_dir();
+    let pid_file = config_dir.join(".socket-server.pid");
+    let pid_str = fs::read_to_string(&pid_file)?;
+    Ok(pid_str.trim().parse::<u32>()?)
+}
+
+/// Start socket server daemon with sudo
+pub fn start_socket_server_daemon(socket_path: &str) -> Result<u32> {
+    // Try to clean up stale socket
+    let _ = fs::remove_file(socket_path);
+
+    log::info!("Attempting to start socket server at {} with sudo...", socket_path);
+
+    // Try to start socket server as background process with sudo
+    let result = Command::new("sudo")
+        .args([
+            "-n", // non-interactive (use cached credentials)
+            "target/debug/agentd",
+            "socket",
+            "--path",
+            socket_path,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    match result {
+        Ok(_child) => {
+            // Give it a moment to start
+            thread::sleep(Duration::from_millis(500));
+
+            // Verify it started
+            if socket_is_responsive(socket_path) {
+                log::info!("✓ Socket server started successfully");
+
+                // Get PID and save it
+                match get_socket_server_pid() {
+                    Ok(pid) => {
+                        save_socket_pid(pid).ok();
+                        log::info!("Socket server PID: {}", pid);
+                        return Ok(pid);
+                    }
+                    Err(e) => {
+                        log::warn!("Started socket server but couldn't get PID: {}", e);
+                        return Err(e);
+                    }
+                }
+            } else {
+                log::warn!("Socket server started but not responding yet, retrying...");
+                thread::sleep(Duration::from_millis(1000));
+
+                if socket_is_responsive(socket_path) {
+                    log::info!("✓ Socket server up after retry");
+                    if let Ok(pid) = get_socket_server_pid() {
+                        save_socket_pid(pid).ok();
+                        return Ok(pid);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("Failed to start socket server with sudo -n: {}", e);
+            log::warn!("Trying interactive sudo prompt...");
+
+            // Fall back to interactive sudo (will prompt user)
+            let result = Command::new("sudo")
+                .args([
+                    "target/debug/agentd",
+                    "socket",
+                    "--path",
+                    socket_path,
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+
+            match result {
+                Ok(_child) => {
+                    thread::sleep(Duration::from_millis(500));
+
+                    if socket_is_responsive(socket_path) {
+                        log::info!("✓ Socket server started successfully");
+                        if let Ok(pid) = get_socket_server_pid() {
+                            save_socket_pid(pid).ok();
+                            return Ok(pid);
+                        } else {
+                            return Err(anyhow::anyhow!("Started but couldn't get PID"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to start socket server: {}", e);
+                    return Err(anyhow::anyhow!("Failed to start socket server: {}", e));
+                }
+            }
+        }
+    }
+
+    // If we get here, socket server didn't start
+    Err(anyhow::anyhow!("Socket server failed to start"))
+}
+
 /// Re-export infrastructure `Runtime` (crate `runtime`) for orchestration callers.
 pub mod runtime {
     pub use ::runtime::Runtime;

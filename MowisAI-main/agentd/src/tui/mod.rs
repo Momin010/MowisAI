@@ -16,7 +16,7 @@ use self::app::App;
 use self::event::{spawn_event_thread, TuiEvent};
 
 /// Main entry point: interactive Claude Code-style TUI
-pub fn run_interactive(config: MowisConfig) -> Result<()> {
+pub fn run_interactive(config: MowisConfig, socket_pid: Option<u32>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -30,7 +30,7 @@ pub fn run_interactive(config: MowisConfig) -> Result<()> {
         original_hook(info);
     }));
 
-    let result = run_loop(&mut terminal, config);
+    let result = run_loop(&mut terminal, config, socket_pid);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -42,8 +42,9 @@ pub fn run_interactive(config: MowisConfig) -> Result<()> {
 fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     config: MowisConfig,
+    socket_pid: Option<u32>,
 ) -> Result<()> {
-    let mut app = App::new(config);
+    let mut app = App::new(config, socket_pid);
 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<TuiEvent>();
     app.event_tx = Some(ui_tx.clone());
@@ -66,6 +67,18 @@ fn run_loop<B: ratatui::backend::Backend>(
         if app.should_quit {
             break;
         }
+
+        // Check for signal-based shutdown
+        if crate::is_shutdown_requested() {
+            log::info!("Shutdown signal received, exiting TUI...");
+            break;
+        }
+    }
+
+    // Print final message with socket server status
+    if let Some(pid) = app.socket_pid {
+        println!("✓ MowisAI closed. Socket server continues in background with PID: {}", pid);
+        println!("To stop socket server: kill {} or /kill-socket next time", pid);
     }
 
     Ok(())
