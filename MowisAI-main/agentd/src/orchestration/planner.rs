@@ -24,18 +24,51 @@ pub async fn plan_task(
     project_root: &Path,
     project_id: &str,
 ) -> Result<PlannerOutput> {
+    log::info!("Starting fast planner:");
+    log::info!("  Prompt: {}...", &prompt.chars().take(100).collect::<String>());
+    log::info!("  Project root: {:?}", project_root);
+    log::info!("  Project ID: {}", project_id);
+
+    // Validate inputs
+    if prompt.is_empty() {
+        return Err(anyhow!("Planner: Prompt cannot be empty"));
+    }
+    if !project_root.exists() {
+        return Err(anyhow!("Planner: Project root does not exist: {:?}", project_root));
+    }
+    if project_id.is_empty() {
+        return Err(anyhow!("Planner: Project ID cannot be empty"));
+    }
+
     // Step 1: Shell scan to get directory tree
-    let dir_tree = scan_directory_tree(project_root)?;
+    log::info!("  Scanning directory tree...");
+    let dir_tree = scan_directory_tree(project_root)
+        .context("Failed to scan directory tree")?;
+    log::info!("  Directory scan complete: {} bytes", dir_tree.len());
 
     // Step 2: Single Gemini call with prompt + dir tree
-    let gemini_response = call_gemini_planner(prompt, &dir_tree, project_id).await?;
+    log::info!("  Calling Gemini planner...");
+    let gemini_response = call_gemini_planner(prompt, &dir_tree, project_id)
+        .await
+        .context("Gemini planner call failed")?;
+    log::info!("  Gemini call complete: {} bytes", gemini_response.len());
 
     // Step 3: Parse response into task graph + topology
-    parse_planner_response(&gemini_response)
+    log::info!("  Parsing planner response...");
+    let output = parse_planner_response(&gemini_response)
+        .context("Failed to parse planner response")?;
+    log::info!("  Planning complete!");
+
+    Ok(output)
 }
 
 /// Scan directory tree using shell command (fast, no LLM)
 fn scan_directory_tree(root: &Path) -> Result<String> {
+    // Validate root path exists
+    if !root.exists() {
+        return Err(anyhow!("Project root does not exist: {:?}", root));
+    }
+
     #[cfg(target_os = "linux")]
     {
         // Try tree command first (better output)
@@ -49,35 +82,51 @@ fn scan_directory_tree(root: &Path) -> Result<String> {
 
         if let Ok(output) = tree_result {
             if output.status.success() {
-                return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+                let output_str = String::from_utf8_lossy(&output.stdout).to_string();
+                if !output_str.is_empty() {
+                    return Ok(output_str);
+                }
             }
         }
 
-        // Fallback to find command
+        // Fallback to find command with explicit parentheses for better clarity
         let find_result = Command::new("find")
             .arg(root)
             .arg("-maxdepth")
             .arg("3")
+            .arg("(")
             .arg("-type")
             .arg("d")
             .arg("-o")
             .arg("-type")
             .arg("f")
+            .arg(")")
             .output()
             .context("Failed to run find command")?;
 
-        if find_result.status.success() {
-            Ok(String::from_utf8_lossy(&find_result.stdout).to_string())
-        } else {
-            Err(anyhow!("Directory scan failed"))
+        if !find_result.status.success() {
+            let stderr = String::from_utf8_lossy(&find_result.stderr);
+            return Err(anyhow!("find command failed: {}", stderr));
         }
+
+        let output_str = String::from_utf8(find_result.stdout)
+            .context("Failed to convert find output to UTF-8")?;
+
+        if output_str.is_empty() {
+            return Err(anyhow!("Directory scan returned empty result"));
+        }
+
+        Ok(output_str)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        // Windows fallback - manual directory walk
+        // Windows/non-linux fallback - manual directory walk
         let mut result = String::new();
         walk_dir_recursive(root, 0, 3, &mut result)?;
+        if result.is_empty() {
+            return Err(anyhow!("Directory scan returned empty result"));
+        }
         Ok(result)
     }
 }
@@ -118,6 +167,16 @@ async fn call_gemini_planner(
     dir_tree: &str,
     project_id: &str,
 ) -> Result<String> {
+    if prompt.is_empty() {
+        return Err(anyhow!("Empty prompt provided to planner"));
+    }
+    if project_id.is_empty() {
+        return Err(anyhow!("Empty project_id provided to planner"));
+    }
+    if dir_tree.is_empty() {
+        return Err(anyhow!("Empty directory tree from scan"));
+    }
+
     let access_token = super::gcloud_access_token()?;
     let url = super::vertex_generate_url(project_id);
 
@@ -198,15 +257,16 @@ Output ONLY valid JSON in this exact format:
         .await
         .context("Failed to send request to Gemini")?;
 
-    if !response.status().is_success() {
-        let error_text = response.text().await.unwrap_or_default();
-        return Err(anyhow!("Gemini API error: {}", error_text));
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "unknown error".to_string());
+        return Err(anyhow!("Gemini API error ({}): {}", status, error_text));
     }
 
     let response_json: serde_json::Value = response
         .json()
         .await
-        .context("Failed to parse Gemini response")?;
+        .context("Failed to parse Gemini response as JSON")?;
 
     // Extract text from response
     let text = response_json
@@ -217,13 +277,21 @@ Output ONLY valid JSON in this exact format:
         .and_then(|p| p.get(0))
         .and_then(|p| p.get("text"))
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("Invalid Gemini response structure"))?;
+        .ok_or_else(|| anyhow!("Invalid Gemini response structure: missing candidates/content/parts/text"))?;
+
+    if text.is_empty() {
+        return Err(anyhow!("Gemini returned empty response"));
+    }
 
     Ok(text.to_string())
 }
 
 /// Parse planner response into structured output
 fn parse_planner_response(response: &str) -> Result<PlannerOutput> {
+    if response.is_empty() {
+        return Err(anyhow!("Empty response from planner"));
+    }
+
     // Extract JSON from response (may have markdown code blocks)
     let json_str = if response.contains("```json") {
         response
@@ -242,6 +310,10 @@ fn parse_planner_response(response: &str) -> Result<PlannerOutput> {
     }
     .trim();
 
+    if json_str.is_empty() {
+        return Err(anyhow!("No JSON content found in planner response"));
+    }
+
     #[derive(Deserialize)]
     struct PlannerJson {
         task_graph: TaskGraph,
@@ -249,7 +321,15 @@ fn parse_planner_response(response: &str) -> Result<PlannerOutput> {
     }
 
     let parsed: PlannerJson =
-        serde_json::from_str(json_str).context("Failed to parse planner JSON")?;
+        serde_json::from_str(json_str).context(format!("Failed to parse planner JSON from: {}", json_str.chars().take(200).collect::<String>()))?;
+
+    // Validate we have at least one task and one sandbox
+    if parsed.task_graph.tasks.is_empty() {
+        return Err(anyhow!("Planner returned empty task graph"));
+    }
+    if parsed.sandbox_topology.sandboxes.is_empty() {
+        return Err(anyhow!("Planner returned empty sandbox topology"));
+    }
 
     // Build sandbox hints map (task_id -> sandbox_name)
     let mut sandbox_hints = HashMap::new();
@@ -263,6 +343,12 @@ fn parse_planner_response(response: &str) -> Result<PlannerOutput> {
             }
         }
     }
+
+    log::info!(
+        "Planner generated {} tasks across {} sandboxes",
+        parsed.task_graph.tasks.len(),
+        parsed.sandbox_topology.sandboxes.len()
+    );
 
     Ok(PlannerOutput {
         task_graph: parsed.task_graph,

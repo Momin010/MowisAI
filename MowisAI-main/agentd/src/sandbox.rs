@@ -631,6 +631,7 @@ impl Sandbox {
         // Make container directories readable by all users so orchestration can checkpoint
         #[cfg(unix)]
         {
+            use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o755);
             let _ = std::fs::set_permissions(&upper, perms.clone());
             let _ = std::fs::set_permissions(&work, perms.clone());
