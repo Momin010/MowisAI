@@ -274,7 +274,7 @@ impl App {
             "/help" => {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "Commands:\n  /quit                  — Exit MowisAI (kills socket server)\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /orchestrator          — Enable orchestration mode (forces all prompts to use orchestrator)\n  /kill-socket           — Explicitly kill the socket server\n  /socket status         — Show socket server status\n  /socket restart        — Restart the socket server\n  /help                  — Show this message".into(),
+                    content: "Commands:\n  /quit                  — Exit MowisAI (kills socket server)\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /version               — Show version info\n  /orchestrator          — Enable orchestration mode (forces all prompts to use orchestrator)\n  /kill-socket           — Explicitly kill the socket server\n  /socket status         — Show socket server status\n  /socket restart        — Restart the socket server\n  /help                  — Show this message".into(),
                     timestamp: now(),
                 });
             }
@@ -282,13 +282,27 @@ impl App {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!(
-                        "Configuration:\n  Project: {}\n  Model: {}\n  Socket: {}\n  Max Agents: {}\n  Orchestrator Mode: {}\n  Socket PID: {}",
+                        "Configuration:\n  Version: {}\n  Project: {}\n  Model: {}\n  Socket: {}\n  Max Agents: {}\n  Orchestrator Mode: {}\n  Socket PID: {}",
+                        crate::version::full_version(),
                         self.config.gcp_project_id,
                         self.config.model,
                         self.config.socket_path,
                         self.config.max_agents,
                         if self.orchestrator_mode_enabled { "ON ✓" } else { "OFF" },
                         self.socket_pid.map_or("unknown".to_string(), |p| p.to_string())
+                    ),
+                    timestamp: now(),
+                });
+            }
+            "/version" => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "MowisAI {}\n  OS: {}-{}\n  Build: {}",
+                        crate::version::full_version(),
+                        std::env::consts::OS,
+                        std::env::consts::ARCH,
+                        crate::version::build_type()
                     ),
                     timestamp: now(),
                 });
