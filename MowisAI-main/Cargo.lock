@@ -28,6 +28,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "textwrap",
  "thiserror 1.0.69",

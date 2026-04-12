@@ -70,21 +70,6 @@ pub fn is_shutdown_requested() -> bool {
     libagent::is_shutdown_requested()
 }
 
-/// Request shutdown programmatically (for /quit command)
-pub fn request_quit_with_socket_cleanup(socket_pid: Option<u32>) {
-    // Kill socket server if we have its PID
-    if let Some(pid) = socket_pid {
-        log::info!("Killing socket server (PID: {})", pid);
-        let _ = Command::new("kill").arg(pid.to_string()).output();
-        // Delete PID file
-        if let Ok(config_dir) = std::env::home_dir() {
-            let pid_file = config_dir.join(".mowisai").join(".socket-server.pid");
-            let _ = fs::remove_file(pid_file);
-        }
-    }
-    SHUTDOWN_FLAG.store(true, Ordering::Release);
-}
-
 
 /// Ensure socket server is running — auto-start if needed
 fn ensure_socket_server(socket_path: &str) -> Result<()> {

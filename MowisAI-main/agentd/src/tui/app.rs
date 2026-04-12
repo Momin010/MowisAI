@@ -246,7 +246,15 @@ impl App {
         match cmd {
             "/quit" | "/exit" | "/q" => {
                 // Kill socket server and exit
-                crate::request_quit_with_socket_cleanup(self.socket_pid);
+                if let Some(pid) = self.socket_pid {
+                    log::info!("Killing socket server (PID: {})", pid);
+                    let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+                    // Delete PID file
+                    if let Some(config_dir) = std::env::home_dir() {
+                        let pid_file = config_dir.join(".mowisai").join(".socket-server.pid");
+                        let _ = std::fs::remove_file(pid_file);
+                    }
+                }
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: "Everything stopped. Goodbye!".into(),
@@ -304,7 +312,7 @@ impl App {
                     log::info!("Killing socket server (PID: {})", pid);
                     let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
                     // Delete PID file
-                    if let Ok(config_dir) = std::env::home_dir() {
+                    if let Some(config_dir) = std::env::home_dir() {
                         let pid_file = config_dir.join(".mowisai").join(".socket-server.pid");
                         let _ = std::fs::remove_file(pid_file);
                     }
@@ -340,7 +348,7 @@ impl App {
                     log::info!("Restarting socket server (PID: {})", pid);
                     let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
                     // Delete PID file
-                    if let Ok(config_dir) = std::env::home_dir() {
+                    if let Some(config_dir) = std::env::home_dir() {
                         let pid_file = config_dir.join(".mowisai").join(".socket-server.pid");
                         let _ = std::fs::remove_file(pid_file);
                     }
