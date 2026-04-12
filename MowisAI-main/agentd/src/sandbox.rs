@@ -628,7 +628,10 @@ impl Sandbox {
         fs::create_dir_all(&work)?;
         fs::create_dir_all(&root)?;
 
-        // Make container directories readable by all users so orchestration can checkpoint
+        // Make container directories readable by all users for basic access.
+        // NOTE: Checkpoint operations now run via agentd socket (privileged),
+        // so we don't need 777 permissions here. The orchestrator calls
+        // create_checkpoint/restore_checkpoint which run as root in agentd.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -796,6 +799,67 @@ impl Sandbox {
     /// get the upper (writable layer) path for a container
     pub fn get_container_upper(&self, container_id: u64) -> Option<PathBuf> {
         self.containers.get(&container_id).map(|c| c.upper.clone())
+    }
+
+    /// create a checkpoint snapshot of a container's upper layer
+    /// this is called from the privileged socket server context
+    pub fn checkpoint_container(&self, container_id: u64, snapshot_dir: &Path) -> anyhow::Result<()> {
+        let upper = self.get_container_upper(container_id)
+            .ok_or_else(|| anyhow::anyhow!("container {} not found", container_id))?;
+        
+        // Ensure snapshot directory exists
+        std::fs::create_dir_all(snapshot_dir)?;
+        
+        // Use cp -a to preserve permissions and do a regular copy
+        // (not hard links since we want a true snapshot)
+        let cp_result = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(upper.join("."))
+            .arg(snapshot_dir)
+            .output()?;
+        
+        if !cp_result.status.success() {
+            return Err(anyhow::anyhow!(
+                "checkpoint failed: {}",
+                String::from_utf8_lossy(&cp_result.stderr)
+            ));
+        }
+        
+        Ok(())
+    }
+
+    /// restore a container's upper layer from a checkpoint snapshot
+    pub fn restore_container(&self, container_id: u64, snapshot_dir: &Path) -> anyhow::Result<()> {
+        let upper = self.get_container_upper(container_id)
+            .ok_or_else(|| anyhow::anyhow!("container {} not found", container_id))?;
+        
+        // Remove current upper contents
+        if upper.exists() {
+            // Make writable first (in case files are read-only)
+            let _ = std::process::Command::new("chmod")
+                .arg("-R")
+                .arg("+w")
+                .arg(&upper)
+                .output();
+            std::fs::remove_dir_all(&upper)?;
+        }
+        std::fs::create_dir_all(&upper)?;
+        
+        // Restore from snapshot
+        let cp_result = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(snapshot_dir.join("."))
+            .arg(&upper)
+            .output()?;
+        
+        if !cp_result.status.success() {
+            return Err(anyhow::anyhow!(
+                "restore failed: {}",
+                String::from_utf8_lossy(&cp_result.stderr)
+            ));
+        }
+        
+        Ok(())
     }
 
     /// destroy a container and clean up its resources

@@ -40,22 +40,12 @@ impl AgentExecutor {
     ) -> Result<Self> {
         Ok(Self {
             project_id,
-            socket_path,
-            checkpoint_manager: CheckpointManager::new(checkpoint_root)?,
+            socket_path: socket_path.clone(),
+            checkpoint_manager: CheckpointManager::new(checkpoint_root, socket_path)?,
             max_tool_rounds: super::MAX_TOOL_ROUNDS,
             max_tier1_retries: 3,
             max_tier2_retries: 2,
         })
-    }
-
-    /// Get the host path to the container's upper directory.
-    /// This is the actual path on the host filesystem, not the in-container path.
-    /// The agent's layer.upper_dir stores the in-container path (/sandbox/...),
-    /// but checkpoints run on the host where we need /tmp/container-{id}/upper.
-    fn get_host_upper_dir(&self, agent: &AgentHandle) -> PathBuf {
-        // Container ID is already the full ID (numeric with random bits)
-        // The host stores containers at /tmp/container-{container_id}/upper
-        PathBuf::from(format!("/tmp/container-{}/upper", agent.container_id))
     }
 
     /// Execute task with agent
@@ -111,12 +101,14 @@ impl AgentExecutor {
 
                     // Tier 2: Restore from last checkpoint
                     if let Some(last_checkpoint) = checkpoint_log.latest() {
-                        // Use host path, not in-container path
-                        let upper_dir = self.get_host_upper_dir(agent);
                         let snapshot_path = PathBuf::from(&last_checkpoint.layer_snapshot_path);
 
                         if snapshot_path.exists() {
-                            match self.checkpoint_manager.restore_snapshot(&upper_dir, &snapshot_path) {
+                            match self.checkpoint_manager.restore_snapshot(
+                                &agent.sandbox_name,
+                                &agent.container_id,
+                                &snapshot_path
+                            ) {
                                 Ok(()) => {
                                     log::info!("  ✓ Restored checkpoint {} for agent {}",
                                         last_checkpoint.id, &agent.agent_id[..8]);
@@ -313,12 +305,12 @@ impl AgentExecutor {
         // Create checkpoint after successful tool call
         let checkpoint_id = checkpoint_log.checkpoints.len() as u64;
 
-        // Create actual snapshot of agent's upper layer (using host path)
-        let upper_dir = self.get_host_upper_dir(agent);
+        // Create snapshot via agentd socket (runs as root, can access container upper layer)
         let snapshot_path = self.checkpoint_manager.create_snapshot(
             &agent.agent_id,
             checkpoint_id,
-            &upper_dir,
+            &agent.sandbox_name,
+            &agent.container_id,
         )?;
 
         let checkpoint = Checkpoint {
