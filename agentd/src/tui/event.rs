@@ -22,6 +22,7 @@ pub enum TuiEvent {
     GeminiError(String),
     OrchEvent(OrchActivityEvent),
     OrchDone,
+    LogEntry { level: String, message: String, timestamp: u64 },
 }
 
 pub fn spawn_event_thread(tx: mpsc::Sender<TuiEvent>, tick_rate: Duration) -> thread::JoinHandle<()> {

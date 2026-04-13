@@ -104,7 +104,7 @@ Keep test tasks small and focused. Use deps to order tests properly.
             .timeout(std::time::Duration::from_secs(60))
             .send()
             .await
-            .context("Failed to send verification planning request")?
+            .context("Failed to send verification planning request")?;
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -192,7 +192,7 @@ Each fix task should be specific and actionable.
             .timeout(std::time::Duration::from_secs(60))
             .send()
             .await
-            .context("Failed to send fix task request")?
+            .context("Failed to send fix task request")?;
 
         if !response.status().is_success() {
             return Ok(vec![]); // Return empty on error
