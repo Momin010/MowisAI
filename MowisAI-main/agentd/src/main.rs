@@ -4,6 +4,7 @@
 //   mowisai
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use libagent::config::MowisConfig;
 use libagent::setup::SetupWizard;
 use std::fs;
@@ -12,29 +13,58 @@ use std::thread;
 use std::time::Duration;
 use std::path::Path;
 
+#[derive(Parser)]
+#[command(name = "agentd")]
+#[command(about = "MowisAI — AI agent orchestration engine")]
+struct Args {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the socket server
+    Socket {
+        /// Path to the unix socket
+        #[arg(long)]
+        path: String,
+    },
+}
+
 fn main() -> Result<()> {
-    let log_path = MowisConfig::config_dir().join("mowisai.log");
-    let _ = libagent::logging::init(&log_path);
+    let args = Args::parse();
 
-    let config = if SetupWizard::needs_setup() {
-        SetupWizard::run()?
-    } else {
-        MowisConfig::load()?.unwrap_or_default()
-    };
+    match args.command {
+        Some(Commands::Socket { path }) => {
+            // Run socket server
+            libagent::socket_server::run(&path)?;
+        }
+        None => {
+            // Run TUI
+            let log_path = MowisConfig::config_dir().join("mowisai.log");
+            let _ = libagent::logging::init(&log_path);
 
-    let socket_path = config.socket_path.clone();
+            let config = if SetupWizard::needs_setup() {
+                SetupWizard::run()?
+            } else {
+                MowisConfig::load()?.unwrap_or_default()
+            };
 
-    // Set up signal handlers for graceful shutdown
-    setup_signal_handlers();
+            let socket_path = config.socket_path.clone();
 
-    // Ensure socket server is running (with auto-start)
-    ensure_socket_server(&socket_path)?;
+            // Set up signal handlers for graceful shutdown
+            setup_signal_handlers();
 
-    // Store socket PID for cleanup on quit
-    let socket_pid = libagent::read_socket_pid().ok();
+            // Ensure socket server is running (with auto-start)
+            ensure_socket_server(&socket_path)?;
 
-    // Run TUI
-    libagent::tui::run_interactive(config, socket_pid)?;
+            // Store socket PID for cleanup on quit
+            let socket_pid = libagent::read_socket_pid().ok();
+
+            // Run TUI
+            libagent::tui::run_interactive(config, socket_pid)?;
+        }
+    }
 
     Ok(())
 }
