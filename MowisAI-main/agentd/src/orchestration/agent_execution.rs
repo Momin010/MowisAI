@@ -482,15 +482,17 @@ impl AgentExecutor {
             }
         }
 
-        // Step 2: Get diff against last commit
-        // Use --cached to see staged changes (since we just ran git add -A)
+        // Step 2: Get diff against last commit.
+        // Use `git diff --cached HEAD` for repos that have commits.
+        // If HEAD doesn't exist (shouldn't happen after create_agent_layer fix,
+        // but kept as fallback), `git diff --cached` shows all staged files.
         let diff_request = json!({
             "request_type": "invoke_tool",
             "sandbox": sandbox_id,
             "container": container_id,
             "name": "run_command",
             "input": {
-                "cmd": "cd /workspace && git diff --cached HEAD",
+                "cmd": "cd /workspace && (git rev-parse HEAD 2>/dev/null && git diff --cached HEAD || git diff --cached)",
                 "timeout": 60
             }
         });

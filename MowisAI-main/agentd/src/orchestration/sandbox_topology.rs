@@ -189,7 +189,7 @@ impl TopologyManager {
         });
         super::socket_roundtrip(&self.socket_path, &config_request)?;
 
-        // Step 3: git add -A (stage everything)
+        // Step 3: git add -A (stage everything that already exists)
         let add_request = json!({
             "request_type": "invoke_tool",
             "sandbox": sandbox_id,
@@ -202,9 +202,22 @@ impl TopologyManager {
         });
         super::socket_roundtrip(&self.socket_path, &add_request)?;
 
-        // We DO NOT create a base commit here anymore.
-        // The sandbox already has the current git state including all previously applied changes.
-        // Agents will diff against whatever the current HEAD is.
+        // Step 4: create a base commit so HEAD exists.
+        // capture_git_diff() uses `git diff --cached HEAD` — without a HEAD
+        // (i.e., a repo with no commits) that command silently returns nothing,
+        // causing every agent to produce an empty diff and Layer 5/6 to be skipped.
+        // `--allow-empty` handles the case where /workspace has no files yet.
+        let commit_request = json!({
+            "request_type": "invoke_tool",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "name": "run_command",
+            "input": {
+                "cmd": "cd /workspace && (git rev-parse HEAD 2>/dev/null || git commit --allow-empty -m 'base')",
+                "timeout": 15
+            }
+        });
+        super::socket_roundtrip(&self.socket_path, &commit_request)?;
 
         log::info!("  → Git repo initialized with base commit");
 
