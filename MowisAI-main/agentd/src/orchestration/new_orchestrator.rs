@@ -535,17 +535,16 @@ impl NewOrchestrator {
                         .cloned()
                         .collect();
 
-                    match verification_loop
-                        .verify_sandbox(
-                            sandbox_name,
-                            diff,
-                            &original_tasks,
-                            &topology,
-                            &agent_executor,
-                        )
-                        .await
-                    {
-                        Ok(vr) => {
+                    let verify_timeout = tokio::time::Duration::from_secs(300); // 5 min max
+                    let verify_future = verification_loop.verify_sandbox(
+                        sandbox_name,
+                        diff,
+                        &original_tasks,
+                        &topology,
+                        &agent_executor,
+                    );
+                    match tokio::time::timeout(verify_timeout, verify_future).await {
+                        Ok(Ok(vr)) => {
                             log::info!(
                                 "  ✓ {} — {:?} ({} passed, {} failed)",
                                 sandbox_name,
@@ -556,10 +555,15 @@ impl NewOrchestrator {
                             sandbox_result.verification_status = vr.status.clone();
                             verification_status.insert(sandbox_name.clone(), vr.status);
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             log::warn!("  ⚠ Verification failed for {}: {}", sandbox_name, e);
                             sandbox_result.verification_status = VerificationStatus::Failed;
                             verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
+                        }
+                        Err(_) => {
+                            log::warn!("  ⚠ Verification timed out for {} after 5 minutes, skipping", sandbox_name);
+                            sandbox_result.verification_status = VerificationStatus::NotStarted;
+                            verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
                         }
                     }
                 } else {
