@@ -7,6 +7,7 @@ use super::event::{OrchActivityEvent, TuiEvent};
 pub enum MainView {
     Chat,
     Orchestration,
+    Development,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +55,8 @@ pub struct App {
     pub orch_total: usize,
     pub orchestrator_mode_enabled: bool,
     pub socket_pid: Option<u32>,
+    pub dev_log: Vec<(String, String, u64)>,
+    pub dev_mode_active: bool,
 }
 
 impl App {
@@ -84,6 +87,8 @@ impl App {
             orch_total: 0,
             orchestrator_mode_enabled: false,
             socket_pid,
+            dev_log: Vec::with_capacity(1000),
+            dev_mode_active: false,
         };
 
         app.messages.push(ChatMessage {
@@ -113,11 +118,12 @@ impl App {
             return;
         }
 
-        // Tab always toggles view during orchestration
-        if key.code == KeyCode::Tab && self.orchestrating {
+        // Tab cycles through views during orchestration or dev mode
+        if key.code == KeyCode::Tab && (self.orchestrating || self.dev_mode_active) {
             self.view_mode = match self.view_mode {
                 MainView::Chat => MainView::Orchestration,
-                MainView::Orchestration => MainView::Chat,
+                MainView::Orchestration => MainView::Development,
+                MainView::Development => MainView::Chat,
             };
             return;
         }
@@ -274,7 +280,7 @@ impl App {
             "/help" => {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "Commands:\n  /quit                  — Exit MowisAI (kills socket server)\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /version               — Show version info\n  /orchestrator          — Enable orchestration mode (forces all prompts to use orchestrator)\n  /kill-socket           — Explicitly kill the socket server\n  /socket status         — Show socket server status\n  /socket restart        — Restart the socket server\n  /help                  — Show this message".into(),
+                    content: "Commands:\n  /quit                  — Exit MowisAI (kills socket server)\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /version               — Show version info\n  /orchestrator          — Enable orchestration mode (forces all prompts to use orchestrator)\n  /development           — Toggle development log view (shows all internal logs)\n  /kill-socket           — Explicitly kill the socket server\n  /socket status         — Show socket server status\n  /socket restart        — Restart the socket server\n  /help                  — Show this message".into(),
                     timestamp: now(),
                 });
             }
@@ -392,6 +398,25 @@ impl App {
                     self.messages.push(ChatMessage {
                         role: MessageRole::System,
                         content: "Socket server is not running. Use /launch to start it.".into(),
+                        timestamp: now(),
+                    });
+                }
+            }
+            "/development" => {
+                self.dev_mode_active = !self.dev_mode_active;
+                if self.dev_mode_active {
+                    self.view_mode = MainView::Development;
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "Development mode ON — showing all internal logs. Tab cycles Chat → Orchestration → Development. /development to toggle off.".into(),
+                        timestamp: now(),
+                    });
+                } else {
+                    self.view_mode = MainView::Chat;
+                    self.dev_log.clear();
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "Development mode OFF.".into(),
                         timestamp: now(),
                     });
                 }
@@ -747,6 +772,15 @@ impl App {
             content: format!("Error: {}", error),
             timestamp: now(),
         });
+    }
+
+    pub fn on_log_entry(&mut self, level: String, message: String, timestamp: u64) {
+        if self.dev_mode_active {
+            self.dev_log.push((level, message, timestamp));
+            if self.dev_log.len() > 1000 {
+                self.dev_log.remove(0);
+            }
+        }
     }
 }
 

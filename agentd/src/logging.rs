@@ -14,6 +14,7 @@ static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 lazy_static! {
     static ref LOGGER: Mutex<Option<StructuredLogger>> = Mutex::new(None);
+    static ref TUI_LOG_SENDER: Mutex<Option<std::sync::mpsc::Sender<(String, String, u64)>>> = Mutex::new(None);
 }
 
 struct StructuredLogger {
@@ -97,13 +98,32 @@ pub fn set_tui_active(active: bool) {
     TUI_ACTIVE.store(active, Ordering::Relaxed);
 }
 
+/// Register a sender to forward log entries to the TUI development view.
+pub fn set_tui_log_sender(sender: std::sync::mpsc::Sender<(String, String, u64)>) {
+    if let Ok(mut guard) = TUI_LOG_SENDER.lock() {
+        *guard = Some(sender);
+    }
+}
+
 /// Write a structured log entry.
 pub fn log(level: &str, message: &str) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     if let Ok(mut guard) = LOGGER.lock() {
         if let Some(ref mut logger) = *guard {
             logger.write_entry(level, message);
         }
     }
+
+    if let Ok(guard) = TUI_LOG_SENDER.lock() {
+        if let Some(ref sender) = *guard {
+            let _ = sender.send((level.to_string(), message.to_string(), timestamp));
+        }
+    }
+
     // Mirror to stderr when TUI is not active
     if !TUI_ACTIVE.load(Ordering::Relaxed) {
         eprintln!("[{}] {}", level, message);

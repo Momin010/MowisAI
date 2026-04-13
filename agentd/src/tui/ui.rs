@@ -34,10 +34,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_title(f, app, chunks[0]);
 
-    if app.orchestrating && app.view_mode == MainView::Orchestration {
-        draw_orchestration_dashboard(f, app, chunks[1]);
-    } else {
-        draw_chat(f, app, chunks[1]);
+    match app.view_mode {
+        MainView::Development => draw_development_view(f, app, chunks[1]),
+        MainView::Orchestration if app.orchestrating => draw_orchestration_dashboard(f, app, chunks[1]),
+        _ => draw_chat(f, app, chunks[1]),
     }
 
     draw_input(f, app, chunks[2]);
@@ -53,7 +53,8 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
             .count();
         let view_hint = match app.view_mode {
             MainView::Chat => "[Tab: dashboard]",
-            MainView::Orchestration => "[Tab: chat]",
+            MainView::Orchestration => "[Tab: dev logs]",
+            MainView::Development => "[Tab: chat]",
         };
         format!(
             " MowisAI  \u{b7}  {}  \u{b7}  {}  \u{b7}  \u{1f528} Orchestrating \u{2014} {} agent{} active  {}",
@@ -62,6 +63,11 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
             active,
             if active == 1 { "" } else { "s" },
             view_hint,
+        )
+    } else if app.dev_mode_active {
+        format!(
+            " MowisAI  \u{b7}  {}  \u{b7}  {}  \u{b7}  [DEV MODE] Tab: cycle views | /development to toggle",
+            app.config.model, app.config.gcp_project_id
         )
     } else {
         format!(
@@ -184,6 +190,65 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         .scroll((scroll as u16, 0));
 
     f.render_widget(chat, inner);
+}
+
+fn draw_development_view(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(100, 100, 255)))
+        .title(Span::styled(
+            " Development Log (all internal logs) ",
+            Style::default()
+                .fg(Color::Rgb(100, 100, 255))
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let avail_width = inner.width as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (level, message, timestamp) in &app.dev_log {
+        let color = match level.as_str() {
+            "ERROR" => Color::Rgb(220, 60, 60),
+            "WARN" => Color::Rgb(255, 180, 0),
+            "INFO" => Color::Rgb(0, 220, 140),
+            "DEBUG" => Color::Rgb(150, 150, 150),
+            _ => Color::White,
+        };
+
+        let time_str = format!(
+            "[{:02}:{:02}:{:02}] ",
+            (timestamp % 86400) / 3600,
+            (timestamp % 3600) / 60,
+            timestamp % 60,
+        );
+
+        let full_line = format!("{}{}: {}", time_str, level, message);
+        let wrapped = textwrap::wrap(&full_line, avail_width.max(10));
+        for line in wrapped {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(color),
+            )));
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No log entries yet. Internal activity will appear here.",
+            Style::default().fg(Color::Rgb(80, 80, 80)),
+        )));
+    }
+
+    let total = lines.len();
+    let visible = inner.height as usize;
+    let scroll = if total > visible { (total - visible) as u16 } else { 0 };
+
+    let widget = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    f.render_widget(widget, inner);
 }
 
 fn draw_orchestration_dashboard(f: &mut Frame, app: &App, area: Rect) {

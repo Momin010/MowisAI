@@ -48,7 +48,28 @@ fn run_loop<B: ratatui::backend::Backend>(
 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<TuiEvent>();
     app.event_tx = Some(ui_tx.clone());
-    let _event_thread = spawn_event_thread(ui_tx, std::time::Duration::from_millis(50));
+    let _event_thread = spawn_event_thread(ui_tx.clone(), std::time::Duration::from_millis(50));
+
+    // Log forwarding channel: log entries are sent here and forwarded as TuiEvent::LogEntry
+    let (log_tx, log_rx) = std::sync::mpsc::channel::<(String, String, u64)>();
+    crate::logging::set_tui_log_sender(log_tx);
+    let ui_tx_for_logs = ui_tx.clone();
+    std::thread::spawn(move || {
+        loop {
+            match log_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok((level, message, timestamp)) => {
+                    if ui_tx_for_logs
+                        .send(TuiEvent::LogEntry { level, message, timestamp })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    });
 
     loop {
         terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -61,6 +82,9 @@ fn run_loop<B: ratatui::backend::Backend>(
             Ok(TuiEvent::GeminiError(err)) => app.on_gemini_error(err),
             Ok(TuiEvent::OrchEvent(ev)) => app.on_orch_event(ev),
             Ok(TuiEvent::OrchDone) => app.on_orch_done(),
+            Ok(TuiEvent::LogEntry { level, message, timestamp }) => {
+                app.on_log_entry(level, message, timestamp);
+            }
             _ => {}
         }
 
