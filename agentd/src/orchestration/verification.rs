@@ -101,10 +101,10 @@ Keep test tasks small and focused. Use deps to order tests properly.
             .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "application/json")
             .json(&request_body)
-            .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(60))
             .send()
             .await
-            .context("Failed to send verification planning request")?;
+            .context("Failed to send verification planning request")?
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -189,10 +189,10 @@ Each fix task should be specific and actionable.
             .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "application/json")
             .json(&request_body)
-            .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(60))
             .send()
             .await
-            .context("Failed to send fix task request")?;
+            .context("Failed to send fix task request")?
 
         if !response.status().is_success() {
             return Ok(vec![]); // Return empty on error
@@ -272,15 +272,19 @@ impl VerificationLoop {
         let mut passed_tests = Vec::new();
         let mut failed_tests = Vec::new();
         let mut rounds_completed = 0;
+        log::info!("[VERIFY] Starting verification for sandbox: {}", sandbox_name);
+        log::info!("[VERIFY] Merged diff length: {} chars", merged_diff.len());
+        log::info!("[VERIFY] Original tasks count: {}", original_tasks.len());
 
         for round in 0..self.max_rounds {
             rounds_completed = round + 1;
-            log::info!("  → Verification round {}/{}", round + 1, self.max_rounds);
+            log::info!("[VERIFY] Round {}/{} — calling Gemini to generate test tasks", round + 1, self.max_rounds);
 
             // Generate test tasks (LLM call)
             let plan = self.planner
                 .generate_test_tasks(sandbox_name, merged_diff, original_tasks)
                 .await?;
+            log::info!("[VERIFY] Gemini returned {} test tasks", plan.test_tasks.tasks.len());
 
             // Execute each test task
             let mut round_failures = Vec::new();
@@ -291,6 +295,7 @@ impl VerificationLoop {
             ];
 
             for test_task in &plan.test_tasks.tasks {
+                log::info!("[VERIFY] Creating agent for test task: {}", test_task.id);
                 let agent = match topology
                     .create_agent_layer(sandbox_name, Some(test_task.id.clone()))
                     .await
@@ -321,9 +326,11 @@ impl VerificationLoop {
 
                 match result {
                     Ok(r) if r.success => {
+                        log::info!("[VERIFY] Test task {} result: success={}", test_task.id, true);
                         passed_tests.push(test_task.id.clone());
                     }
                     Ok(r) => {
+                        log::info!("[VERIFY] Test task {} result: success={}", test_task.id, false);
                         let error = r.error.unwrap_or_else(|| "Test failed".to_string());
                         failed_tests.push(test_task.id.clone());
                         round_failures.push((
@@ -333,6 +340,7 @@ impl VerificationLoop {
                         ));
                     }
                     Err(e) => {
+                        log::info!("[VERIFY] Test task {} result: success={}", test_task.id, false);
                         failed_tests.push(test_task.id.clone());
                         round_failures.push((
                             test_task.id.clone(),
