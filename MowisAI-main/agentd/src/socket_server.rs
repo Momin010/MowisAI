@@ -4,7 +4,9 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -1197,6 +1199,39 @@ pub fn run_server(path: &str) -> Result<()> {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+pub fn run(socket_path: &str) -> Result<()> {
+    // Setup logging
+    let log_path = std::path::PathBuf::from("/tmp/agentd.log");
+    let _ = crate::logging::init(&log_path);
+
+    // Check gcloud - temporarily disabled for testing
+    // if !Command::new("gcloud").arg("--version").output().is_ok() {
+    //     eprintln!("gcloud CLI not found. Install it and try again.");
+    //     std::process::exit(1);
+    // }
+
+    // Bind listener
+    let listener = UnixListener::bind(socket_path)?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
+
+    println!("Socket server listening on {}", socket_path);
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                thread::spawn(|| {
+                    if let Err(e) = handle_connection(stream) {
+                        eprintln!("Connection error: {}", e);
+                    }
+                });
+            }
+            Err(e) => eprintln!("Accept error: {}", e),
+        }
+    }
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

@@ -68,7 +68,18 @@ impl CheckpointLog {
     pub fn prune(&mut self, keep_last: usize) -> Result<()> {
         if self.checkpoints.len() > keep_last {
             let to_remove = self.checkpoints.len() - keep_last;
-            let _ = self.checkpoints.drain(..to_remove);
+            let removed = self.checkpoints.drain(..to_remove).collect::<Vec<_>>();
+
+            // Delete old checkpoint snapshots
+            for checkpoint in removed {
+                let snapshot_path = PathBuf::from(&checkpoint.layer_snapshot_path);
+                if snapshot_path.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&snapshot_path) {
+                        log::warn!("Failed to remove old checkpoint snapshot {}: {}", snapshot_path.display(), e);
+                    }
+                }
+            }
+
             self.save()?;
         }
         Ok(())
