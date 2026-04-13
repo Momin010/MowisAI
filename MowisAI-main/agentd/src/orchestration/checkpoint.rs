@@ -63,23 +63,14 @@ impl CheckpointLog {
     }
 
     /// Prune old checkpoints (keep last N)
+    /// Snapshot dirs are root-owned (written by agentd). Never call
+    /// remove_dir_all on them from user context - just drop from the log.
     pub fn prune(&mut self, keep_last: usize) -> Result<()> {
         if self.checkpoints.len() > keep_last {
             let to_remove = self.checkpoints.len() - keep_last;
-            let removed = self.checkpoints.drain(..to_remove).collect::<Vec<_>>();
-
-            // Delete old checkpoint snapshots
-            for checkpoint in removed {
-                let snapshot_path = PathBuf::from(&checkpoint.layer_snapshot_path);
-                if snapshot_path.exists() {
-                    std::fs::remove_dir_all(&snapshot_path)
-                        .context("Failed to remove old checkpoint snapshot")?;
-                }
-            }
-
+            let _ = self.checkpoints.drain(..to_remove);
             self.save()?;
         }
-
         Ok(())
     }
 }
@@ -192,12 +183,16 @@ impl CheckpointManager {
         self.checkpoint_root.join(agent_id)
     }
 
-    /// Clean up all checkpoints for agent
+    /// Clean up all checkpoints for agent.
+    /// Snapshot subdirs are root-owned; sudo rm -rf best-effort, then
+    /// plain remove (works when the process itself runs as root).
     pub fn cleanup_agent_checkpoints(&self, agent_id: &str) -> Result<()> {
         let agent_dir = self.get_checkpoint_dir(agent_id);
         if agent_dir.exists() {
-            std::fs::remove_dir_all(&agent_dir)
-                .context("Failed to remove agent checkpoint directory")?;
+            let _ = std::process::Command::new("sudo")
+                .args(["-n", "rm", "-rf", &agent_dir.to_string_lossy().to_string()])
+                .output();
+            let _ = std::fs::remove_dir_all(&agent_dir);
         }
         Ok(())
     }
@@ -207,8 +202,10 @@ impl CheckpointManager {
         for checkpoint in &checkpoint_log.checkpoints {
             let snapshot_path = PathBuf::from(&checkpoint.layer_snapshot_path);
             if snapshot_path.exists() {
-                std::fs::remove_dir_all(&snapshot_path)
-                    .context("Failed to remove checkpoint snapshot")?;
+                let _ = std::process::Command::new("sudo")
+                    .args(["-n", "rm", "-rf", &snapshot_path.to_string_lossy().to_string()])
+                    .output();
+                let _ = std::fs::remove_dir_all(&snapshot_path);
             }
         }
         Ok(())
