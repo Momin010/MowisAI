@@ -18,6 +18,7 @@ use self::event::{spawn_event_thread, TuiEvent};
 /// Main entry point: interactive Claude Code-style TUI
 pub fn run_interactive(config: MowisConfig, socket_pid: Option<u32>) -> Result<()> {
     enable_raw_mode()?;
+    crate::logging::set_tui_active(true);
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -32,6 +33,7 @@ pub fn run_interactive(config: MowisConfig, socket_pid: Option<u32>) -> Result<(
 
     let result = run_loop(&mut terminal, config, socket_pid);
 
+    crate::logging::set_tui_active(false);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -74,18 +76,21 @@ fn run_loop<B: ratatui::backend::Backend>(
     loop {
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
-        match ui_rx.try_recv() {
-            Ok(TuiEvent::Key(key)) => app.handle_key(key),
-            Ok(TuiEvent::Tick) => app.on_tick(),
-            Ok(TuiEvent::GeminiChunk(text)) => app.on_gemini_chunk(text),
-            Ok(TuiEvent::GeminiDone) => app.on_gemini_done(),
-            Ok(TuiEvent::GeminiError(err)) => app.on_gemini_error(err),
-            Ok(TuiEvent::OrchEvent(ev)) => app.on_orch_event(ev),
-            Ok(TuiEvent::OrchDone) => app.on_orch_done(),
-            Ok(TuiEvent::LogEntry { level, message, timestamp }) => {
-                app.on_log_entry(level, message, timestamp);
+        // Drain all pending events before the next draw so log bursts don't lag behind.
+        loop {
+            match ui_rx.try_recv() {
+                Ok(TuiEvent::Key(key)) => app.handle_key(key),
+                Ok(TuiEvent::Tick) => app.on_tick(),
+                Ok(TuiEvent::GeminiChunk(text)) => app.on_gemini_chunk(text),
+                Ok(TuiEvent::GeminiDone) => app.on_gemini_done(),
+                Ok(TuiEvent::GeminiError(err)) => app.on_gemini_error(err),
+                Ok(TuiEvent::OrchEvent(ev)) => app.on_orch_event(ev),
+                Ok(TuiEvent::OrchDone) => app.on_orch_done(),
+                Ok(TuiEvent::LogEntry { level, message, timestamp }) => {
+                    app.on_log_entry(level, message, timestamp);
+                }
+                _ => break,
             }
-            _ => {}
         }
 
         if app.should_quit {
