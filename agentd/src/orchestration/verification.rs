@@ -272,13 +272,11 @@ impl VerificationLoop {
         let mut passed_tests = Vec::new();
         let mut failed_tests = Vec::new();
         let mut rounds_completed = 0;
-        log::info!("[VERIFY] Starting verification for sandbox: {}", sandbox_name);
-        log::info!("[VERIFY] Merged diff length: {} chars", merged_diff.len());
-        log::info!("[VERIFY] Original tasks count: {}", original_tasks.len());
+        log::info!("[VERIFY] Starting for sandbox: {}, diff_len: {}, tasks: {}", sandbox_name, merged_diff.len(), original_tasks.len());
 
         for round in 0..self.max_rounds {
             rounds_completed = round + 1;
-            log::info!("[VERIFY] Round {}/{} — calling Gemini to generate test tasks", round + 1, self.max_rounds);
+            log::info!("[VERIFY] Round {}/{} — calling Gemini for test tasks", round + 1, self.max_rounds);
 
             // Generate test tasks (LLM call)
             let plan = self.planner
@@ -295,7 +293,7 @@ impl VerificationLoop {
             ];
 
             for test_task in &plan.test_tasks.tasks {
-                log::info!("[VERIFY] Creating agent for test task: {}", test_task.id);
+                log::info!("[VERIFY] Running test task: {}", test_task.id);
                 let agent = match topology
                     .create_agent_layer(sandbox_name, Some(test_task.id.clone()))
                     .await
@@ -326,11 +324,11 @@ impl VerificationLoop {
 
                 match result {
                     Ok(r) if r.success => {
-                        log::info!("[VERIFY] Test task {} result: success={}", test_task.id, true);
+                        log::info!("[VERIFY] Test task {} finished: success={}", test_task.id, r.success);
                         passed_tests.push(test_task.id.clone());
                     }
                     Ok(r) => {
-                        log::info!("[VERIFY] Test task {} result: success={}", test_task.id, false);
+                        log::info!("[VERIFY] Test task {} finished: success={}", test_task.id, r.success);
                         let error = r.error.unwrap_or_else(|| "Test failed".to_string());
                         failed_tests.push(test_task.id.clone());
                         round_failures.push((
@@ -340,7 +338,7 @@ impl VerificationLoop {
                         ));
                     }
                     Err(e) => {
-                        log::info!("[VERIFY] Test task {} result: success={}", test_task.id, false);
+                        log::info!("[VERIFY] Test task {} finished: success={}", test_task.id, false);
                         failed_tests.push(test_task.id.clone());
                         round_failures.push((
                             test_task.id.clone(),
@@ -368,6 +366,7 @@ impl VerificationLoop {
                 ];
 
                 for (test_id, desc, error) in &round_failures {
+                    log::info!("[VERIFY] Generating fix tasks for failed test: {}", test_id);
                     let fix_tasks = self.planner
                         .generate_fix_tasks(test_id, desc, error)
                         .await
