@@ -775,11 +775,9 @@ impl App {
     }
 
     pub fn on_log_entry(&mut self, level: String, message: String, timestamp: u64) {
-        if self.dev_mode_active {
-            self.dev_log.push((level, message, timestamp));
-            if self.dev_log.len() > 1000 {
-                self.dev_log.remove(0);
-            }
+        self.dev_log.push((level, message, timestamp));
+        if self.dev_log.len() > 1000 {
+            self.dev_log.remove(0);
         }
     }
 }
