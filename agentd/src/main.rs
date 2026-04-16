@@ -29,6 +29,8 @@ enum Commands {
         #[arg(long)]
         path: String,
     },
+    /// Run full orchestration simulation with mock agents (no LLM calls)
+    Simulate(libagent::orchestration::simulate::SimulateCommand),
 }
 
 fn main() -> Result<()> {
@@ -38,6 +40,11 @@ fn main() -> Result<()> {
         Some(Commands::Socket { path }) => {
             // Run socket server
             libagent::socket_server::run(&path)?;
+        }
+        Some(Commands::Simulate(cmd)) => {
+            let log_path = MowisConfig::config_dir().join("mowisai.log");
+            let _ = libagent::logging::init(&log_path);
+            tokio::runtime::Runtime::new()?.block_on(cmd.run())?;
         }
         None => {
             // Run TUI
