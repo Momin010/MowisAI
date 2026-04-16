@@ -164,6 +164,128 @@ impl MockAgentExecutor {
         })
     }
 
+    /// Execute a verification test task — reads workspace files and returns
+    /// pass/fail based on `failure_rate`. Used by `SimulatedVerificationLoop`.
+    pub async fn execute_verification_task(
+        &self,
+        agent: &AgentHandle,
+        test_description: &str,
+        topology: &TopologyManager,
+        failure_rate: f64,
+    ) -> Result<AgentResult> {
+        if self.verbose {
+            log::info!(
+                "  [VERIFY] Mock test agent {}: {}",
+                &agent.agent_id[..8],
+                test_description
+            );
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(self.tool_delay_ms)).await;
+
+        // Simulate reading files from the sandbox to verify they exist
+        let ls_request = serde_json::json!({
+            "request_type": "invoke_tool",
+            "sandbox": &agent.sandbox_name,
+            "container": &agent.container_id,
+            "name": "run_command",
+            "input": {
+                "cmd": "cd /workspace && ls -la 2>&1 || true",
+                "timeout": 10
+            }
+        });
+
+        let _ls_result = super::socket_roundtrip(topology.socket_path(), &ls_request)?;
+
+        if self.verbose {
+            log::info!("  [VERIFY]   → ls /workspace: ok");
+        }
+
+        // Determine pass/fail based on failure_rate
+        if rand::random::<f64>() < failure_rate {
+            log::info!(
+                "  [VERIFY]   → Test FAILED (simulated, rate={:.0}%)",
+                failure_rate * 100.0
+            );
+            return Ok(AgentResult {
+                task_id: agent.task_id.clone().unwrap_or_default(),
+                success: false,
+                git_diff: None,
+                error: Some(format!(
+                    "Simulated test failure for: {}",
+                    test_description
+                )),
+                checkpoint_log: vec![],
+                timestamp: current_timestamp(),
+            });
+        }
+
+        log::info!("  [VERIFY]   → Test PASSED");
+        Ok(AgentResult {
+            task_id: agent.task_id.clone().unwrap_or_default(),
+            success: true,
+            git_diff: None,
+            error: None,
+            checkpoint_log: vec![],
+            timestamp: current_timestamp(),
+        })
+    }
+
+    /// Execute a fix task — writes a mock fix file and returns success.
+    pub async fn execute_fix_task(
+        &self,
+        agent: &AgentHandle,
+        fix_description: &str,
+        topology: &TopologyManager,
+    ) -> Result<AgentResult> {
+        if self.verbose {
+            log::info!(
+                "  [VERIFY] Mock fix agent {}: {}",
+                &agent.agent_id[..8],
+                fix_description
+            );
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(self.tool_delay_ms)).await;
+
+        // Write a mock fix marker file so the sandbox has evidence of fix application
+        let fix_content = format!(
+            "// Fix applied by mock agent {}\n// Fix: {}\n// Timestamp: {}\n",
+            &agent.agent_id[..8],
+            fix_description,
+            current_timestamp()
+        );
+
+        let write_request = serde_json::json!({
+            "request_type": "invoke_tool",
+            "sandbox": &agent.sandbox_name,
+            "container": &agent.container_id,
+            "name": "write_file",
+            "input": {
+                "path": format!("/workspace/.fix_{}.txt", &agent.agent_id[..8]),
+                "content": fix_content
+            }
+        });
+
+        let _write_result = super::socket_roundtrip(topology.socket_path(), &write_request)?;
+
+        if self.verbose {
+            log::info!("  [VERIFY]   → Fix applied successfully");
+        }
+
+        Ok(AgentResult {
+            task_id: agent.task_id.clone().unwrap_or_default(),
+            success: true,
+            git_diff: Some(format!(
+                "+++ fix applied: {}\n+{}\n",
+                fix_description, fix_content
+            )),
+            error: None,
+            checkpoint_log: vec![],
+            timestamp: current_timestamp(),
+        })
+    }
+
     /// Capture git diff from agent layer
     async fn capture_git_diff(&self, agent: &AgentHandle, topology: &TopologyManager) -> Result<String> {
         let sandbox_id = &agent.sandbox_name;
