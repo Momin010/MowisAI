@@ -177,21 +177,25 @@ impl Sandbox {
                 upper.display(),
                 work.display()
             );
-            mount(
+            match mount(
                 Some("overlay"),
                 root.path(),
                 Some("overlay"),
                 MsFlags::empty(),
                 Some(opts.as_str()),
-            )
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "overlayfs mount failed for {}: {} (must run as root)",
-                    img_ref,
-                    e
-                )
-            })?;
-            log::info!("mounted {} via overlayfs into sandbox {}", img_ref, id);
+            ) {
+                Ok(()) => {
+                    log::info!("mounted {} via overlayfs into sandbox {}", img_ref, id);
+                }
+                Err(e) => {
+                    log::warn!("overlayfs mount failed for {} ({}); falling back to rootfs copy", img_ref, e);
+                    // Clear and copy instead
+                    sandbox_upper = None;
+                    copy_dir_recursive(&img_path, root.path())
+                        .context("copy image rootfs into sandbox root")?;
+                    log::info!("copied {} rootfs into sandbox {}", img_ref, id);
+                }
+            }
         } else {
             // no image: plain empty tmpfs
             if let Err(e) = mount(
@@ -756,26 +760,35 @@ impl Sandbox {
                     workspace_work.display()
                 );
 
-                mount(
+                match mount(
                     Some("overlay"),
                     &workspace_dir,
                     Some("overlay"),
                     MsFlags::empty(),
                     Some(workspace_opts.as_str()),
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "container {} failed to mount isolated workspace overlay: {}",
-                        id,
-                        e
-                    )
-                })?;
-
-                log::info!(
-                    "container {} mounted isolated workspace overlay from {}",
-                    id,
-                    workspace_lower.display()
-                );
+                ) {
+                    Ok(()) => {
+                        log::info!(
+                            "container {} mounted isolated workspace overlay from {}",
+                            id,
+                            workspace_lower.display()
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "container {} overlayfs workspace mount failed ({}); falling back to copy",
+                            id,
+                            e
+                        );
+                        copy_dir_recursive(&workspace_lower, &workspace_dir)
+                            .context("copy project root into container workspace")?;
+                        log::info!(
+                            "container {} copied workspace from {}",
+                            id,
+                            workspace_lower.display()
+                        );
+                    }
+                }
             }
         }
 
@@ -881,6 +894,7 @@ impl Sandbox {
 
     /// run a command inside the sandbox, returning stdout output or an error.
     /// this function uses `unshare` + `chroot` to isolate the process.
+
     pub fn run_command(&self, cmd: &str) -> Result<String> {
         let root_path = self.root.path().to_owned();
         let _sid = self.id; // copy id so closure doesn't borrow self
@@ -976,4 +990,25 @@ impl Sandbox {
         stdout.push_str(&String::from_utf8_lossy(&output.stdout));
         Ok(stdout)
     }
+}
+
+/// Recursively copy `src` directory contents into `dst`.
+/// Used as a fallback when overlayfs is unavailable (e.g., Docker-on-overlay).
+pub fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let ftype = entry.file_type()?;
+        if ftype.is_dir() {
+            fs::create_dir_all(&dst_path)?;
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if ftype.is_symlink() {
+            let target = fs::read_link(&src_path)?;
+            let _ = std::os::unix::fs::symlink(&target, &dst_path);
+        } else {
+            let _ = fs::copy(&src_path, &dst_path);
+        }
+    }
+    Ok(())
 }

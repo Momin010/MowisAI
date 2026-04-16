@@ -44,6 +44,12 @@ fn main() -> Result<()> {
         Some(Commands::Simulate(cmd)) => {
             let log_path = MowisConfig::config_dir().join("mowisai.log");
             let _ = libagent::logging::init(&log_path);
+            // Initialize env_logger so log::info! macros work
+            env_logger::Builder::from_env(
+                env_logger::Env::default().default_filter_or("info"),
+            )
+            .format_timestamp_secs()
+            .init();
             tokio::runtime::Runtime::new()?.block_on(cmd.run())?;
         }
         None => {
