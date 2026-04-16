@@ -28,6 +28,8 @@ pub struct VerificationResult {
 pub struct VerificationPlanner {
     project_id: String,
     max_rounds: usize,
+    /// Per-test agent execution timeout in seconds (default: 60)
+    pub max_test_execution_time: u64,
 }
 
 impl VerificationPlanner {
@@ -35,6 +37,7 @@ impl VerificationPlanner {
         Self {
             project_id,
             max_rounds,
+            max_test_execution_time: 60,
         }
     }
 
@@ -135,7 +138,7 @@ Keep test tasks small and focused. Use deps to order tests properly.
         }
 
         let parsed: VerificationJson =
-            serde_json::from_str(json_str).context("Failed to parse verification JSON")?;
+            serde_json::from_str(&json_str).context("Failed to parse verification JSON")?;
 
         Ok(VerificationPlan {
             test_tasks: parsed.test_tasks,
@@ -221,29 +224,91 @@ Each fix task should be specific and actionable.
         }
 
         let parsed: FixTasksJson =
-            serde_json::from_str(json_str).unwrap_or(FixTasksJson { fix_tasks: vec![] });
+            serde_json::from_str(&json_str).unwrap_or(FixTasksJson { fix_tasks: vec![] });
 
         Ok(parsed.fix_tasks)
     }
 }
 
-/// Extract JSON from text (handle markdown code blocks)
-fn extract_json(text: &str) -> &str {
-    if text.contains("```json") {
-        text.split("```json")
-            .nth(1)
-            .and_then(|s| s.split("```").next())
-            .unwrap_or(text)
-            .trim()
-    } else if text.contains("```") {
-        text.split("```")
-            .nth(1)
-            .and_then(|s| s.split("```").next())
-            .unwrap_or(text)
-            .trim()
-    } else {
-        text.trim()
+/// Extract JSON from text (handle markdown code blocks).
+///
+/// Handles multiple code blocks (takes the first valid JSON one), blocks with
+/// or without language tags, and plain text that is already valid JSON.
+/// Returns a trimmed `String` and lets the caller report a parse error if
+/// none of the candidates are valid JSON.
+fn extract_json(text: &str) -> String {
+    // 1. Collect all fenced-code-block candidates, in order.
+    //    Both ```json and ``` (no tag) are accepted.
+    let mut candidates: Vec<&str> = Vec::new();
+    let mut rest = text;
+    while let Some(fence_start) = rest.find("```") {
+        let after_fence = &rest[fence_start + 3..];
+        // Skip the optional language tag (everything up to the first newline)
+        let content_start = match after_fence.find('\n') {
+            Some(nl) => &after_fence[nl + 1..],
+            None => after_fence,
+        };
+        if let Some(fence_end) = content_start.find("```") {
+            let candidate = content_start[..fence_end].trim();
+            if !candidate.is_empty() {
+                candidates.push(candidate);
+            }
+            // Advance past the closing fence
+            let consumed = fence_start
+                + 3
+                + (after_fence.len() - content_start.len())
+                + fence_end
+                + 3;
+            rest = &rest[consumed.min(rest.len())..];
+        } else {
+            break;
+        }
     }
+
+    // Return the first candidate that is valid JSON
+    for candidate in &candidates {
+        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+            return candidate.to_string();
+        }
+    }
+
+    // 2. Try the whole trimmed text as plain JSON
+    let trimmed = text.trim();
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+
+    // 3. Scan for the first top-level JSON object in the text
+    if let Some(brace_start) = trimmed.find('{') {
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut escape_next = false;
+        for (i, ch) in trimmed[brace_start..].char_indices() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_string => escape_next = true,
+                '"' => in_string = !in_string,
+                '{' if !in_string => depth += 1,
+                '}' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let candidate = trimmed[brace_start..brace_start + i + 1].trim();
+                        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                            return candidate.to_string();
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 4. Fallback — return trimmed text and let the caller surface the parse error
+    trimmed.to_string()
 }
 
 /// Verification loop controller
@@ -276,6 +341,10 @@ impl VerificationLoop {
 
         for round in 0..self.max_rounds {
             rounds_completed = round + 1;
+            // Bug 3: reset per-round tracking so the final result only reflects
+            // the last completed round, preventing double-counting across rounds.
+            passed_tests.clear();
+            failed_tests.clear();
             log::info!("[VERIFY] Round {}/{} — calling Gemini for test tasks", round + 1, self.max_rounds);
 
             // Generate test tasks (LLM call)
@@ -300,6 +369,10 @@ impl VerificationLoop {
                 {
                     Ok(a) => a,
                     Err(e) => {
+                        log::error!(
+                            "[VERIFY] Failed to create agent for test {} in sandbox {}: {}",
+                            test_task.id, sandbox_name, e
+                        );
                         failed_tests.push(test_task.id.clone());
                         round_failures.push((
                             test_task.id.clone(),
@@ -316,9 +389,31 @@ impl VerificationLoop {
                     test_task.description
                 );
 
-                let result = agent_executor
-                    .execute_task(&agent, &test_task.description, &test_tools, &test_prompt)
-                    .await;
+                let result = match tokio::time::timeout(
+                    std::time::Duration::from_secs(self.planner.max_test_execution_time),
+                    agent_executor.execute_task(
+                        &agent,
+                        &test_task.description,
+                        &test_tools,
+                        &test_prompt,
+                    ),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => {
+                        log::warn!(
+                            "[VERIFY] Test task {} timed out after {}s in sandbox {}",
+                            test_task.id,
+                            self.planner.max_test_execution_time,
+                            sandbox_name
+                        );
+                        Err(anyhow!(
+                            "Test execution timeout after {}s",
+                            self.planner.max_test_execution_time
+                        ))
+                    }
+                };
 
                 let _ = topology.destroy_agent_layer(&agent.agent_id).await;
 
@@ -385,9 +480,62 @@ impl VerificationLoop {
                         };
 
                         let fix_prompt = format!("Fix this issue: {}", fix_task.description);
-                        let _ = agent_executor
-                            .execute_task(&agent, &fix_task.description, &fix_tools, &fix_prompt)
-                            .await;
+                        let fix_result = match tokio::time::timeout(
+                            std::time::Duration::from_secs(self.planner.max_test_execution_time),
+                            agent_executor.execute_task(
+                                &agent,
+                                &fix_task.description,
+                                &fix_tools,
+                                &fix_prompt,
+                            ),
+                        )
+                        .await
+                        {
+                            Ok(r) => r,
+                            Err(_) => {
+                                log::warn!(
+                                    "[VERIFY] Fix task {} timed out after {}s",
+                                    fix_task.id,
+                                    self.planner.max_test_execution_time
+                                );
+                                Err(anyhow!("Fix execution timeout"))
+                            }
+                        };
+
+                        match fix_result {
+                            Ok(r) if r.success => {
+                                if let Some(ref diff) = r.git_diff {
+                                    if !diff.is_empty() {
+                                        if let Err(e) = topology
+                                            .apply_diff_to_sandbox(sandbox_name, diff)
+                                            .await
+                                        {
+                                            log::warn!(
+                                                "[VERIFY] Failed to apply fix diff for task {} to sandbox {}: {}",
+                                                fix_task.id, sandbox_name, e
+                                            );
+                                        } else {
+                                            log::info!(
+                                                "[VERIFY] Applied fix diff for task {} to sandbox {}",
+                                                fix_task.id, sandbox_name
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(r) => {
+                                log::warn!(
+                                    "[VERIFY] Fix task {} did not succeed: {:?}",
+                                    fix_task.id, r.error
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "[VERIFY] Fix task {} execution failed: {}",
+                                    fix_task.id, e
+                                );
+                            }
+                        }
 
                         let _ = topology.destroy_agent_layer(&agent.agent_id).await;
                     }
