@@ -394,13 +394,30 @@ impl VerificationLoop {
         original_tasks: &[Task],
         topology: &TopologyManager,
         agent_executor: &AgentExecutor,
+        event_tx: Option<&std::sync::mpsc::Sender<super::OrchestratorEvent>>,
     ) -> Result<VerificationResult> {
+        // Helper to send events (no-op if event_tx is None)
+        let send_event = |msg: String| {
+            if let Some(tx) = event_tx {
+                let _ = tx.send(super::OrchestratorEvent::LayerProgress {
+                    layer: 6,
+                    message: msg,
+                });
+            }
+        };
+
         // Per-round vectors; cleared at the start of each round so the final
         // result reflects only what happened in the last completed round.
         let mut passed_tests: Vec<TaskId> = Vec::new();
         let mut failed_tests: Vec<TaskId> = Vec::new();
         let mut rounds_completed = 0;
 
+        let start_msg = format!(
+            "[Sandbox: {}] Running {} test round(s)...",
+            sandbox_name,
+            self.max_rounds
+        );
+        send_event(start_msg.clone());
         log::info!(
             "[VERIFY] Starting for sandbox: {}, diff_len: {}, tasks: {}",
             sandbox_name,
@@ -439,6 +456,8 @@ impl VerificationLoop {
             ];
 
             for test_task in &plan.test_tasks.tasks {
+                let test_msg = format!("  ✓ Test: {}", test_task.description);
+                send_event(test_msg);
                 log::info!("[VERIFY] Running test task: {}", test_task.id);
 
                 let agent = match topology
@@ -505,6 +524,8 @@ impl VerificationLoop {
 
                 match result {
                     Ok(r) if r.success => {
+                        let success_msg = format!("    ✓ {} passed", test_task.description);
+                        send_event(success_msg);
                         log::info!(
                             "[VERIFY] Test task {} finished: success=true",
                             test_task.id
@@ -513,6 +534,8 @@ impl VerificationLoop {
                     }
                     Ok(r) => {
                         let error = r.error.unwrap_or_else(|| "Test failed".to_string());
+                        let fail_msg = format!("    ✗ {} failed: {}", test_task.description, error);
+                        send_event(fail_msg);
                         log::info!(
                             "[VERIFY] Test task {} finished: success=false — {}",
                             test_task.id,
@@ -526,6 +549,14 @@ impl VerificationLoop {
                         ));
                     }
                     Err(e) => {
+                        let error_str = e.to_string();
+                        let is_timeout = error_str.contains("timeout");
+                        let fail_msg = if is_timeout {
+                            format!("    ✗ {} timed out after {}s", test_task.description, self.planner.max_test_execution_time)
+                        } else {
+                            format!("    ✗ {} failed: {}", test_task.description, error_str)
+                        };
+                        send_event(fail_msg);
                         log::info!(
                             "[VERIFY] Test task {} finished: success=false — {}",
                             test_task.id,
@@ -542,19 +573,26 @@ impl VerificationLoop {
             }
 
             if round_failures.is_empty() {
-                log::info!(
-                    "  ✓ All {} tests passed in round {}",
-                    passed_tests.len(),
-                    round + 1
+                let round_msg = format!(
+                    "✓ Round {}/{}: All {} tests passed",
+                    round + 1,
+                    self.max_rounds,
+                    passed_tests.len()
                 );
+                send_event(round_msg.clone());
+                log::info!("{}", round_msg);
                 break;
             }
 
-            log::info!(
-                "  ⚠ {} tests failed in round {}",
-                round_failures.len(),
-                round + 1
+            let round_msg = format!(
+                "⚠ Round {}/{}: {} tests passed, {} failed",
+                round + 1,
+                self.max_rounds,
+                passed_tests.len(),
+                round_failures.len()
             );
+            send_event(round_msg.clone());
+            log::info!("{}", round_msg);
 
             // Generate and execute fix tasks for failures (not on the last round)
             if round < self.max_rounds - 1 {
@@ -662,6 +700,14 @@ impl VerificationLoop {
             self.max_rounds,
         );
 
+        let final_msg = format!(
+            "✓ Verification complete: {:?} ({} passed, {} failed in {} round(s))",
+            status,
+            passed_tests.len(),
+            failed_tests.len(),
+            rounds_completed
+        );
+        send_event(final_msg.clone());
         log::info!(
             "[VERIFY] Done — sandbox: {}, status: {:?}, passed: {}, failed: {}, rounds: {}",
             sandbox_name,

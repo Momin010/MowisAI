@@ -110,17 +110,37 @@ pub(crate) fn gcloud_access_token() -> anyhow::Result<String> {
     let out = Command::new("gcloud")
         .args(["auth", "print-access-token"])
         .output()
-        .context("spawn gcloud — is it installed and on PATH?")?;
+        .context("spawn gcloud — is it installed and on PATH? Install with: gcloud auth application-default login")?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "gcloud auth print-access-token failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let msg = if stderr.contains("Application Default Credentials") {
+            format!(
+                "gcloud authentication not configured. Error: {}\n\
+                 Fix: Run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS",
+                stderr
+            )
+        } else if stderr.contains("permission denied") || stderr.contains("not found") {
+            format!(
+                "gcloud command not found or not executable. Error: {}",
+                stderr
+            )
+        } else {
+            format!(
+                "gcloud auth failed: {}\n\
+                 Ensure you have: 1) gcloud installed, 2) logged in with 'gcloud auth login', \
+                 3) application default credentials with 'gcloud auth application-default login'",
+                stderr
+            )
+        };
+        return Err(anyhow!(msg));
     }
     let s = String::from_utf8(out.stdout).context("token utf-8")?;
     let t = s.trim().to_string();
     if t.is_empty() {
-        return Err(anyhow!("empty access token from gcloud"));
+        return Err(anyhow!(
+            "empty access token from gcloud. This usually means authentication failed. \
+             Try: gcloud auth application-default login"
+        ));
     }
     trace(&format!(
         "gcloud auth print-access-token: OAuth access token length={} chars (not Gemini output)",
