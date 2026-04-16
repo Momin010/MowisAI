@@ -29,6 +29,11 @@ enum Commands {
         #[arg(long)]
         path: String,
     },
+    /// Test Layer 6 (verification loop) in isolation with mock LLM responses.
+    /// Requires the agentd socket server to be running.
+    /// Example: sudo ./target/debug/agentd socket --path /tmp/agentd.sock
+    ///          cargo run -- verify-layer6 --socket /tmp/agentd.sock
+    VerifyLayer6(libagent::orchestration::verify_layer6::VerifyLayer6Command),
 }
 
 fn main() -> Result<()> {
@@ -36,8 +41,19 @@ fn main() -> Result<()> {
 
     match args.command {
         Some(Commands::Socket { path }) => {
-            // Run socket server
             libagent::socket_server::run(&path)?;
+        }
+        Some(Commands::VerifyLayer6(cmd)) => {
+            let _ = libagent::logging::init(
+                &libagent::config::MowisConfig::config_dir().join("verify-layer6.log"),
+            );
+            env_logger::Builder::from_env(
+                env_logger::Env::default().default_filter_or("info"),
+            )
+            .format_timestamp_millis()
+            .init();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(cmd.run())?;
         }
         None => {
             // Run TUI

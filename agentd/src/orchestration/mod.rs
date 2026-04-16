@@ -13,6 +13,7 @@ pub mod agent_execution;
 pub mod new_orchestrator;
 pub mod mock_agent;
 pub mod simulate;
+pub mod verify_layer6;
 pub mod health;
 
 // Re-export main types

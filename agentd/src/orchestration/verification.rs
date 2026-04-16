@@ -334,6 +334,16 @@ pub(crate) fn extract_json(text: &str) -> String {
     trimmed.to_string()
 }
 
+/// Public alias used by the Layer 6 test harness (`verify_layer6.rs`).
+pub fn determine_status_for_test(
+    failed: &[TaskId],
+    passed: &[TaskId],
+    rounds_completed: usize,
+    max_rounds: usize,
+) -> VerificationStatus {
+    determine_status(failed, passed, rounds_completed, max_rounds)
+}
+
 /// Determine final verification status after all rounds complete.
 ///
 /// Per the architecture spec Layer 6 rule:
@@ -373,6 +383,11 @@ impl VerificationLoop {
             planner: VerificationPlanner::new(project_id, max_rounds),
             max_rounds,
         }
+    }
+
+    /// Return the configured maximum rounds (used by the test harness).
+    pub fn max_rounds(&self) -> usize {
+        self.max_rounds
     }
 
     /// Override the per-task execution timeout (builder style).
