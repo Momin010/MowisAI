@@ -154,21 +154,28 @@ Keep test tasks small and focused. Use deps to order tests properly.
         let access_token = super::gcloud_access_token()?;
         let url = super::vertex_generate_url(&self.project_id);
 
-        let system_prompt = r#"You are a test failure analyzer. Given a failed test and its output, generate fix tasks.
+        let system_prompt = r#"You are a test failure analyzer. Given a failed test and its output, generate concrete fix tasks.
 
-Output JSON in this format:
+Output JSON ONLY in this exact format — no other text:
 {
   "fix_tasks": [
-    {"id": "fix-1", "description": "fix the identified bug", "deps": [], "hint": null}
+    {"id": "fix-1", "description": "Edit src/auth.rs: fix the validate_token function to handle empty tokens", "deps": [], "hint": null}
   ]
 }
 
-Each fix task should be specific and actionable.
+Rules for fix task descriptions:
+- Be SPECIFIC: name the file, function, or line that needs to change
+- Be ACTIONABLE: describe exactly what change to make (e.g. "add null check", "change return type", "fix import path")
+- Keep to 1-3 fix tasks maximum — focus on the root cause only
+- If the failure shows a missing file, describe creating it with its correct content
+- If the failure shows a command not found, describe installing or creating it
 "#;
 
         let user_message = format!(
-            "Failed test: {}\nDescription: {}\n\nFailure output:\n{}\n\nGenerate fix tasks:",
-            failed_test_id, test_description, failure_output
+            "Failed test ID: {}\nTest description: {}\n\nFailure output (first 3000 chars):\n{}\n\nGenerate specific fix tasks:",
+            failed_test_id,
+            test_description,
+            &failure_output[..failure_output.len().min(3000)]
         );
 
         let request_body = json!({
@@ -196,6 +203,13 @@ Each fix task should be specific and actionable.
             .context("Failed to send fix task request")?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            log::warn!(
+                "[VERIFY] generate_fix_tasks API returned {}: {:.300}",
+                status,
+                body
+            );
             return Ok(vec![]);
         }
 
@@ -604,15 +618,47 @@ impl VerificationLoop {
                 ];
 
                 for (test_id, desc, error) in &round_failures {
-                    log::info!(
-                        "[VERIFY] Generating fix tasks for failed test: {}",
-                        test_id
+                    let gen_msg = format!(
+                        "  ↳ Generating fix for failed test '{}': {}",
+                        test_id, desc
                     );
-                    let fix_tasks = self
+                    send_event(gen_msg.clone());
+                    log::info!("[VERIFY] {}", gen_msg);
+
+                    let fix_tasks = match self
                         .planner
                         .generate_fix_tasks(test_id, desc, error)
                         .await
-                        .unwrap_or_default();
+                    {
+                        Ok(tasks) if tasks.is_empty() => {
+                            let no_task_msg = format!(
+                                "    ⚠ No fix tasks generated for '{}' — Gemini returned empty plan. Skipping.",
+                                test_id
+                            );
+                            send_event(no_task_msg.clone());
+                            log::warn!("[VERIFY] {}", no_task_msg);
+                            vec![]
+                        }
+                        Ok(tasks) => {
+                            let gen_ok_msg = format!(
+                                "    → {} fix task(s) planned for '{}'",
+                                tasks.len(),
+                                test_id
+                            );
+                            send_event(gen_ok_msg.clone());
+                            log::info!("[VERIFY] {}", gen_ok_msg);
+                            tasks
+                        }
+                        Err(e) => {
+                            let err_msg = format!(
+                                "    ✗ Fix task generation failed for '{}': {}",
+                                test_id, e
+                            );
+                            send_event(err_msg.clone());
+                            log::warn!("[VERIFY] {}", err_msg);
+                            vec![]
+                        }
+                    };
 
                     for fix_task in fix_tasks {
                         let agent = match topology
@@ -630,8 +676,29 @@ impl VerificationLoop {
                             }
                         };
 
-                        let fix_prompt =
-                            format!("Fix this issue: {}", fix_task.description);
+                        let fix_prompt = format!(
+                            "You are a code repair agent. A test just failed and you need to fix the root cause.\n\n\
+                             FAILED TEST: {test_id}\n\
+                             TEST DESCRIPTION: {desc}\n\
+                             FAILURE OUTPUT:\n{error}\n\n\
+                             YOUR TASK: {fix_desc}\n\n\
+                             Instructions:\n\
+                             1. Use read_file and grep to understand the relevant code\n\
+                             2. Use write_file to apply targeted fixes\n\
+                             3. Use run_command to verify the fix works\n\
+                             4. Focus only on the specific failure shown above",
+                            test_id = test_id,
+                            desc = desc,
+                            error = &error[..error.len().min(2000)],
+                            fix_desc = fix_task.description,
+                        );
+
+                        let fix_start_msg = format!(
+                            "    → Applying fix: {}",
+                            fix_task.description
+                        );
+                        send_event(fix_start_msg.clone());
+                        log::info!("[VERIFY] {}", fix_start_msg);
 
                         let fix_result = match tokio::time::timeout(
                             std::time::Duration::from_secs(self.planner.max_test_execution_time),
@@ -646,11 +713,13 @@ impl VerificationLoop {
                         {
                             Ok(r) => r,
                             Err(_) => {
-                                log::warn!(
-                                    "[VERIFY] Fix task {} timed out after {}s",
-                                    fix_task.id,
+                                let timeout_msg = format!(
+                                    "    ✗ Fix '{}' timed out after {}s",
+                                    fix_task.description,
                                     self.planner.max_test_execution_time
                                 );
+                                send_event(timeout_msg.clone());
+                                log::warn!("[VERIFY] {}", timeout_msg);
                                 Err(anyhow!("Fix execution timeout"))
                             }
                         };
@@ -663,28 +732,48 @@ impl VerificationLoop {
                                             .apply_diff_to_sandbox(sandbox_name, diff)
                                             .await
                                         {
-                                            log::warn!(
-                                                "[VERIFY] Failed to apply fix diff for {} to sandbox {}: {}",
-                                                fix_task.id, sandbox_name, e
+                                            let msg = format!(
+                                                "    ✗ Failed to apply fix diff for '{}': {}",
+                                                fix_task.description, e
                                             );
+                                            send_event(msg.clone());
+                                            log::warn!("[VERIFY] {}", msg);
                                         } else {
-                                            log::info!(
-                                                "[VERIFY] Applied fix diff for {} to sandbox {}",
-                                                fix_task.id, sandbox_name
+                                            let msg = format!(
+                                                "    ✓ Fix applied: {} ({} bytes changed)",
+                                                fix_task.description,
+                                                diff.len()
                                             );
+                                            send_event(msg.clone());
+                                            log::info!("[VERIFY] {}", msg);
                                         }
+                                    } else {
+                                        let msg = format!(
+                                            "    ⚠ Fix '{}' succeeded but produced no changes",
+                                            fix_task.description
+                                        );
+                                        send_event(msg.clone());
+                                        log::warn!("[VERIFY] {}", msg);
                                     }
                                 }
                             }
-                            Ok(r) => log::warn!(
-                                "[VERIFY] Fix task {} did not succeed: {:?}",
-                                fix_task.id,
-                                r.error
-                            ),
-                            Err(e) => log::warn!(
-                                "[VERIFY] Fix task {} execution failed: {}",
-                                fix_task.id, e
-                            ),
+                            Ok(r) => {
+                                let msg = format!(
+                                    "    ✗ Fix '{}' did not succeed: {}",
+                                    fix_task.description,
+                                    r.error.as_deref().unwrap_or("unknown error")
+                                );
+                                send_event(msg.clone());
+                                log::warn!("[VERIFY] {}", msg);
+                            }
+                            Err(e) => {
+                                let msg = format!(
+                                    "    ✗ Fix '{}' execution failed: {}",
+                                    fix_task.description, e
+                                );
+                                send_event(msg.clone());
+                                log::warn!("[VERIFY] {}", msg);
+                            }
                         }
 
                         let _ = topology.destroy_agent_layer(&agent.agent_id).await;
