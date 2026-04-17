@@ -347,6 +347,84 @@ impl TopologyManager {
         Ok(normalized)
     }
 
+    /// Capture the current sandbox state as a diff against the host project base.
+    ///
+    /// Layer 6 uses this after applying fix diffs so later verification rounds
+    /// and Layer 7 operate on the post-fix sandbox contents.
+    pub async fn capture_sandbox_diff(&self, sandbox_name: &SandboxName) -> Result<String> {
+        let sandboxes = self.sandboxes.read().await;
+        let sandbox_id = sandboxes
+            .get(sandbox_name)
+            .ok_or_else(|| anyhow!("Sandbox not found: {}", sandbox_name))?
+            .clone();
+        drop(sandboxes);
+
+        let request = json!({
+            "request_type": "create_container",
+            "sandbox": sandbox_id,
+        });
+        let response = super::socket_roundtrip(&self.socket_path, &request)?;
+        let container_id = super::parse_ok_field(&response, "container")?;
+
+        let scopes = self.sandbox_scopes.read().await;
+        let scope = scopes.get(sandbox_name).cloned().unwrap_or_default();
+        drop(scopes);
+
+        let workspace_root = PathBuf::from(format!("/tmp/container-{}/root/workspace", container_id));
+        let project_base = if scope.trim().is_empty() || scope == "/" {
+            self.project_root.clone()
+        } else {
+            self.project_root.join(scope.trim_matches('/'))
+        };
+
+        let diff_result = if !workspace_root.exists() {
+            Err(anyhow!(
+                "Sandbox workspace not found for {}: {}",
+                sandbox_name,
+                workspace_root.display()
+            ))
+        } else if !project_base.exists() {
+            Err(anyhow!(
+                "Project base not found for sandbox {}: {}",
+                sandbox_name,
+                project_base.display()
+            ))
+        } else {
+            let diff_output = std::process::Command::new("git")
+                .arg("diff")
+                .arg("--no-index")
+                .arg("--binary")
+                .arg(&project_base)
+                .arg(&workspace_root)
+                .output()
+                .with_context(|| {
+                    format!(
+                        "Failed to capture sandbox diff for {} container {}",
+                        sandbox_name, container_id
+                    )
+                })?;
+
+            if diff_output.status.success() || diff_output.status.code() == Some(1) {
+                let stdout = String::from_utf8_lossy(&diff_output.stdout).to_string();
+                Self::normalize_no_index_diff(&stdout, &project_base, &workspace_root)
+            } else {
+                Err(anyhow!(
+                    "Failed to diff sandbox workspace: {}",
+                    String::from_utf8_lossy(&diff_output.stderr)
+                ))
+            }
+        };
+
+        let cleanup_request = json!({
+            "request_type": "destroy_container",
+            "sandbox": sandbox_id,
+            "container": container_id,
+        });
+        let _ = super::socket_roundtrip(&self.socket_path, &cleanup_request);
+
+        diff_result
+    }
+
     /// Create checkpoint (not implemented - would need agentd support)
     pub async fn create_checkpoint(&self, _agent_id: &str) -> Result<PathBuf> {
         // Checkpoints would require agentd to expose snapshot API

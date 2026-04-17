@@ -21,6 +21,7 @@ pub struct VerificationResult {
     pub passed_tests: Vec<TaskId>,
     pub failed_tests: Vec<TaskId>,
     pub rounds_completed: usize,
+    pub updated_diff: Option<String>,
 }
 
 /// Verification planner
@@ -154,28 +155,21 @@ Keep test tasks small and focused. Use deps to order tests properly.
         let access_token = super::gcloud_access_token()?;
         let url = super::vertex_generate_url(&self.project_id);
 
-        let system_prompt = r#"You are a test failure analyzer. Given a failed test and its output, generate concrete fix tasks.
+        let system_prompt = r#"You are a test failure analyzer. Given a failed test and its output, generate fix tasks.
 
-Output JSON ONLY in this exact format — no other text:
+Output JSON in this format:
 {
   "fix_tasks": [
-    {"id": "fix-1", "description": "Edit src/auth.rs: fix the validate_token function to handle empty tokens", "deps": [], "hint": null}
+    {"id": "fix-1", "description": "fix the identified bug", "deps": [], "hint": null}
   ]
 }
 
-Rules for fix task descriptions:
-- Be SPECIFIC: name the file, function, or line that needs to change
-- Be ACTIONABLE: describe exactly what change to make (e.g. "add null check", "change return type", "fix import path")
-- Keep to 1-3 fix tasks maximum — focus on the root cause only
-- If the failure shows a missing file, describe creating it with its correct content
-- If the failure shows a command not found, describe installing or creating it
+Each fix task should be specific and actionable.
 "#;
 
         let user_message = format!(
-            "Failed test ID: {}\nTest description: {}\n\nFailure output (first 3000 chars):\n{}\n\nGenerate specific fix tasks:",
-            failed_test_id,
-            test_description,
-            &failure_output[..failure_output.len().min(3000)]
+            "Failed test: {}\nDescription: {}\n\nFailure output:\n{}\n\nGenerate fix tasks:",
+            failed_test_id, test_description, failure_output
         );
 
         let request_body = json!({
@@ -203,13 +197,6 @@ Rules for fix task descriptions:
             .context("Failed to send fix task request")?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            log::warn!(
-                "[VERIFY] generate_fix_tasks API returned {}: {:.300}",
-                status,
-                body
-            );
             return Ok(vec![]);
         }
 
@@ -408,34 +395,18 @@ impl VerificationLoop {
         original_tasks: &[Task],
         topology: &TopologyManager,
         agent_executor: &AgentExecutor,
-        event_tx: Option<&std::sync::mpsc::Sender<super::OrchestratorEvent>>,
     ) -> Result<VerificationResult> {
-        // Helper to send events (no-op if event_tx is None)
-        let send_event = |msg: String| {
-            if let Some(tx) = event_tx {
-                let _ = tx.send(super::OrchestratorEvent::LayerProgress {
-                    layer: 6,
-                    message: msg,
-                });
-            }
-        };
-
+        let mut current_merged_diff = merged_diff.to_string();
         // Per-round vectors; cleared at the start of each round so the final
         // result reflects only what happened in the last completed round.
         let mut passed_tests: Vec<TaskId> = Vec::new();
         let mut failed_tests: Vec<TaskId> = Vec::new();
         let mut rounds_completed = 0;
 
-        let start_msg = format!(
-            "[Sandbox: {}] Running {} test round(s)...",
-            sandbox_name,
-            self.max_rounds
-        );
-        send_event(start_msg.clone());
         log::info!(
             "[VERIFY] Starting for sandbox: {}, diff_len: {}, tasks: {}",
             sandbox_name,
-            merged_diff.len(),
+            current_merged_diff.len(),
             original_tasks.len()
         );
 
@@ -455,7 +426,7 @@ impl VerificationLoop {
 
             let plan = self
                 .planner
-                .generate_test_tasks(sandbox_name, merged_diff, original_tasks)
+                .generate_test_tasks(sandbox_name, &current_merged_diff, original_tasks)
                 .await?;
             log::info!(
                 "[VERIFY] Gemini returned {} test tasks",
@@ -470,8 +441,6 @@ impl VerificationLoop {
             ];
 
             for test_task in &plan.test_tasks.tasks {
-                let test_msg = format!("  ✓ Test: {}", test_task.description);
-                send_event(test_msg);
                 log::info!("[VERIFY] Running test task: {}", test_task.id);
 
                 let agent = match topology
@@ -538,8 +507,6 @@ impl VerificationLoop {
 
                 match result {
                     Ok(r) if r.success => {
-                        let success_msg = format!("    ✓ {} passed", test_task.description);
-                        send_event(success_msg);
                         log::info!(
                             "[VERIFY] Test task {} finished: success=true",
                             test_task.id
@@ -548,8 +515,6 @@ impl VerificationLoop {
                     }
                     Ok(r) => {
                         let error = r.error.unwrap_or_else(|| "Test failed".to_string());
-                        let fail_msg = format!("    ✗ {} failed: {}", test_task.description, error);
-                        send_event(fail_msg);
                         log::info!(
                             "[VERIFY] Test task {} finished: success=false — {}",
                             test_task.id,
@@ -563,14 +528,6 @@ impl VerificationLoop {
                         ));
                     }
                     Err(e) => {
-                        let error_str = e.to_string();
-                        let is_timeout = error_str.contains("timeout");
-                        let fail_msg = if is_timeout {
-                            format!("    ✗ {} timed out after {}s", test_task.description, self.planner.max_test_execution_time)
-                        } else {
-                            format!("    ✗ {} failed: {}", test_task.description, error_str)
-                        };
-                        send_event(fail_msg);
                         log::info!(
                             "[VERIFY] Test task {} finished: success=false — {}",
                             test_task.id,
@@ -587,26 +544,19 @@ impl VerificationLoop {
             }
 
             if round_failures.is_empty() {
-                let round_msg = format!(
-                    "✓ Round {}/{}: All {} tests passed",
-                    round + 1,
-                    self.max_rounds,
-                    passed_tests.len()
+                log::info!(
+                    "  ✓ All {} tests passed in round {}",
+                    passed_tests.len(),
+                    round + 1
                 );
-                send_event(round_msg.clone());
-                log::info!("{}", round_msg);
                 break;
             }
 
-            let round_msg = format!(
-                "⚠ Round {}/{}: {} tests passed, {} failed",
-                round + 1,
-                self.max_rounds,
-                passed_tests.len(),
-                round_failures.len()
+            log::info!(
+                "  ⚠ {} tests failed in round {}",
+                round_failures.len(),
+                round + 1
             );
-            send_event(round_msg.clone());
-            log::info!("{}", round_msg);
 
             // Generate and execute fix tasks for failures (not on the last round)
             if round < self.max_rounds - 1 {
@@ -618,47 +568,23 @@ impl VerificationLoop {
                 ];
 
                 for (test_id, desc, error) in &round_failures {
-                    let gen_msg = format!(
-                        "  ↳ Generating fix for failed test '{}': {}",
-                        test_id, desc
+                    log::info!(
+                        "[VERIFY] Generating fix tasks for failed test: {}",
+                        test_id
                     );
-                    send_event(gen_msg.clone());
-                    log::info!("[VERIFY] {}", gen_msg);
-
-                    let fix_tasks = match self
+                    let fix_tasks = self
                         .planner
                         .generate_fix_tasks(test_id, desc, error)
                         .await
-                    {
-                        Ok(tasks) if tasks.is_empty() => {
-                            let no_task_msg = format!(
-                                "    ⚠ No fix tasks generated for '{}' — Gemini returned empty plan. Skipping.",
-                                test_id
-                            );
-                            send_event(no_task_msg.clone());
-                            log::warn!("[VERIFY] {}", no_task_msg);
-                            vec![]
-                        }
-                        Ok(tasks) => {
-                            let gen_ok_msg = format!(
-                                "    → {} fix task(s) planned for '{}'",
-                                tasks.len(),
-                                test_id
-                            );
-                            send_event(gen_ok_msg.clone());
-                            log::info!("[VERIFY] {}", gen_ok_msg);
-                            tasks
-                        }
-                        Err(e) => {
-                            let err_msg = format!(
-                                "    ✗ Fix task generation failed for '{}': {}",
-                                test_id, e
-                            );
-                            send_event(err_msg.clone());
-                            log::warn!("[VERIFY] {}", err_msg);
-                            vec![]
-                        }
-                    };
+                        .unwrap_or_default();
+
+                    if fix_tasks.is_empty() {
+                        log::warn!(
+                            "[VERIFY] No fix tasks generated for failed test {} in sandbox {}",
+                            test_id,
+                            sandbox_name
+                        );
+                    }
 
                     for fix_task in fix_tasks {
                         let agent = match topology
@@ -676,29 +602,8 @@ impl VerificationLoop {
                             }
                         };
 
-                        let fix_prompt = format!(
-                            "You are a code repair agent. A test just failed and you need to fix the root cause.\n\n\
-                             FAILED TEST: {test_id}\n\
-                             TEST DESCRIPTION: {desc}\n\
-                             FAILURE OUTPUT:\n{error}\n\n\
-                             YOUR TASK: {fix_desc}\n\n\
-                             Instructions:\n\
-                             1. Use read_file and grep to understand the relevant code\n\
-                             2. Use write_file to apply targeted fixes\n\
-                             3. Use run_command to verify the fix works\n\
-                             4. Focus only on the specific failure shown above",
-                            test_id = test_id,
-                            desc = desc,
-                            error = &error[..error.len().min(2000)],
-                            fix_desc = fix_task.description,
-                        );
-
-                        let fix_start_msg = format!(
-                            "    → Applying fix: {}",
-                            fix_task.description
-                        );
-                        send_event(fix_start_msg.clone());
-                        log::info!("[VERIFY] {}", fix_start_msg);
+                        let fix_prompt =
+                            format!("Fix this issue: {}", fix_task.description);
 
                         let fix_result = match tokio::time::timeout(
                             std::time::Duration::from_secs(self.planner.max_test_execution_time),
@@ -713,13 +618,11 @@ impl VerificationLoop {
                         {
                             Ok(r) => r,
                             Err(_) => {
-                                let timeout_msg = format!(
-                                    "    ✗ Fix '{}' timed out after {}s",
-                                    fix_task.description,
+                                log::warn!(
+                                    "[VERIFY] Fix task {} timed out after {}s",
+                                    fix_task.id,
                                     self.planner.max_test_execution_time
                                 );
-                                send_event(timeout_msg.clone());
-                                log::warn!("[VERIFY] {}", timeout_msg);
                                 Err(anyhow!("Fix execution timeout"))
                             }
                         };
@@ -732,48 +635,46 @@ impl VerificationLoop {
                                             .apply_diff_to_sandbox(sandbox_name, diff)
                                             .await
                                         {
-                                            let msg = format!(
-                                                "    ✗ Failed to apply fix diff for '{}': {}",
-                                                fix_task.description, e
+                                            log::warn!(
+                                                "[VERIFY] Failed to apply fix diff for {} to sandbox {}: {}",
+                                                fix_task.id, sandbox_name, e
                                             );
-                                            send_event(msg.clone());
-                                            log::warn!("[VERIFY] {}", msg);
                                         } else {
-                                            let msg = format!(
-                                                "    ✓ Fix applied: {} ({} bytes changed)",
-                                                fix_task.description,
-                                                diff.len()
+                                            log::info!(
+                                                "[VERIFY] Applied fix diff for {} to sandbox {}",
+                                                fix_task.id, sandbox_name
                                             );
-                                            send_event(msg.clone());
-                                            log::info!("[VERIFY] {}", msg);
+                                            match topology.capture_sandbox_diff(sandbox_name).await {
+                                                Ok(updated_diff) => {
+                                                    current_merged_diff = updated_diff;
+                                                    log::info!(
+                                                        "[VERIFY] Refreshed sandbox diff after fix {} ({} bytes)",
+                                                        fix_task.id,
+                                                        current_merged_diff.len()
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    log::warn!(
+                                                        "[VERIFY] Applied fix {}, but failed to refresh sandbox diff for {}: {}",
+                                                        fix_task.id,
+                                                        sandbox_name,
+                                                        e
+                                                    );
+                                                }
+                                            }
                                         }
-                                    } else {
-                                        let msg = format!(
-                                            "    ⚠ Fix '{}' succeeded but produced no changes",
-                                            fix_task.description
-                                        );
-                                        send_event(msg.clone());
-                                        log::warn!("[VERIFY] {}", msg);
                                     }
                                 }
                             }
-                            Ok(r) => {
-                                let msg = format!(
-                                    "    ✗ Fix '{}' did not succeed: {}",
-                                    fix_task.description,
-                                    r.error.as_deref().unwrap_or("unknown error")
-                                );
-                                send_event(msg.clone());
-                                log::warn!("[VERIFY] {}", msg);
-                            }
-                            Err(e) => {
-                                let msg = format!(
-                                    "    ✗ Fix '{}' execution failed: {}",
-                                    fix_task.description, e
-                                );
-                                send_event(msg.clone());
-                                log::warn!("[VERIFY] {}", msg);
-                            }
+                            Ok(r) => log::warn!(
+                                "[VERIFY] Fix task {} did not succeed: {:?}",
+                                fix_task.id,
+                                r.error
+                            ),
+                            Err(e) => log::warn!(
+                                "[VERIFY] Fix task {} execution failed: {}",
+                                fix_task.id, e
+                            ),
                         }
 
                         let _ = topology.destroy_agent_layer(&agent.agent_id).await;
@@ -789,14 +690,6 @@ impl VerificationLoop {
             self.max_rounds,
         );
 
-        let final_msg = format!(
-            "✓ Verification complete: {:?} ({} passed, {} failed in {} round(s))",
-            status,
-            passed_tests.len(),
-            failed_tests.len(),
-            rounds_completed
-        );
-        send_event(final_msg.clone());
         log::info!(
             "[VERIFY] Done — sandbox: {}, status: {:?}, passed: {}, failed: {}, rounds: {}",
             sandbox_name,
@@ -811,6 +704,7 @@ impl VerificationLoop {
             passed_tests,
             failed_tests,
             rounds_completed,
+            updated_diff: Some(current_merged_diff),
         })
     }
 }
