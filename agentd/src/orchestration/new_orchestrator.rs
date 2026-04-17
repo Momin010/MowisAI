@@ -511,122 +511,85 @@ impl NewOrchestrator {
         send_event(OrchestratorEvent::LayerProgress { layer: 6, message: "Verifying sandbox results...".into() });
         log::info!("Layer 6: Verifying sandbox results...");
 
+        let verification_loop = VerificationLoop::new(
+            self.config.project_id.clone(),
+            self.config.max_verification_rounds,
+        );
+
         let mut verification_status = HashMap::new();
-        let mut known_issues = Vec::new();
+        let known_issues = Vec::new();
 
-        // Pre-verification check: ensure gcloud auth works before attempting any test execution
-        if let Err(gcloud_err) = super::gcloud_access_token() {
-            let error_msg = format!(
-                "⚠ Verification pre-flight check failed — gcloud authentication unavailable: {}. \
-                 Skipping all verification. To fix: {}",
-                gcloud_err,
-                if gcloud_err.to_string().contains("not found") || gcloud_err.to_string().contains("PATH") {
-                    "install gcloud CLI and ensure it's on your PATH"
-                } else if gcloud_err.to_string().contains("Application Default Credentials") {
-                    "run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS environment variable"
-                } else {
-                    "see gcloud error above"
-                }
-            );
-            send_event(OrchestratorEvent::LayerProgress {
-                layer: 6,
-                message: error_msg.clone(),
-            });
-            log::warn!("{}", error_msg);
-            known_issues.push(format!("Verification skipped: {}", gcloud_err));
-            // Continue orchestration but mark all sandboxes as not verified
-            let sandbox_names: Vec<_> = sandbox_results.keys().cloned().collect();
-            for sandbox_name in sandbox_names {
-                if let Some(result) = sandbox_results.get_mut(&sandbox_name) {
-                    result.verification_status = VerificationStatus::NotStarted;
-                }
-                verification_status.insert(sandbox_name, VerificationStatus::NotStarted);
-            }
-        } else {
-            let verification_loop = VerificationLoop::new(
-                self.config.project_id.clone(),
-                self.config.max_verification_rounds,
-            );
+        for (sandbox_name, sandbox_result) in &mut sandbox_results {
+            if let Some(ref diff) = sandbox_result.merged_diff.clone() {
+                if !diff.is_empty() {
+                    let original_tasks: Vec<agentd_protocol::Task> = planner_output
+                        .task_graph
+                        .tasks
+                        .iter()
+                        .filter(|t| {
+                            planner_output
+                                .sandbox_hints
+                                .get(&t.id)
+                                .map_or(false, |s| s == sandbox_name)
+                        })
+                        .cloned()
+                        .collect();
 
-            for (sandbox_name, sandbox_result) in &mut sandbox_results {
-                if let Some(ref diff) = sandbox_result.merged_diff.clone() {
-                    if !diff.is_empty() {
-                        let original_tasks: Vec<agentd_protocol::Task> = planner_output
-                            .task_graph
-                            .tasks
-                            .iter()
-                            .filter(|t| {
-                                planner_output
-                                    .sandbox_hints
-                                    .get(&t.id)
-                                    .map_or(false, |s| s == sandbox_name)
-                            })
-                            .cloned()
-                            .collect();
-
-                        let verify_timeout = tokio::time::Duration::from_secs(300); // 5 min max
-                        let verify_future = verification_loop.verify_sandbox(
-                            sandbox_name,
-                            diff,
-                            &original_tasks,
-                            &topology,
-                            &agent_executor,
-                            self.config.event_tx.as_ref(),
-                        );
-                        match tokio::time::timeout(verify_timeout, verify_future).await {
-                            Ok(Ok(vr)) => {
-                                let msg = format!(
-                                    "✓ [{}] Verification complete: {:?} — {} passed, {} failed",
-                                    sandbox_name,
-                                    vr.status,
-                                    vr.passed_tests.len(),
-                                    vr.failed_tests.len()
-                                );
-                                send_event(OrchestratorEvent::LayerProgress {
-                                    layer: 6,
-                                    message: msg.clone(),
-                                });
-                                log::info!("{}", msg);
-                                sandbox_result.verification_status = vr.status.clone();
-                                verification_status.insert(sandbox_name.clone(), vr.status);
+                    // Layer 6 currently runs tests and fix attempts sequentially
+                    // inside each sandbox, so a flat 5-minute cap guarantees
+                    // premature cancellation once a sandbox has several tests.
+                    let verify_timeout = tokio::time::Duration::from_secs(
+                        (self.config.max_verification_rounds.max(1) as u64) * 15 * 60
+                    );
+                    let verify_future = verification_loop.verify_sandbox(
+                        sandbox_name,
+                        diff,
+                        &original_tasks,
+                        &topology,
+                        &agent_executor,
+                    );
+                    match tokio::time::timeout(verify_timeout, verify_future).await {
+                        Ok(Ok(vr)) => {
+                            log::info!(
+                                "  ✓ {} — {:?} ({} passed, {} failed, {} rounds)",
+                                sandbox_name,
+                                vr.status,
+                                vr.passed_tests.len(),
+                                vr.failed_tests.len(),
+                                vr.rounds_completed
+                            );
+                            if let Some(updated_diff) = vr
+                                .updated_diff
+                                .as_ref()
+                                .filter(|updated| !updated.is_empty())
+                            {
+                                sandbox_result.merged_diff = Some(updated_diff.clone());
                             }
-                            Ok(Err(e)) => {
-                                let msg = format!(
-                                    "✗ [{}] Verification failed: {}",
-                                    sandbox_name, e
-                                );
-                                send_event(OrchestratorEvent::LayerProgress {
-                                    layer: 6,
-                                    message: msg.clone(),
-                                });
-                                log::warn!("{}", msg);
-                                sandbox_result.verification_status = VerificationStatus::Failed;
-                                verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
-                            }
-                            Err(_) => {
-                                let timeout_secs = verify_timeout.as_secs();
-                                let msg = format!(
-                                    "✗ [{}] Verification timed out after {} seconds. \
-                                     Some tests may have been running. Marking as incomplete.",
-                                    sandbox_name, timeout_secs
-                                );
-                                send_event(OrchestratorEvent::LayerProgress {
-                                    layer: 6,
-                                    message: msg.clone(),
-                                });
-                                log::warn!("{}", msg);
-                                sandbox_result.verification_status = VerificationStatus::NotStarted;
-                                verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
-                            }
+                            sandbox_result.verification_status = vr.status.clone();
+                            verification_status.insert(sandbox_name.clone(), vr.status);
                         }
-                    } else {
-                        sandbox_result.verification_status = VerificationStatus::NotStarted;
-                        verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
+                        Ok(Err(e)) => {
+                            log::warn!("  ⚠ Verification failed for {}: {}", sandbox_name, e);
+                            sandbox_result.verification_status = VerificationStatus::Failed;
+                            verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
+                        }
+                        Err(_) => {
+                            log::warn!(
+                                "  ⚠ Verification timed out for {} after {} minutes, skipping",
+                                sandbox_name,
+                                verify_timeout.as_secs() / 60
+                            );
+                            sandbox_result.verification_status = VerificationStatus::NotStarted;
+                            verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
+                        }
                     }
                 } else {
                     sandbox_result.verification_status = VerificationStatus::NotStarted;
                     verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
                 }
+            } else {
+                sandbox_result.verification_status = VerificationStatus::NotStarted;
+                verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
             }
         }
 
