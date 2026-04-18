@@ -145,6 +145,7 @@ impl NewOrchestrator {
         let sandbox_agent_results = Arc::new(RwLock::new(HashMap::<SandboxName, Vec<AgentWorkResult>>::new()));
         let agent_count = Arc::new(RwLock::new(0usize));
         let execution_errors = Arc::new(RwLock::new(Vec::<String>::new()));
+        let sandbox_locks = Arc::new(dashmap::DashMap::<SandboxName, Arc<tokio::sync::Mutex<()>>>::new());
 
         // Health monitor: 5-minute heartbeat timeout, open circuit after 5 consecutive failures
         let health_monitor = Arc::new(HealthMonitor::new(300, 5));
@@ -169,6 +170,7 @@ impl NewOrchestrator {
             let results_clone = sandbox_agent_results.clone();
             let count_clone = agent_count.clone();
             let errors_clone = execution_errors.clone();
+            let sandbox_locks_clone = sandbox_locks.clone();
             let sandboxes = planner_output.sandbox_topology.sandboxes.clone();
             let staging_dir_for_worker = staging_dir_clone.clone();
             let event_tx_for_worker = event_tx_clone.clone();
@@ -281,6 +283,11 @@ impl NewOrchestrator {
                             if result.success {
                                 if let Some(ref diff) = result.git_diff {
                                     if !diff.is_empty() {
+                                        let lock = sandbox_locks_clone
+                                            .entry(sandbox.name.clone())
+                                            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                                            .clone();
+                                        let _guard = lock.lock().await;
                                         if let Err(e) = topology_clone.apply_diff_to_sandbox(&sandbox.name, diff).await {
                                             log::warn!("[Worker {}] Failed to apply diff to sandbox: {}", worker_id, e);
                                         }
@@ -495,13 +502,25 @@ impl NewOrchestrator {
                 }
             };
 
+            let mut apply_ok = true;
+            if !merged_diff.is_empty() {
+                if let Err(e) = topology.apply_diff_to_sandbox(sandbox_name, &merged_diff).await {
+                    log::warn!("  ⚠️ Failed to apply cleanly merged diff to sandbox {} before verification: {}", sandbox_name, e);
+                    apply_ok = false;
+                } else {
+                    log::info!("  → Applied clean merged diff to sandbox filesystem");
+                }
+            }
+
+            let initial_status = if apply_ok { VerificationStatus::NotStarted } else { VerificationStatus::Failed };
+
             sandbox_results.insert(
                 sandbox_name.clone(),
                 SandboxResult {
                     sandbox_name: sandbox_name.clone(),
                     success: true,
                     merged_diff: Some(merged_diff),
-                    verification_status: VerificationStatus::NotStarted,
+                    verification_status: initial_status,
                     timestamp: current_timestamp(),
                 },
             );
@@ -517,9 +536,16 @@ impl NewOrchestrator {
         );
 
         let mut verification_status = HashMap::new();
-        let known_issues = Vec::new();
+        let mut known_issues: Vec<String> = Vec::new();
 
         for (sandbox_name, sandbox_result) in &mut sandbox_results {
+            if sandbox_result.verification_status == VerificationStatus::Failed {
+                log::warn!("  ⚠ Skipping verification for {} due to apply failure.", sandbox_name);
+                verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
+                known_issues.push(format!("{}: failed to apply merged diff", sandbox_name));
+                continue;
+            }
+
             if let Some(ref diff) = sandbox_result.merged_diff.clone() {
                 if !diff.is_empty() {
                     let original_tasks: Vec<agentd_protocol::Task> = planner_output

@@ -444,6 +444,7 @@ impl VerificationLoop {
                 "run_command".to_string(),
                 "read_file".to_string(),
                 "list_files".to_string(),
+                "write_file".to_string(),
             ];
 
             for test_task in &plan.test_tasks.tasks {
@@ -473,8 +474,11 @@ impl VerificationLoop {
                 };
 
                 let test_prompt = format!(
-                    "You are a test verification agent. Run this test:\n{}\n\n\
-                    Use run_command to execute tests. Report success or failure.",
+                    "You are a verification agent in a production environment.\n\
+                    WORKING DIRECTORY: /workspace (You MUST `cd /workspace` before running tests).\n\
+                    Run this test:\n{}\n\n\
+                    Use run_command to execute tests (e.g., `cd /workspace && cargo test`). \
+                    Report success or failure.",
                     test_task.description
                 );
 
@@ -571,6 +575,7 @@ impl VerificationLoop {
                     "write_file".to_string(),
                     "run_command".to_string(),
                     "grep".to_string(),
+                    "list_files".to_string(),
                 ];
 
                 for (test_id, desc, error) in &round_failures {
@@ -608,8 +613,12 @@ impl VerificationLoop {
                             }
                         };
 
-                        let fix_prompt =
-                            format!("Fix this issue: {}", fix_task.description);
+                        let fix_prompt = format!(
+                            "Fix this test failure: {}\n\
+                             WORKING DIRECTORY: /workspace. All project files are in /workspace. \n\
+                             Remember to `cd /workspace` if running commands.", 
+                            fix_task.description
+                        );
 
                         let fix_result = match tokio::time::timeout(
                             std::time::Duration::from_secs(self.planner.max_test_execution_time),
