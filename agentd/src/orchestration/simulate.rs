@@ -387,6 +387,7 @@ impl SimulatedVerificationLoop {
             passed_tests,
             failed_tests,
             rounds_completed,
+            updated_diff: Some(merged_diff.to_string()),
         })
     }
 }

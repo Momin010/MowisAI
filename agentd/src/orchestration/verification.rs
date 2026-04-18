@@ -28,7 +28,10 @@ pub struct VerificationResult {
 pub struct VerificationPlanner {
     project_id: String,
     max_rounds: usize,
-    /// Per-test agent execution timeout in seconds (default: 60)
+    /// Per-test agent execution timeout in seconds (default: 180)
+    /// CRITICAL: Must be longer than run_command's default timeout (30s) to avoid
+    /// premature cancellation of the underlying process. Verification tests often
+    /// need to run multiple commands (install deps, run linters, compile, etc.).
     pub max_test_execution_time: u64,
 }
 
@@ -37,7 +40,10 @@ impl VerificationPlanner {
         Self {
             project_id,
             max_rounds,
-            max_test_execution_time: 60,
+            // Increased from 60s to 180s to allow verification tests to complete
+            // The run_command tool has a 30s timeout, and verification tests often
+            // need to run multiple commands with build/compile steps.
+            max_test_execution_time: 180,
         }
     }
 

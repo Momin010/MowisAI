@@ -536,10 +536,12 @@ impl NewOrchestrator {
                         .collect();
 
                     // Layer 6 currently runs tests and fix attempts sequentially
-                    // inside each sandbox, so a flat 5-minute cap guarantees
-                    // premature cancellation once a sandbox has several tests.
+                    // inside each sandbox. The outer timeout must be long enough
+                    // to allow all tests to complete across all verification rounds.
+                    // Formula: max_rounds * (tests_per_round * test_timeout + fix_time)
+                    // With 3 rounds, 7 tests, 180s test timeout, ~60s fix time: 3 * (7*180 + 60) = 3960s
                     let verify_timeout = tokio::time::Duration::from_secs(
-                        (self.config.max_verification_rounds.max(1) as u64) * 15 * 60
+                        (self.config.max_verification_rounds.max(1) as u64) * 30 * 60
                     );
                     let verify_future = verification_loop.verify_sandbox(
                         sandbox_name,
