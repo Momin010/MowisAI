@@ -277,16 +277,7 @@ impl NewOrchestrator {
                                     }
                                 };
 
-                            // Apply diff to sandbox layer if successful
-                            if result.success {
-                                if let Some(ref diff) = result.git_diff {
-                                    if !diff.is_empty() {
-                                        if let Err(e) = topology_clone.apply_diff_to_sandbox(&sandbox.name, diff).await {
-                                            log::warn!("[Worker {}] Failed to apply diff to sandbox: {}", worker_id, e);
-                                        }
-                                    }
-                                }
-                            }
+                            // REMOVED EAGER APPLY FROM LAYER 4 to prevent filesystem corruption
 
                             // Notify TUI: task result
                             if let Some(ref tx) = event_tx_for_worker {
@@ -495,6 +486,15 @@ impl NewOrchestrator {
                 }
             };
 
+            // ADD CLEAN DIFF APPLICATION TO SANDBOX FILESYSTEM BEFORE LAYER 6 VERIFICATION
+            if !merged_diff.is_empty() {
+                if let Err(e) = topology.apply_diff_to_sandbox(sandbox_name, &merged_diff).await {
+                    log::warn!("  ⚠️ Failed to apply cleanly merged diff to sandbox {} before verification: {}", sandbox_name, e);
+                } else {
+                    log::info!("  → Applied clean merged diff to sandbox filesystem");
+                }
+            }
+
             sandbox_results.insert(
                 sandbox_name.clone(),
                 SandboxResult {
@@ -517,7 +517,7 @@ impl NewOrchestrator {
         );
 
         let mut verification_status = HashMap::new();
-        let known_issues = Vec::new();
+        let mut known_issues = Vec::new();
 
         for (sandbox_name, sandbox_result) in &mut sandbox_results {
             if let Some(ref diff) = sandbox_result.merged_diff.clone() {
