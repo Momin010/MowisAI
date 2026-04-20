@@ -689,7 +689,7 @@ impl VerificationLoop {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn determine_status(
+pub(crate) fn determine_status(
     failed_tests: &[TaskId],
     passed_tests: &[TaskId],
     rounds_completed: usize,

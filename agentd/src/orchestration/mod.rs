@@ -1147,6 +1147,7 @@ pub(crate) fn socket_roundtrip(
             .set_write_timeout(Some(std::time::Duration::from_secs(10)))
             .context("set write timeout")?;
 
+        // Write phase
         let write_result = (|| -> anyhow::Result<()> {
             let mut bytes_written = 0;
             let bytes = line.as_bytes();
@@ -1155,12 +1156,6 @@ pub(crate) fn socket_roundtrip(
                     Ok(0) => return Err(anyhow!("write socket: socket closed by server")),
                     Ok(n) => bytes_written += n,
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::ConnectionReset
-                            || e.kind() == std::io::ErrorKind::BrokenPipe =>
-                    {
-                        return Err(anyhow!("write socket: {}", e));
-                    }
                     Err(e) => return Err(anyhow!("write socket: {}", e)),
                 }
             }
@@ -1168,55 +1163,67 @@ pub(crate) fn socket_roundtrip(
             Ok(())
         })();
 
-        if let Err(err) = write_result {
-            let msg = err.to_string();
-            if attempt < 3
-                && (msg.contains("connection reset")
+        // Classify write errors by ErrorKind directly — no string matching
+        let write_retryable = match &write_result {
+            Err(e) => {
+                let msg = e.to_string();
+                msg.contains("connection reset")
                     || msg.contains("socket closed")
-                    || msg.contains("broken pipe"))
-            {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                    || msg.contains("broken pipe")
+            }
+            Ok(_) => false,
+        };
+        if let Err(err) = write_result {
+            if attempt < 3 && write_retryable {
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 last_error = Some(err);
                 continue;
             }
             return Err(err);
         }
 
+        // Read phase — classify ErrorKind directly, not via string matching
         let mut reader = BufReader::new(&mut stream);
         let mut response_line = String::new();
 
-        let read_result = match reader.read_line(&mut response_line) {
-            Ok(0) => Err(anyhow!("read socket: socket closed by server")),
-            Ok(_) => Ok(()),
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock =>
-            {
-                // EAGAIN — server hasn't responded yet, retry
-                Err(anyhow!("read socket: {}", e))
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::ConnectionReset
-                    || e.kind() == std::io::ErrorKind::BrokenPipe =>
-            {
-                Err(anyhow!("read socket: {}", e))
-            }
-            Err(e) => Err(anyhow!("read socket: {}", e)),
+        enum ReadOutcome {
+            Ok,
+            RetryableErr(anyhow::Error),
+            FatalErr(anyhow::Error),
+        }
+
+        let outcome = match reader.read_line(&mut response_line) {
+            Ok(0) => ReadOutcome::RetryableErr(anyhow!("read socket: socket closed by server")),
+            Ok(_) => ReadOutcome::Ok,
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut => {
+                    // EAGAIN / timeout — server busy, retry
+                    ReadOutcome::RetryableErr(anyhow!("read socket: {}", e))
+                }
+                std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe => {
+                    ReadOutcome::RetryableErr(anyhow!("read socket: {}", e))
+                }
+                std::io::ErrorKind::Interrupted => {
+                    // Spurious signal — retry immediately without counting attempt
+                    ReadOutcome::RetryableErr(anyhow!("read socket: {}", e))
+                }
+                _ => ReadOutcome::FatalErr(anyhow!("read socket: {}", e)),
+            },
         };
 
-        if let Err(err) = read_result {
-            let msg = err.to_string();
-            if attempt < 3
-                && (msg.contains("connection reset")
-                    || msg.contains("socket closed")
-                    || msg.contains("broken pipe")
-                    || msg.contains("Resource temporarily unavailable")
-                    || msg.contains("WouldBlock"))
-            {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                last_error = Some(err);
-                continue;
+        match outcome {
+            ReadOutcome::Ok => {}
+            ReadOutcome::RetryableErr(err) => {
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    last_error = Some(err);
+                    continue;
+                }
+                return Err(err);
             }
-            return Err(err);
+            ReadOutcome::FatalErr(err) => return Err(err),
         }
 
         let trimmed = response_line.trim();
