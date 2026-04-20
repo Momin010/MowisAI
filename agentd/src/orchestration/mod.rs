@@ -1141,7 +1141,7 @@ pub(crate) fn socket_roundtrip(
     for attempt in 0..=3 {
         let mut stream = UnixStream::connect(socket_path).context("UnixStream::connect")?;
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(60)))
             .context("set read timeout")?;
         stream
             .set_write_timeout(Some(std::time::Duration::from_secs(10)))
@@ -1189,6 +1189,12 @@ pub(crate) fn socket_roundtrip(
             Ok(0) => Err(anyhow!("read socket: socket closed by server")),
             Ok(_) => Ok(()),
             Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                // EAGAIN — server hasn't responded yet, retry
+                Err(anyhow!("read socket: {}", e))
+            }
+            Err(e)
                 if e.kind() == std::io::ErrorKind::ConnectionReset
                     || e.kind() == std::io::ErrorKind::BrokenPipe =>
             {
@@ -1202,9 +1208,11 @@ pub(crate) fn socket_roundtrip(
             if attempt < 3
                 && (msg.contains("connection reset")
                     || msg.contains("socket closed")
-                    || msg.contains("broken pipe"))
+                    || msg.contains("broken pipe")
+                    || msg.contains("Resource temporarily unavailable")
+                    || msg.contains("WouldBlock"))
             {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 last_error = Some(err);
                 continue;
             }
