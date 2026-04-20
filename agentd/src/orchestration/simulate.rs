@@ -7,7 +7,7 @@
 use super::mock_agent::MockAgentExecutor;
 use super::sandbox_topology::TopologyManager;
 use super::scheduler::{Scheduler, SchedulerStats};
-use super::verification::{VerificationPlan, VerificationResult};
+use super::verification::{VerificationPlan, VerificationResult, VerificationFunction};
 use agentd_protocol::{SandboxConfig, SandboxName, Task, TaskGraph, TaskId, VerificationStatus};
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -46,37 +46,39 @@ impl SimulatedVerificationPlanner {
             sandbox_name
         );
 
-        let test_tasks = TaskGraph {
-            tasks: vec![
-                Task {
-                    id: format!("test-{}-file-exists", sandbox_name),
-                    description: format!(
-                        "Verify files exist in sandbox {}",
-                        sandbox_name
-                    ),
-                    deps: vec![],
-                    hint: None,
-                },
-                Task {
-                    id: format!("test-{}-content-valid", sandbox_name),
-                    description: format!(
-                        "Verify file content is valid JS in sandbox {}",
-                        sandbox_name
-                    ),
-                    deps: vec![format!("test-{}-file-exists", sandbox_name)],
-                    hint: None,
-                },
-            ],
-        };
+        let vfs = vec![
+            VerificationFunction {
+                id: format!("test-{}-file-exists", sandbox_name),
+                description: format!(
+                    "Verify files exist in sandbox {}",
+                    sandbox_name
+                ),
+                command: "ls -la /workspace".to_string(),
+                expected_schema: None,
+                assertion: None,
+                deps: vec![],
+            },
+            VerificationFunction {
+                id: format!("test-{}-content-valid", sandbox_name),
+                description: format!(
+                    "Verify file content is valid JS in sandbox {}",
+                    sandbox_name
+                ),
+                command: "find /workspace -name '*.js' -type f | head -5".to_string(),
+                expected_schema: None,
+                assertion: None,
+                deps: vec![format!("test-{}-file-exists", sandbox_name)],
+            },
+        ];
 
         log::info!(
             "[VERIFY] Generated {} deterministic test tasks",
-            test_tasks.tasks.len()
+            vfs.len()
         );
 
         Ok(VerificationPlan {
-            test_tasks,
             sandbox_name: sandbox_name.clone(),
+            vfs,
         })
     }
 
@@ -190,31 +192,31 @@ impl SimulatedVerificationLoop {
 
             log::info!(
                 "[VERIFY] {} test tasks to run this round",
-                plan.test_tasks.tasks.len()
+                plan.vfs.len()
             );
 
             let mut round_failures: Vec<(TaskId, String, String)> = Vec::new();
 
-            for test_task in &plan.test_tasks.tasks {
-                log::info!("[VERIFY] Running test task: {}", test_task.id);
+            for vf in &plan.vfs {
+                log::info!("[VERIFY] Running VF: {} ({})", vf.id, vf.command);
 
                 let agent = match self
                     .topology
-                    .create_agent_layer(sandbox_name, Some(test_task.id.clone()))
+                    .create_agent_layer(sandbox_name, Some(vf.id.clone()))
                     .await
                 {
                     Ok(a) => a,
                     Err(e) => {
                         log::error!(
-                            "[VERIFY] Failed to create agent for test {} in sandbox {}: {}",
-                            test_task.id,
+                            "[VERIFY] Failed to create agent for VF {} in sandbox {}: {}",
+                            vf.id,
                             sandbox_name,
                             e
                         );
-                        failed_tests.push(test_task.id.clone());
+                        failed_tests.push(vf.id.clone());
                         round_failures.push((
-                            test_task.id.clone(),
-                            test_task.description.clone(),
+                            vf.id.clone(),
+                            vf.description.clone(),
                             e.to_string(),
                         ));
                         continue;
@@ -225,7 +227,7 @@ impl SimulatedVerificationLoop {
                     std::time::Duration::from_secs(self.planner.max_test_execution_time),
                     self.executor.execute_verification_task(
                         &agent,
-                        &test_task.description,
+                        &vf.description,
                         &self.topology,
                         self.verify_failure_rate,
                     ),
@@ -235,13 +237,13 @@ impl SimulatedVerificationLoop {
                     Ok(r) => r,
                     Err(_) => {
                         log::warn!(
-                            "[VERIFY] Test task {} timed out after {}s in sandbox {}",
-                            test_task.id,
+                            "[VERIFY] VF {} timed out after {}s in sandbox {}",
+                            vf.id,
                             self.planner.max_test_execution_time,
                             sandbox_name
                         );
                         Err(anyhow::anyhow!(
-                            "Test execution timeout after {}s",
+                            "VF execution timeout after {}s",
                             self.planner.max_test_execution_time
                         ))
                     }
@@ -252,35 +254,35 @@ impl SimulatedVerificationLoop {
                 match result {
                     Ok(r) if r.success => {
                         log::info!(
-                            "[VERIFY] Test task {} finished: success=true",
-                            test_task.id
+                            "[VERIFY] VF {} finished: success=true",
+                            vf.id
                         );
-                        passed_tests.push(test_task.id.clone());
+                        passed_tests.push(vf.id.clone());
                     }
                     Ok(r) => {
-                        let error = r.error.unwrap_or_else(|| "Test failed".to_string());
+                        let error = r.error.unwrap_or_else(|| "VF failed".to_string());
                         log::info!(
-                            "[VERIFY] Test task {} finished: success=false — {}",
-                            test_task.id,
+                            "[VERIFY] VF {} finished: success=false — {}",
+                            vf.id,
                             error
                         );
-                        failed_tests.push(test_task.id.clone());
+                        failed_tests.push(vf.id.clone());
                         round_failures.push((
-                            test_task.id.clone(),
-                            test_task.description.clone(),
+                            vf.id.clone(),
+                            vf.description.clone(),
                             error,
                         ));
                     }
                     Err(e) => {
                         log::info!(
-                            "[VERIFY] Test task {} finished: success=false — {}",
-                            test_task.id,
+                            "[VERIFY] VF {} finished: success=false — {}",
+                            vf.id,
                             e
                         );
-                        failed_tests.push(test_task.id.clone());
+                        failed_tests.push(vf.id.clone());
                         round_failures.push((
-                            test_task.id.clone(),
-                            test_task.description.clone(),
+                            vf.id.clone(),
+                            vf.description.clone(),
                             e.to_string(),
                         ));
                     }
