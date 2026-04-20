@@ -924,7 +924,7 @@ These VFs cover the main implementation."#;
     #[test]
     fn test_status_no_tests_is_not_started() {
         let status = determine_status(&[], &[], 1, 3);
-        assert_eq!(status, VerificationStatus::NotStarted;
+        assert_eq!(status, VerificationStatus::NotStarted);
     }
 
     #[test]
