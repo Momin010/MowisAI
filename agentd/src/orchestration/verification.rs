@@ -965,7 +965,7 @@ These VFs cover the main implementation."#;
     #[test]
     fn test_planner_new_defaults() {
         let p = VerificationPlanner::new("test-project".to_string(), 5);
-        assert_eq!(p.planner.max_test_execution_time, 60);
+        assert_eq!(p.max_test_execution_time, 60);
         assert_eq!(p.max_rounds, 5);
     }
 
