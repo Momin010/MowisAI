@@ -382,7 +382,7 @@ impl SimulatedVerificationLoop {
             }
         }
 
-        let status = sim_determine_status(&failed_tests, &passed_tests, rounds_completed, max_rounds);
+        let status = super::verification::determine_status(&failed_tests, &passed_tests, rounds_completed, max_rounds);
 
         Ok(VerificationResult {
             status,
@@ -392,26 +392,6 @@ impl SimulatedVerificationLoop {
             updated_diff: Some(merged_diff.to_string()),
         })
     }
-}
-
-/// Determine verification status from the last round's results.
-/// Mirrors `determine_status` in `verification.rs`.
-fn sim_determine_status(
-    failed_tests: &[TaskId],
-    passed_tests: &[TaskId],
-    rounds_completed: usize,
-    max_rounds: usize,
-) -> VerificationStatus {
-    if passed_tests.is_empty() && failed_tests.is_empty() {
-        return VerificationStatus::NotStarted;
-    }
-    if failed_tests.is_empty() {
-        return VerificationStatus::Passed;
-    }
-    if rounds_completed >= max_rounds {
-        return VerificationStatus::PartiallyVerified;
-    }
-    VerificationStatus::Failed
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
