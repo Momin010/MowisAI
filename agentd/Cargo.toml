@@ -1,8 +1,8 @@
 [package]
 name = "agentd"
-version = "0.2.001"
-edition = "2021"
-authors = ["MowisAI <info@mowis.ai>"]
+version = "0.2.0.1"
+edition = "2026"
+authors = ["MowisAI <info@mowisai.com>"]
 description = "MowisAI — AI agent orchestration engine"
 
 [[bin]]
