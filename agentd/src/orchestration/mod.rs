@@ -279,20 +279,25 @@ pub(crate) mod pool {
 
     // ── Liveness probe ───────────────────────────────────────────────────────
 
-    /// Non-blocking peek: returns `true` if the socket is still open on the
-    /// remote end (WouldBlock), `false` on EOF or any error.
+    /// Non-blocking peek via `MSG_PEEK | MSG_DONTWAIT`: returns `true` if the
+    /// remote end is still open, `false` on EOF or hard error.
+    /// Uses `nix::sys::socket::recv` because `UnixStream::peek` is nightly-only.
     fn is_alive(stream: &UnixStream) -> bool {
-        if stream.set_nonblocking(true).is_err() {
-            return false;
-        }
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
         let mut buf = [0u8; 1];
-        let alive = match stream.peek(&mut buf) {
+        let flags =
+            nix::sys::socket::MsgFlags::MSG_PEEK | nix::sys::socket::MsgFlags::MSG_DONTWAIT;
+        match nix::sys::socket::recv(fd, &mut buf, flags) {
             Ok(0) => false, // remote sent FIN
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
-            _ => false,
-        };
-        let _ = stream.set_nonblocking(false);
-        alive
+            Ok(_) => true,  // data available (peeked, not consumed)
+            Err(e)
+                if e == nix::errno::Errno::EAGAIN || e == nix::errno::Errno::EWOULDBLOCK =>
+            {
+                true // no data yet, but connection alive
+            }
+            Err(_) => false,
+        }
     }
 
     // ── Global per-path registry ─────────────────────────────────────────────
