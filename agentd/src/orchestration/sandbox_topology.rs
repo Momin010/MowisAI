@@ -92,15 +92,15 @@ impl TopologyManager {
 
     /// Create sandbox via agentd socket API
     pub async fn create_sandbox_layer(&self, config: &SandboxConfig) -> Result<()> {
-        // Call agentd to create sandbox with project root mounted
+        // Call agentd to create sandbox with project root mounted.
+        // No "image" field — socket server creates a plain tmpfs sandbox (no skopeo needed).
         let request = json!({
             "request_type": "create_sandbox",
-            "image": "alpine", // Default to alpine
             "packages": config.tools.iter()
                 .filter_map(|tool| self.tool_to_package(tool))
                 .collect::<Vec<_>>(),
-            "project_root": self.project_root.to_string_lossy(),  // Mount project root as base layer
-            "scope": config.scope.clone(),  // Scoped view (e.g., "src/frontend/")
+            "project_root": self.project_root.to_string_lossy(),
+            "scope": config.scope.clone(),
         });
 
         let socket_path = self.socket_path.clone();

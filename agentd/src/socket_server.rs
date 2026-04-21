@@ -418,14 +418,14 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
         // 3. Every container created from this sandbox will inherit those packages
         //    via overlayfs (lower layer = sandbox upper, which has the packages).
         "create_sandbox" => {
-            let image = req.image.clone().unwrap_or_else(|| "alpine".to_string());
+            let image = req.image.clone(); // None means plain tmpfs (no skopeo needed)
             let backend = req.backend.clone().unwrap_or_else(|| "chroot".to_string());
             let limits = ResourceLimits { ram_bytes: req.ram, cpu_millis: req.cpu };
             let seed_repo_url = req.seed_repo_url.clone();
             let seed_repo_branch = req.seed_repo_branch.clone();
             let seed_repo_subdir = req.seed_repo_subdir.clone();
 
-            let mut sb = match Sandbox::new_with_image(limits, Some(&image)) {
+            let mut sb = match Sandbox::new_with_image(limits, image.as_deref()) {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = AUDITOR.record_event(
@@ -439,11 +439,12 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             let id = sb.id();
             let root = sb.root_path().to_owned();
             let extra = req.packages.as_deref().unwrap_or(&[]);
+            let image_label = image.as_deref().unwrap_or("(none)");
 
             log::info!("sandbox created: {}", id);
-            log::info!("[agentd] Setting up sandbox {} with image '{}'", id, image);
+            log::info!("[agentd] Setting up sandbox {} with image '{}'", id, image_label);
 
-            if let Err(e) = install_packages_in_image(&root, &image, extra) {
+            if let Err(e) = install_packages_in_image(&root, image_label, extra) {
                 log::warn!("sandbox {} package install warning: {}", id, e);
                 // Non-fatal: continue even if some optional packages failed.
                 // Core failures will be caught when the first tool runs.
@@ -519,7 +520,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             SANDBOX_BACKENDS.insert(id, backend.clone());
 
             if backend == "guest_vm" {
-                match boot_vm(id.to_string(), &root, &image) {
+                match boot_vm(id.to_string(), &root, image.as_deref().unwrap_or("alpine")) {
                     Ok(handle) => {
                         VM_HANDLES.insert(id, handle);
                         log::info!("[agentd] guest_vm QEMU boot pid={} sandbox={} port=?", id, id);
