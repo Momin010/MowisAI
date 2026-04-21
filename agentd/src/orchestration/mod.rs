@@ -43,6 +43,284 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Unix-domain socket connection pool
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Each unique socket path gets one pool. Connections are lazily created up to
+// `max_size` (default 32). When the pool is exhausted, callers block on a
+// condvar up to `POOL_WAIT` rather than opening uncapped raw connections.
+// `PooledConn` is an RAII guard: on drop it probes liveness via MSG_PEEK and
+// either returns the stream to the idle queue or discards it.
+//
+// NOTE: The agentd socket server closes each connection after one request, so
+// `is_alive()` will always return false with the production server.  The pool
+// therefore acts as a bounded concurrency semaphore in that mode.  With any
+// persistent-connection test server, full reuse works automatically.
+
+#[cfg(unix)]
+pub(crate) mod pool {
+    use dashmap::DashMap;
+    use parking_lot::{Condvar, Mutex};
+    use std::collections::VecDeque;
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// Default maximum connections per socket path.
+    pub const DEFAULT_POOL_SIZE: usize = 32;
+
+    static POOL_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_POOL_SIZE);
+    /// Default wait before giving up when every slot is in use (5 minutes).
+    static POOL_WAIT_MS: AtomicU64 = AtomicU64::new(300_000);
+
+    /// Override the pool size used when a *new* pool is created for a path.
+    /// Already-existing pools keep their original size.
+    pub fn set_pool_size(n: usize) {
+        assert!(n > 0, "pool size must be > 0");
+        POOL_SIZE.store(n, Ordering::Relaxed);
+    }
+
+    /// Current configured pool size.
+    pub fn pool_size() -> usize {
+        POOL_SIZE.load(Ordering::Relaxed)
+    }
+
+    /// Override how long `acquire` waits when the pool is exhausted.
+    /// Useful in tests to avoid multi-minute waits.
+    pub fn set_wait_timeout(d: Duration) {
+        POOL_WAIT_MS.store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn wait_timeout() -> Duration {
+        Duration::from_millis(POOL_WAIT_MS.load(Ordering::Relaxed))
+    }
+
+    // ── Inner state ──────────────────────────────────────────────────────────
+
+    struct Inner {
+        idle: VecDeque<UnixStream>,
+        in_use: usize,
+    }
+
+    impl Inner {
+        /// Total connections that exist (idle + checked-out).
+        fn total(&self) -> usize {
+            self.idle.len() + self.in_use
+        }
+    }
+
+    // ── SocketPool ───────────────────────────────────────────────────────────
+
+    pub struct SocketPool {
+        path: String,
+        max_size: usize,
+        inner: Mutex<Inner>,
+        returned: Condvar,
+    }
+
+    impl SocketPool {
+        pub fn new(path: String, max_size: usize) -> Arc<Self> {
+            Arc::new(SocketPool {
+                path,
+                max_size,
+                inner: Mutex::new(Inner {
+                    idle: VecDeque::new(),
+                    in_use: 0,
+                }),
+                returned: Condvar::new(),
+            })
+        }
+
+        /// Acquire a connection, waiting up to the configured timeout.
+        pub fn acquire(self: &Arc<Self>) -> anyhow::Result<PooledConn> {
+            self.acquire_timeout(wait_timeout())
+        }
+
+        /// Acquire a connection, waiting up to `timeout`.
+        /// Returns `Err` if `timeout` elapses while all slots are in use.
+        pub fn acquire_timeout(
+            self: &Arc<Self>,
+            timeout: Duration,
+        ) -> anyhow::Result<PooledConn> {
+            let deadline = Instant::now() + timeout;
+
+            loop {
+                let mut guard = self.inner.lock();
+
+                // ① Take an idle (already-open) connection.
+                if let Some(stream) = guard.idle.pop_front() {
+                    guard.in_use += 1;
+                    return Ok(PooledConn {
+                        pool: self.clone(),
+                        stream: Some(stream),
+                        dead: false,
+                    });
+                }
+
+                // ② Create a new connection if below the cap.
+                if guard.total() < self.max_size {
+                    guard.in_use += 1;
+                    drop(guard); // release lock before blocking connect()
+                    match UnixStream::connect(&self.path) {
+                        Ok(stream) => {
+                            return Ok(PooledConn {
+                                pool: self.clone(),
+                                stream: Some(stream),
+                                dead: false,
+                            });
+                        }
+                        Err(e) => {
+                            // Roll back the in_use increment we just took.
+                            let mut g = self.inner.lock();
+                            g.in_use -= 1;
+                            drop(g);
+                            self.returned.notify_one();
+                            return Err(anyhow::anyhow!("pool connect to {}: {}", self.path, e));
+                        }
+                    }
+                }
+
+                // ③ Pool exhausted — wait for a slot to be returned.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(anyhow::anyhow!(
+                        "connection pool exhausted: all {} slots busy for path {}",
+                        self.max_size,
+                        self.path
+                    ));
+                }
+                if self.returned.wait_for(&mut guard, remaining).timed_out() {
+                    return Err(anyhow::anyhow!(
+                        "connection pool exhausted: timed out after {:?} (pool_size={})",
+                        timeout,
+                        self.max_size
+                    ));
+                }
+                // Spurious wakeup or a slot was genuinely returned — loop again.
+            }
+        }
+
+        /// Return a healthy stream to the idle queue.
+        fn put_back(&self, stream: UnixStream) {
+            {
+                let mut g = self.inner.lock();
+                g.in_use -= 1;
+                g.idle.push_back(stream);
+            }
+            self.returned.notify_one();
+        }
+
+        /// Discard a dead connection, freeing its slot.
+        fn discard(&self) {
+            {
+                let mut g = self.inner.lock();
+                g.in_use -= 1;
+            }
+            self.returned.notify_one();
+        }
+
+        /// Snapshot of pool counters (for tests / monitoring).
+        pub fn stats(&self) -> PoolStats {
+            let g = self.inner.lock();
+            PoolStats {
+                idle: g.idle.len(),
+                in_use: g.in_use,
+                max_size: self.max_size,
+            }
+        }
+    }
+
+    /// Counters returned by `SocketPool::stats`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PoolStats {
+        pub idle: usize,
+        pub in_use: usize,
+        pub max_size: usize,
+    }
+
+    // ── RAII connection guard ─────────────────────────────────────────────────
+
+    /// A checked-out connection.  Dropping it returns the stream to the pool
+    /// (if still alive) or frees the slot (if dead).
+    pub struct PooledConn {
+        pool: Arc<SocketPool>,
+        stream: Option<UnixStream>,
+        /// True once the caller has determined the stream is unusable.
+        dead: bool,
+    }
+
+    impl PooledConn {
+        /// Mutable access to the underlying stream.
+        pub fn stream_mut(&mut self) -> &mut UnixStream {
+            self.stream.as_mut().expect("stream already consumed")
+        }
+
+        /// Mark this connection as dead so it is discarded on drop instead of
+        /// being returned to the idle queue.
+        pub fn kill(&mut self) {
+            self.dead = true;
+        }
+    }
+
+    impl Drop for PooledConn {
+        fn drop(&mut self) {
+            if let Some(stream) = self.stream.take() {
+                if !self.dead && is_alive(&stream) {
+                    self.pool.put_back(stream);
+                } else {
+                    drop(stream);
+                    self.pool.discard();
+                }
+            }
+        }
+    }
+
+    // ── Liveness probe ───────────────────────────────────────────────────────
+
+    /// Non-blocking peek: returns `true` if the socket is still open on the
+    /// remote end (WouldBlock), `false` on EOF or any error.
+    fn is_alive(stream: &UnixStream) -> bool {
+        if stream.set_nonblocking(true).is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 1];
+        let alive = match stream.peek(&mut buf) {
+            Ok(0) => false, // remote sent FIN
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
+            _ => false,
+        };
+        let _ = stream.set_nonblocking(false);
+        alive
+    }
+
+    // ── Global per-path registry ─────────────────────────────────────────────
+
+    lazy_static::lazy_static! {
+        static ref POOLS: DashMap<String, Arc<SocketPool>> = DashMap::new();
+    }
+
+    /// Get the pool for `path`, creating it (with the current `pool_size()`)
+    /// on first call.
+    pub fn get_pool(path: &str) -> Arc<SocketPool> {
+        POOLS
+            .entry(path.to_string())
+            .or_insert_with(|| SocketPool::new(path.to_string(), pool_size()))
+            .clone()
+    }
+
+    /// Remove (and drain) the pool for `path`.  Primarily for tests.
+    pub fn remove_pool(path: &str) {
+        POOLS.remove(path);
+    }
+
+    /// Stats for the pool at `path`, or `None` if it hasn't been created yet.
+    pub fn pool_stats(path: &str) -> Option<PoolStats> {
+        POOLS.get(path).map(|p| p.stats())
+    }
+}
+
 /// Enable/disable verbose orchestration logging (socket/HTTP payloads, round timings, etc).
 /// Normal mode prints only high-signal CLI events (tool calls / file ops).
 pub fn set_debug(enabled: bool) {
@@ -1139,29 +1417,33 @@ pub(crate) fn socket_roundtrip(
     let mut last_error: Option<anyhow::Error> = None;
 
     for attempt in 0..=3 {
-        let mut stream = UnixStream::connect(socket_path).context("UnixStream::connect")?;
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(60)))
-            .context("set read timeout")?;
-        stream
-            .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-            .context("set write timeout")?;
+        // Acquire from pool (blocks if all slots are in use, up to the configured timeout).
+        let mut conn = pool::get_pool(socket_path).acquire()?;
 
-        // Write phase
-        let write_result = (|| -> anyhow::Result<()> {
-            let mut bytes_written = 0;
-            let bytes = line.as_bytes();
-            while bytes_written < bytes.len() {
-                match stream.write(&bytes[bytes_written..]) {
-                    Ok(0) => return Err(anyhow!("write socket: socket closed by server")),
-                    Ok(n) => bytes_written += n,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(anyhow!("write socket: {}", e)),
+        {
+            let s = conn.stream_mut();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(60)))
+                .context("set read timeout")?;
+            s.set_write_timeout(Some(std::time::Duration::from_secs(10)))
+                .context("set write timeout")?;
+        }
+
+        // Write phase — pass stream by explicit argument so the borrow ends before read phase.
+        let write_result =
+            (|s: &mut UnixStream| -> anyhow::Result<()> {
+                let mut bytes_written = 0;
+                let bytes = line.as_bytes();
+                while bytes_written < bytes.len() {
+                    match s.write(&bytes[bytes_written..]) {
+                        Ok(0) => return Err(anyhow!("write socket: socket closed by server")),
+                        Ok(n) => bytes_written += n,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(anyhow!("write socket: {}", e)),
+                    }
                 }
-            }
-            stream.flush().map_err(|e| anyhow!("flush socket: {}", e))?;
-            Ok(())
-        })();
+                s.flush().map_err(|e| anyhow!("flush socket: {}", e))?;
+                Ok(())
+            })(conn.stream_mut());
 
         // Classify write errors by ErrorKind directly — no string matching
         let write_retryable = match &write_result {
@@ -1174,6 +1456,7 @@ pub(crate) fn socket_roundtrip(
             Ok(_) => false,
         };
         if let Err(err) = write_result {
+            conn.kill();
             if attempt < 3 && write_retryable {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 last_error = Some(err);
@@ -1182,40 +1465,41 @@ pub(crate) fn socket_roundtrip(
             return Err(err);
         }
 
-        // Read phase — classify ErrorKind directly, not via string matching
-        let mut reader = BufReader::new(&mut stream);
-        let mut response_line = String::new();
-
+        // Read phase — classify ErrorKind directly, not via string matching.
+        // BufReader borrow is scoped so conn is free again after this block.
         enum ReadOutcome {
-            Ok,
+            Ok(String),
             RetryableErr(anyhow::Error),
             FatalErr(anyhow::Error),
         }
 
-        let outcome = match reader.read_line(&mut response_line) {
-            Ok(0) => ReadOutcome::RetryableErr(anyhow!("read socket: socket closed by server")),
-            Ok(_) => ReadOutcome::Ok,
-            Err(e) => match e.kind() {
-                std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::TimedOut => {
-                    // EAGAIN / timeout — server busy, retry
-                    ReadOutcome::RetryableErr(anyhow!("read socket: {}", e))
-                }
-                std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::BrokenPipe => {
-                    ReadOutcome::RetryableErr(anyhow!("read socket: {}", e))
-                }
-                std::io::ErrorKind::Interrupted => {
-                    // Spurious signal — retry immediately without counting attempt
-                    ReadOutcome::RetryableErr(anyhow!("read socket: {}", e))
-                }
-                _ => ReadOutcome::FatalErr(anyhow!("read socket: {}", e)),
-            },
-        };
+        let outcome = (|s: &mut UnixStream| -> ReadOutcome {
+            let mut reader = BufReader::new(s);
+            let mut response_line = String::new();
+            match reader.read_line(&mut response_line) {
+                Ok(0) => ReadOutcome::RetryableErr(anyhow!("read socket: socket closed by server")),
+                Ok(_) => ReadOutcome::Ok(response_line),
+                Err(e) => match e.kind() {
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                        // EAGAIN / timeout — server busy, retry
+                        ReadOutcome::RetryableErr(anyhow!("read socket: {}", e))
+                    }
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe => {
+                        ReadOutcome::RetryableErr(anyhow!("read socket: {}", e))
+                    }
+                    std::io::ErrorKind::Interrupted => {
+                        // Spurious signal — retry immediately without counting attempt
+                        ReadOutcome::RetryableErr(anyhow!("read socket: {}", e))
+                    }
+                    _ => ReadOutcome::FatalErr(anyhow!("read socket: {}", e)),
+                },
+            }
+        })(conn.stream_mut());
 
-        match outcome {
-            ReadOutcome::Ok => {}
+        let response_line = match outcome {
+            ReadOutcome::Ok(l) => l,
             ReadOutcome::RetryableErr(err) => {
+                conn.kill();
                 if attempt < 3 {
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     last_error = Some(err);
@@ -1223,8 +1507,11 @@ pub(crate) fn socket_roundtrip(
                 }
                 return Err(err);
             }
-            ReadOutcome::FatalErr(err) => return Err(err),
-        }
+            ReadOutcome::FatalErr(err) => {
+                conn.kill();
+                return Err(err);
+            }
+        };
 
         let trimmed = response_line.trim();
         if trimmed.is_empty() {
@@ -1252,6 +1539,8 @@ pub(crate) fn socket_roundtrip(
         ));
 
         return Ok(parsed);
+        // conn drops here; PooledConn::drop calls is_alive() and either
+        // returns the stream to the idle queue or frees the slot.
     }
 
     Err(last_error.unwrap_or_else(|| anyhow!("socket request failed after retries")))
@@ -1340,5 +1629,224 @@ pub(crate) fn invoke_tool_via_socket(
             .and_then(|e| e.as_str())
             .unwrap_or("tool error");
         Ok(json!({ "error": err, "success": false }))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connection-pool tests
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(all(unix, test))]
+mod pool_tests {
+    use super::pool;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    /// One-shot echo server: accepts a connection, reads one '\n'-terminated
+    /// line, echoes it back, then closes the connection (mimics agentd).
+    fn one_shot_echo_server(path: &str) {
+        let listener = UnixListener::bind(path).expect("bind");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut line = String::new();
+                {
+                    let mut reader = BufReader::new(&stream);
+                    if reader.read_line(&mut line).is_err() {
+                        continue;
+                    }
+                }
+                let _ = stream.write_all(line.as_bytes());
+                // Close after each request — one-shot protocol.
+            }
+        });
+    }
+
+    /// Persistent echo server: accepts connections and keeps them open,
+    /// replying to every '\n'-terminated line sent.  Used to verify that
+    /// healthy connections are returned to the idle queue.
+    fn persistent_echo_server(path: &str) {
+        let listener = UnixListener::bind(path).expect("bind");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                std::thread::spawn(move || {
+                    let read_stream = stream.try_clone().expect("clone");
+                    let mut write_stream = stream;
+                    let reader = BufReader::new(read_stream);
+                    for line in reader.lines() {
+                        let line = match line {
+                            Ok(l) => l,
+                            Err(_) => break,
+                        };
+                        let reply = format!("{}\n", line);
+                        if write_stream.write_all(reply.as_bytes()).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// Unique socket path per test to avoid cross-test interference.
+    fn sock_path(tag: &str) -> String {
+        format!("/tmp/pool_test_{}.sock", tag)
+    }
+
+    fn cleanup(path: &str) {
+        let _ = std::fs::remove_file(path);
+        pool::remove_pool(path);
+    }
+
+    // ── tests ─────────────────────────────────────────────────────────────────
+
+    /// 100 threads hammer a pool of size 32 against a one-shot server.
+    /// All 100 requests must succeed.
+    #[test]
+    fn test_pool_concurrent_100() {
+        let path = sock_path("concurrent100");
+        cleanup(&path);
+        one_shot_echo_server(&path);
+        std::thread::sleep(Duration::from_millis(50)); // let server start
+
+        // Create pool directly to avoid racing on the global POOL_SIZE setting.
+        let p = pool::SocketPool::new(path.clone(), 32);
+        let barrier = Arc::new(Barrier::new(100));
+        let errors: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let handles: Vec<_> = (0..100)
+            .map(|i| {
+                let p = p.clone();
+                let barrier = barrier.clone();
+                let errors = errors.clone();
+                std::thread::spawn(move || {
+                    barrier.wait(); // all threads start together
+                    let msg = format!("hello {}\n", i);
+                    let result: anyhow::Result<String> = (|| {
+                        let mut conn = p.acquire()?;
+                        {
+                            let s = conn.stream_mut();
+                            s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                            s.set_write_timeout(Some(Duration::from_secs(10))).ok();
+                            s.write_all(msg.as_bytes())?;
+                        } // borrow on conn ends here
+                        let mut reader = BufReader::new(conn.stream_mut());
+                        let mut line = String::new();
+                        reader.read_line(&mut line)?;
+                        Ok(line)
+                    })();
+                    if let Err(e) = result {
+                        errors.lock().unwrap().push(format!("thread {}: {}", i, e));
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let errs = errors.lock().unwrap();
+        assert!(errs.is_empty(), "errors from concurrent threads: {:?}", *errs);
+        cleanup(&path);
+    }
+
+    /// With pool_size=1 and one thread holding the connection, a second
+    /// acquire must block until the first is released.
+    #[test]
+    fn test_pool_exhaustion_waits() {
+        let path = sock_path("exhaustion");
+        cleanup(&path);
+        one_shot_echo_server(&path);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let p = pool::SocketPool::new(path.clone(), 1);
+
+        // Hold the sole slot.
+        let conn1 = p.acquire_timeout(Duration::from_secs(5)).expect("first acquire");
+
+        // Second acquire with short timeout must time out.
+        let result = p.acquire_timeout(Duration::from_millis(200));
+        assert!(result.is_err(), "expected timeout error, got Ok");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("exhausted") || msg.contains("timed out"),
+            "unexpected error: {}",
+            msg
+        );
+
+        // Release first connection; second acquire should now succeed.
+        drop(conn1);
+        let conn2 = p.acquire_timeout(Duration::from_secs(5));
+        assert!(conn2.is_ok(), "expected success after release: {:?}", conn2);
+
+        cleanup(&path);
+    }
+
+    /// With a *persistent* server (keeps connection alive), the stream should
+    /// be returned to the idle queue after use, so stats show idle=1.
+    #[test]
+    fn test_pool_connection_reuse() {
+        let path = sock_path("reuse");
+        cleanup(&path);
+        persistent_echo_server(&path);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let p = pool::SocketPool::new(path.clone(), 4);
+
+        // First round-trip.
+        {
+            let mut conn = p.acquire_timeout(Duration::from_secs(5)).expect("acquire 1");
+            {
+                let s = conn.stream_mut();
+                s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                s.set_write_timeout(Some(Duration::from_secs(5))).ok();
+                s.write_all(b"ping\n").expect("write");
+            }
+            let mut reader = BufReader::new(conn.stream_mut());
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read");
+            assert_eq!(line.trim(), "ping");
+            // conn drops here — persistent server keeps it alive → put_back()
+        }
+
+        // The connection must be back in the idle queue.
+        let stats = p.stats();
+        assert_eq!(stats.idle, 1, "expected 1 idle connection, got {:?}", stats);
+        assert_eq!(stats.in_use, 0);
+
+        // Second round-trip reuses the same slot (total stays at 1).
+        {
+            let mut conn = p.acquire_timeout(Duration::from_secs(5)).expect("acquire 2");
+            let stats_during = p.stats();
+            assert_eq!(stats_during.idle, 0, "idle should be 0 while in use");
+            assert_eq!(stats_during.in_use, 1);
+
+            {
+                let s = conn.stream_mut();
+                s.write_all(b"world\n").expect("write");
+            }
+            let mut reader = BufReader::new(conn.stream_mut());
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read");
+            assert_eq!(line.trim(), "world");
+        }
+
+        let stats_after = p.stats();
+        assert_eq!(stats_after.idle, 1, "expected 1 idle after second use");
+        assert_eq!(stats_after.in_use, 0);
+
+        cleanup(&path);
     }
 }
