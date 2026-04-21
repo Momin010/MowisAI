@@ -211,7 +211,9 @@ impl Tool for SetEnvTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("set_env: missing value"))?;
 
-        std::env::set_var(var, value);
+        unsafe {
+            std::env::set_var(var, value);
+        }
         Ok(json!({ "success": true }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {

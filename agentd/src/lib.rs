@@ -246,7 +246,7 @@ use std::os::raw::c_char;
 
 /// create a new sandbox and return a pointer (caller owns). ram and cpu are optional
 /// limits (0 means none).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn agent_sandbox_new(ram: u64, cpu: u64) -> *mut Sandbox {
     let limits = ResourceLimits {
         ram_bytes: if ram == 0 { None } else { Some(ram) },
@@ -259,7 +259,7 @@ pub extern "C" fn agent_sandbox_new(ram: u64, cpu: u64) -> *mut Sandbox {
 }
 
 /// run a command in sandbox; returns owned C string which must be freed by caller.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn agent_sandbox_run(sb: *mut Sandbox, cmd: *const c_char) -> *mut c_char {
     if sb.is_null() || cmd.is_null() {
         return std::ptr::null_mut();
@@ -277,7 +277,7 @@ pub extern "C" fn agent_sandbox_run(sb: *mut Sandbox, cmd: *const c_char) -> *mu
 }
 
 /// free string returned by agent_sandbox_run
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn agent_string_free(s: *mut c_char) {
     if s.is_null() {
         return;
@@ -289,7 +289,7 @@ pub extern "C" fn agent_string_free(s: *mut c_char) {
 }
 
 /// free sandbox
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn agent_sandbox_free(sb: *mut Sandbox) {
     if sb.is_null() {
         return;
@@ -300,12 +300,12 @@ pub extern "C" fn agent_sandbox_free(sb: *mut Sandbox) {
 }
 
 // Extended C FFI for memory and agent loop
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn agent_memory_new(agent_id: u64, session_id: u64) -> *mut AgentMemory {
     Box::into_raw(Box::new(AgentMemory::new(agent_id, session_id)))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn agent_memory_free(mem: *mut AgentMemory) {
     if mem.is_null() {
         return;
@@ -315,7 +315,7 @@ pub extern "C" fn agent_memory_free(mem: *mut AgentMemory) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn agent_loop_new(
     agent_id: u64,
     session_id: u64,
@@ -324,7 +324,7 @@ pub extern "C" fn agent_loop_new(
     Box::into_raw(Box::new(AgentLoop::new(agent_id, session_id, max_iter)))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn agent_loop_free(loop_ptr: *mut AgentLoop) {
     if loop_ptr.is_null() {
         return;

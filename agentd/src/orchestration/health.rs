@@ -157,7 +157,7 @@ impl HealthMonitor {
         let beats = self.heartbeats.read().await;
         beats
             .iter()
-            .filter(|(_, &last)| now.saturating_sub(last) > self.heartbeat_timeout_secs)
+            .filter(|&(_, &last)| now.saturating_sub(last) > self.heartbeat_timeout_secs)
             .map(|(id, _)| id.clone())
             .collect()
     }
