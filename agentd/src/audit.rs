@@ -96,10 +96,12 @@ impl AuditLogger {
     }
 
     pub fn log(&self, event: AuditEvent) -> anyhow::Result<()> {
-        let mut buffer = self.buffer.lock().unwrap();
-        buffer.push(event);
-
-        if buffer.len() >= self.buffer_size {
+        let should_flush = {
+            let mut buffer = self.buffer.lock().unwrap();
+            buffer.push(event);
+            buffer.len() >= self.buffer_size
+        }; // buffer lock released before flush to avoid self-deadlock
+        if should_flush {
             self.flush()?;
         }
         Ok(())

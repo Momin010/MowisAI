@@ -109,20 +109,24 @@ pub struct Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        // unmount the root path (overlayfs or tmpfs)
-        let _ = umount2(self.root.path(), MntFlags::MNT_DETACH);
-        // clean up overlayfs directories if they exist
-        let overlay_base = std::env::temp_dir().join(format!("overlay-{}", self.id));
-        let _ = std::fs::remove_dir_all(&overlay_base);
-        // clean up containers: unmount and remove each container's temp directory
+        // Clean up containers: unmount submounts first, then root, then delete dirs.
+        let has_image = self.image_path.is_some();
         for (_, container) in &self.containers {
+            let _ = umount2(&container.root.join("workspace"), MntFlags::MNT_DETACH);
+            if has_image {
+                let _ = umount2(&container.root.join("dev"),  MntFlags::MNT_DETACH);
+                let _ = umount2(&container.root.join("proc"), MntFlags::MNT_DETACH);
+            }
             let _ = umount2(&container.root, MntFlags::MNT_DETACH);
-            // Remove the entire container-{id} directory (parent of root)
-            // This is /tmp/container-{id} which contains upper/, work/, root/
             if let Some(base) = container.root.parent() {
                 let _ = std::fs::remove_dir_all(base);
             }
         }
+        // Unmount the sandbox root (overlayfs or tmpfs)
+        let _ = umount2(self.root.path(), MntFlags::MNT_DETACH);
+        // Clean up overlayfs upper/work dirs if they exist
+        let overlay_base = std::env::temp_dir().join(format!("overlay-{}", self.id));
+        let _ = std::fs::remove_dir_all(&overlay_base);
     }
 }
 
@@ -698,27 +702,32 @@ impl Sandbox {
         let _ = fs::copy("/etc/resolv.conf", etc.join("resolv.conf"));
         let _ = fs::copy("/etc/hosts", etc.join("hosts"));
 
-        // Mount /proc
-        let proc_dir = root.join("proc");
-        fs::create_dir_all(&proc_dir)?;
-        let _ = mount(
-            Some("proc"),
-            &proc_dir,
-            Some("proc"),
-            MsFlags::empty(),
-            None::<&str>,
-        );
+        // Mount /proc and /dev only when the sandbox has a real image (rootfs).
+        // For plain-tmpfs sandboxes (no image) there is no /bin/sh to exec, so
+        // the container never needs /proc or /dev populated.  Skipping devtmpfs
+        // avoids blocking the kdevtmpfs kernel thread (which populates device
+        // nodes asynchronously) and keeps the DashMap write-lock duration short.
+        if self.image_path.is_some() {
+            let proc_dir = root.join("proc");
+            fs::create_dir_all(&proc_dir)?;
+            let _ = mount(
+                Some("proc"),
+                &proc_dir,
+                Some("proc"),
+                MsFlags::empty(),
+                None::<&str>,
+            );
 
-        // Mount /dev
-        let dev_dir = root.join("dev");
-        fs::create_dir_all(&dev_dir)?;
-        let _ = mount(
-            Some("devtmpfs"),
-            &dev_dir,
-            Some("devtmpfs"),
-            MsFlags::empty(),
-            None::<&str>,
-        );
+            let dev_dir = root.join("dev");
+            fs::create_dir_all(&dev_dir)?;
+            let _ = mount(
+                Some("devtmpfs"),
+                &dev_dir,
+                Some("devtmpfs"),
+                MsFlags::empty(),
+                None::<&str>,
+            );
+        }
 
         // Mount an isolated overlay workspace if a project root is configured.
         // The project tree is always the read-only lowerdir; each container gets
@@ -878,11 +887,19 @@ impl Sandbox {
     /// destroy a container and clean up its resources
     pub fn destroy_container(&mut self, container_id: u64) -> anyhow::Result<()> {
         use nix::mount::{umount2, MntFlags};
-        
+
         if let Some(container) = self.containers.remove(&container_id) {
-            // unmount the container root
+            // Unmount submounts first to prevent mount-namespace bloat.
+            // Workspace is always mounted; proc/dev only exist when the sandbox
+            // has a real image (see create_container).
+            let _ = umount2(&container.root.join("workspace"), MntFlags::MNT_DETACH);
+            if self.image_path.is_some() {
+                let _ = umount2(&container.root.join("dev"),  MntFlags::MNT_DETACH);
+                let _ = umount2(&container.root.join("proc"), MntFlags::MNT_DETACH);
+            }
+            // Now unmount the container root itself
             let _ = umount2(&container.root, MntFlags::MNT_DETACH);
-            // remove the container directory
+            // Remove the container directory tree
             if let Some(base) = container.root.parent() {
                 let _ = std::fs::remove_dir_all(base);
             }
