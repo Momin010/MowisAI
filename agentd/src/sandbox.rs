@@ -109,20 +109,21 @@ pub struct Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        // unmount the root path (overlayfs or tmpfs)
-        let _ = umount2(self.root.path(), MntFlags::MNT_DETACH);
-        // clean up overlayfs directories if they exist
-        let overlay_base = std::env::temp_dir().join(format!("overlay-{}", self.id));
-        let _ = std::fs::remove_dir_all(&overlay_base);
-        // clean up containers: unmount and remove each container's temp directory
+        // Clean up containers: unmount submounts first, then root, then delete dirs.
         for (_, container) in &self.containers {
+            let _ = umount2(&container.root.join("workspace"), MntFlags::MNT_DETACH);
+            let _ = umount2(&container.root.join("dev"),       MntFlags::MNT_DETACH);
+            let _ = umount2(&container.root.join("proc"),      MntFlags::MNT_DETACH);
             let _ = umount2(&container.root, MntFlags::MNT_DETACH);
-            // Remove the entire container-{id} directory (parent of root)
-            // This is /tmp/container-{id} which contains upper/, work/, root/
             if let Some(base) = container.root.parent() {
                 let _ = std::fs::remove_dir_all(base);
             }
         }
+        // Unmount the sandbox root (overlayfs or tmpfs)
+        let _ = umount2(self.root.path(), MntFlags::MNT_DETACH);
+        // Clean up overlayfs upper/work dirs if they exist
+        let overlay_base = std::env::temp_dir().join(format!("overlay-{}", self.id));
+        let _ = std::fs::remove_dir_all(&overlay_base);
     }
 }
 
@@ -878,11 +879,18 @@ impl Sandbox {
     /// destroy a container and clean up its resources
     pub fn destroy_container(&mut self, container_id: u64) -> anyhow::Result<()> {
         use nix::mount::{umount2, MntFlags};
-        
+
         if let Some(container) = self.containers.remove(&container_id) {
-            // unmount the container root
+            // Unmount submounts first to prevent mount-namespace bloat.
+            // Each container mounts /proc, /dev, and /workspace inside root/;
+            // if only root/ is lazily unmounted they leak into new namespaces,
+            // causing `unshare --mount-proc` to become progressively slower.
+            let _ = umount2(&container.root.join("workspace"), MntFlags::MNT_DETACH);
+            let _ = umount2(&container.root.join("dev"),       MntFlags::MNT_DETACH);
+            let _ = umount2(&container.root.join("proc"),      MntFlags::MNT_DETACH);
+            // Now unmount the container root itself
             let _ = umount2(&container.root, MntFlags::MNT_DETACH);
-            // remove the container directory
+            // Remove the container directory tree
             if let Some(base) = container.root.parent() {
                 let _ = std::fs::remove_dir_all(base);
             }
