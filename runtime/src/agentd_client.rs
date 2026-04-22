@@ -4,9 +4,8 @@
 /// All real infrastructure operations go through this module.
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 use std::time::Duration;
 
 /// Errors returned by agentd operations

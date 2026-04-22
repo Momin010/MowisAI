@@ -11,7 +11,6 @@ pub mod tui;
 pub mod agent;
 pub mod agent_loop;
 pub mod hub_agent_client;
-pub mod claude_integration;
 pub mod audit;
 pub mod buckets;
 pub mod channels;

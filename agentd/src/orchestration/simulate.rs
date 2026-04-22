@@ -6,10 +6,10 @@
 
 use super::mock_agent::MockAgentExecutor;
 use super::sandbox_topology::TopologyManager;
-use super::scheduler::{Scheduler, SchedulerStats};
+use super::scheduler::Scheduler;
 use super::verification::{VerificationPlan, VerificationResult, VerificationFunction};
-use agentd_protocol::{SandboxConfig, SandboxName, Task, TaskGraph, TaskId, VerificationStatus};
-use anyhow::{Context, Result};
+use agentd_protocol::{SandboxConfig, SandboxName, Task, TaskGraph, TaskId};
+use anyhow::Result;
 use clap::Parser;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -557,7 +557,6 @@ impl SimulateCommand {
             self.tool_delay,
             self.verbose,
             self.project_root.join(".checkpoints"),
-            self.socket.clone(),
         )?);
 
         let topology = Arc::new(topology);

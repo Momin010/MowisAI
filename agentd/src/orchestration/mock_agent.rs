@@ -4,10 +4,9 @@
 //! but uses deterministic pre-defined workflows instead of calling Gemini.
 //! Perfect for testing the entire orchestration stack for $0 cost.
 
-use super::checkpoint::CheckpointManager;
 use super::sandbox_topology::TopologyManager;
 use agentd_protocol::{AgentHandle, AgentResult, Checkpoint};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,19 +19,16 @@ pub struct MockAgentExecutor {
     tool_delay_ms: u64,
     /// Verbose mode
     verbose: bool,
-    /// Checkpoint manager (for compatibility with real agent)
-    checkpoint_manager: CheckpointManager,
 }
 
 impl MockAgentExecutor {
     /// Create new mock agent executor
-    pub fn new(failure_rate: f64, tool_delay_ms: u64, verbose: bool, checkpoint_root: PathBuf, socket_path: String) -> Result<Self> {
+    pub fn new(failure_rate: f64, tool_delay_ms: u64, verbose: bool, checkpoint_root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&checkpoint_root)?;
         Ok(Self {
             failure_rate,
             tool_delay_ms,
             verbose,
-            checkpoint_manager: CheckpointManager::new(checkpoint_root, socket_path)?,
         })
     }
 

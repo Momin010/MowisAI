@@ -337,7 +337,6 @@ impl SecurityContext {
 /// Threat analyzer for detecting potential security issues
 pub struct ThreatAnalyzer {
     blocked_syscalls: Vec<String>,
-    suspicious_patterns: Vec<String>,
 }
 
 impl ThreatAnalyzer {
@@ -356,10 +355,6 @@ impl ThreatAnalyzer {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-            suspicious_patterns: vec!["privilege_escalation", "information_leak", "DoS_attempt"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
         }
     }
 

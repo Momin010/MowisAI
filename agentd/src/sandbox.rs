@@ -15,7 +15,6 @@ use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use nix::sched;
 use nix::sys::resource::{setrlimit, Resource};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;

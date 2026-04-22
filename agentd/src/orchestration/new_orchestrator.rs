@@ -16,14 +16,13 @@ pub enum OrchestratorEvent {
 }
 
 use super::agent_execution::AgentExecutor;
-use super::checkpoint::CheckpointManager;
 use super::health::HealthMonitor;
 use super::merge_reviewer::{AgentContribution, ConflictDetector, MergeReviewerAgent, parse_unified_diff};
 use super::planner::plan_task;
 use super::sandbox_topology::TopologyManager;
-use super::verification::{VerificationLoop, VerificationResult};
-use agentd_protocol::{AgentResult, SandboxName, SandboxResult, Task, TaskId, VerificationStatus};
-use anyhow::{anyhow, Context, Result};
+use super::verification::VerificationLoop;
+use agentd_protocol::{AgentResult, SandboxName, SandboxResult, TaskId, VerificationStatus};
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

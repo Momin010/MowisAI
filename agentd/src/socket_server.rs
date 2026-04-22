@@ -6,7 +6,6 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -18,9 +17,11 @@ use crate::tool_registry;
 use crate::{ResourceLimits, Sandbox};
 use crate::vm_backend::{boot_vm, exec_in_vm, stop_vm, VmHandle};
 
-const MAX_CONNECTIONS: usize = 2048;
 const FAST_WORKERS: usize = 64;
-const SLOW_WORKERS: usize = 128;
+/// Server-side slow-path worker count. `pub(crate)` so the client-pool in
+/// `orchestration::socket_client` can derive its own worker count from this
+/// single source of truth. If you bump this, `POOL_WORKERS` scales with it.
+pub(crate) const SLOW_WORKERS: usize = 128;
 
 lazy_static! {
     // shared state across threads; wrap map in Arc for cheap cloning

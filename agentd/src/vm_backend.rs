@@ -1,11 +1,9 @@
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{Duration, Instant};
 
 use serde_json::json;
 use serde_json::Value;
@@ -37,7 +35,7 @@ pub fn detect_vm_backend() -> VmBackend {
     VmBackend::Qemu // Codespace default
 }
 
-pub fn boot_vm(sandbox_id: String, host_root: &std::path::Path, image_hint: &str) -> anyhow::Result<VmHandle> {
+pub fn boot_vm(sandbox_id: String, _host_root: &std::path::Path, _image_hint: &str) -> anyhow::Result<VmHandle> {
     // VM backend temporarily disabled - focus on new orchestration system
     // TODO: Re-implement VM backend with proper error handling
     
@@ -56,31 +54,6 @@ pub fn boot_vm(sandbox_id: String, host_root: &std::path::Path, image_hint: &str
     };
     
     Ok(handle)
-}
-
-fn wait_vm_ready(handle: &VmHandle, timeout: Duration) -> anyhow::Result<bool> {
-
-    let start = Instant::now();
-    loop {
-        if start.elapsed() > timeout {
-            return Ok(false);
-        }
-        // Poll SSH: ssh -o ConnectTimeout=1 should succeed
-        let status = Command::new("ssh")
-            .args([
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "ConnectTimeout=1",
-                "-i", handle.ssh_key.to_str().unwrap(),
-                &format!("root@localhost -p {}", handle.ssh_port),
-                "echo OK",
-            ])
-            .status();
-        if status.is_ok() {
-            return Ok(true);
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
 }
 
 pub fn stop_vm(handle: &VmHandle) -> anyhow::Result<()> {
@@ -167,19 +140,3 @@ fn generate_ssh_keypair(sandbox_id: &str) -> Result<(PathBuf, PathBuf)> {
     Ok((private, public))
 }
 
-fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) -> Result<()> {
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            fs::create_dir_all(dst.as_ref().join(entry.file_name()))?;
-            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        } else if ty.is_symlink() {
-            let target = fs::read_link(entry.path())?;
-            std::os::unix::fs::symlink(target, dst.as_ref().join(entry.file_name()))?;
-        } else {
-            fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        }
-    }
-    Ok(())
-}

@@ -34,9 +34,6 @@ pub(crate) const HTTP_TIMEOUT_SECS: u64 = 900;
 /// Safety cap for tool-calling loops only (each round is one API call). Raise if needed.
 pub(crate) const MAX_TOOL_ROUNDS: usize = 256;
 
-/// Context-gatherer tool rounds (Layer 1).
-pub(crate) const MAX_CONTEXT_GATHER_ROUNDS: usize = 128;
-
 /// `maxOutputTokens` for Vertex `generateContent`. The API still applies per-model server-side limits.
 pub(crate) const VERTEX_MAX_OUTPUT_TOKENS: u32 = 65_536;
 
