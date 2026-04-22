@@ -105,7 +105,7 @@ impl TopologyManager {
 
         let socket_path = self.socket_path.clone();
         let response = tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &request)
+            super::pooled_socket_request(&socket_path, &request)
         }).await.context("spawn_blocking socket_roundtrip")??;
 
         // Extract sandbox ID from response
@@ -148,7 +148,7 @@ impl TopologyManager {
 
         let socket_path = self.socket_path.clone();
         let response = tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &request)
+            super::pooled_socket_request(&socket_path, &request)
         }).await.context("spawn_blocking socket_roundtrip")??;
 
         // Extract container ID
@@ -183,7 +183,7 @@ impl TopologyManager {
         let socket_path = self.socket_path.clone();
         let init_request = init_request.clone();
         tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &init_request)
+            super::pooled_socket_request(&socket_path, &init_request)
         }).await.context("spawn_blocking socket_roundtrip")??;
 
         // Step 2: git config (needed for commits)
@@ -200,7 +200,7 @@ impl TopologyManager {
         let socket_path = self.socket_path.clone();
         let config_request = config_request.clone();
         tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &config_request)
+            super::pooled_socket_request(&socket_path, &config_request)
         }).await.context("spawn_blocking socket_roundtrip")??;
 
         // Step 3: git add -A (stage everything that already exists)
@@ -217,7 +217,7 @@ impl TopologyManager {
         let socket_path = self.socket_path.clone();
         let add_request = add_request.clone();
         tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &add_request)
+            super::pooled_socket_request(&socket_path, &add_request)
         }).await.context("spawn_blocking socket_roundtrip")??;
 
         // Step 4: create a base commit so HEAD exists.
@@ -238,7 +238,7 @@ impl TopologyManager {
         let socket_path = self.socket_path.clone();
         let commit_request = commit_request.clone();
         tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &commit_request)
+            super::pooled_socket_request(&socket_path, &commit_request)
         }).await.context("spawn_blocking socket_roundtrip")??;
 
         log::info!("  → Git repo initialized with base commit");
@@ -387,7 +387,7 @@ impl TopologyManager {
         });
         let socket_path = self.socket_path.clone();
         let response = tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &request)
+            super::pooled_socket_request(&socket_path, &request)
         }).await.context("spawn_blocking socket_roundtrip")??;
         let container_id = super::parse_ok_field(&response, "container")?;
 
@@ -447,7 +447,7 @@ impl TopologyManager {
         });
         let socket_path = self.socket_path.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &cleanup_request)
+            super::pooled_socket_request(&socket_path, &cleanup_request)
         }).await;
 
         diff_result
@@ -496,7 +496,7 @@ impl TopologyManager {
             }
         });
 
-        let list_response = super::socket_roundtrip(&self.socket_path, &list_request)?;
+        let list_response = super::pooled_socket_request(&self.socket_path, &list_request)?;
         let result = list_response
             .get("result")
             .ok_or_else(|| anyhow!("list_files missing result for {}", workspace_path))?;
@@ -530,7 +530,7 @@ impl TopologyManager {
                 }
             });
 
-            let read_response = super::socket_roundtrip(&self.socket_path, &read_request)?;
+            let read_response = super::pooled_socket_request(&self.socket_path, &read_request)?;
             let content = read_response
                 .get("result")
                 .and_then(|value| value.get("content"))
@@ -679,7 +679,7 @@ impl TopologyManager {
                 "timeout": 15
             }
         });
-        let _ = super::socket_roundtrip(&self.socket_path, &reset_request);
+        let _ = super::pooled_socket_request(&self.socket_path, &reset_request);
 
         let paused_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -761,7 +761,7 @@ impl TopologyManager {
             });
             let socket_path = self.socket_path.clone();
             match tokio::task::spawn_blocking(move || {
-                super::socket_roundtrip(&socket_path, &request)
+                super::pooled_socket_request(&socket_path, &request)
             }).await {
                 Ok(Ok(_)) => log::info!("  → Cleaned up sleeping container {}", &sc.container_id[..8]),
                 Ok(Err(e)) => log::warn!("  ⚠ Failed to clean up sleeping container {}: {}", &sc.container_id[..8], e),
@@ -803,7 +803,7 @@ impl TopologyManager {
         // Call agentd to destroy the container
         let socket_path = self.socket_path.clone();
         match tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &request)
+            super::pooled_socket_request(&socket_path, &request)
         }).await {
             Ok(Ok(_)) => {
                 log::info!("  → Destroyed container {} for agent {}", &container_id[..8], &agent_id[..8]);
@@ -838,7 +838,7 @@ impl TopologyManager {
 
         let socket_path = self.socket_path.clone();
         let response = tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &request)
+            super::pooled_socket_request(&socket_path, &request)
         }).await.context("spawn_blocking socket_roundtrip")??;
         let container_id = super::parse_ok_field(&response, "container")?;
 
@@ -855,7 +855,7 @@ impl TopologyManager {
         });
         let socket_path = self.socket_path.clone();
         tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &write_request)
+            super::pooled_socket_request(&socket_path, &write_request)
         }).await.context("spawn_blocking socket_roundtrip")??;
 
         // Apply the diff with git apply
@@ -872,7 +872,7 @@ impl TopologyManager {
         });
         let socket_path = self.socket_path.clone();
         let apply_result = tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &apply_request)
+            super::pooled_socket_request(&socket_path, &apply_request)
         }).await.context("spawn_blocking socket_roundtrip")??;
 
         // Check if apply succeeded
@@ -891,7 +891,7 @@ impl TopologyManager {
         });
         let socket_path = self.socket_path.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &cleanup_request)
+            super::pooled_socket_request(&socket_path, &cleanup_request)
         }).await;
 
         Ok(())
@@ -912,7 +912,7 @@ impl TopologyManager {
 
         let socket_path = self.socket_path.clone();
         tokio::task::spawn_blocking(move || {
-            super::socket_roundtrip(&socket_path, &request)
+            super::pooled_socket_request(&socket_path, &request)
         }).await.context("spawn_blocking socket_roundtrip")??;
 
         log::info!("  → Destroyed sandbox: {}", sandbox_name);
