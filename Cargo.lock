@@ -20,6 +20,7 @@ dependencies = [
  "lazy_static",
  "log",
  "nix",
+ "once_cell",
  "rand",
  "ratatui 0.26.3",
  "regex",

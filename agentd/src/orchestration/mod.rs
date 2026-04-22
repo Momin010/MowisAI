@@ -23,6 +23,11 @@ pub use agent_execution::{set_verbose, is_verbose};
 pub mod session_store;
 pub mod sandbox_profiles;
 
+// Bounded socket client pool — limits concurrent FDs to prevent EMFILE under
+// high agent concurrency. Unix-only because it uses UnixStream.
+#[cfg(unix)]
+mod socket_client;
+
 /// Long-running generateContent calls (large outputs / tool loops).
 pub(crate) const HTTP_TIMEOUT_SECS: u64 = 900;
 
@@ -1255,6 +1260,27 @@ pub(crate) fn socket_roundtrip(
     }
 
     Err(last_error.unwrap_or_else(|| anyhow!("socket request failed after retries")))
+}
+
+/// Pooled socket request — use this instead of `socket_roundtrip` for all
+/// orchestration call sites. Limits concurrent FDs to POOL_WORKERS (96) to
+/// prevent EMFILE under high agent concurrency.
+#[cfg(not(unix))]
+pub(crate) fn pooled_socket_request(
+    _socket_path: &str,
+    _req: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    Err(anyhow::anyhow!(
+        "orchestration requires Unix (agentd uses Unix domain sockets)"
+    ))
+}
+
+#[cfg(unix)]
+pub(crate) fn pooled_socket_request(
+    socket_path: &str,
+    req: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    socket_client::socket_request(socket_path, req)
 }
 
 #[cfg(not(unix))]
