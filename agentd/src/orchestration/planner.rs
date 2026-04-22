@@ -3,7 +3,7 @@
 //! Replaces old Context Gatherer (128 rounds) + Architect + Sandbox Owner
 //! with ONE LLM call that produces both task graph AND sandbox topology
 
-use agentd_protocol::{SandboxConfig, SandboxTopology, Task, TaskGraph, TaskId};
+use agentd_protocol::{SandboxTopology, TaskGraph, TaskId};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

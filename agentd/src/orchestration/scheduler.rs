@@ -3,14 +3,14 @@
 //! Maintains dependency counters, dispatches tasks when ready, sandbox-aware routing
 
 use agentd_protocol::{
-    AgentHandle, AgentResult, SandboxName, SchedulerMessage, Task, TaskGraph, TaskId,
+    AgentHandle, AgentResult, SandboxName, Task, TaskGraph, TaskId,
 };
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 
 /// Task scheduler with event-driven dispatch
 #[derive(Debug)]

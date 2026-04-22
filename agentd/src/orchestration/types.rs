@@ -1,11 +1,10 @@
 //! Internal types for new 7-layer orchestration system
 //! Also contains legacy types from old 5-layer system (marked DEPRECATED)
 
-use agentd_protocol::{TaskId, SandboxName, AgentHandle};
+use agentd_protocol::{SandboxName, AgentHandle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // ============================================================================

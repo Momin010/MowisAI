@@ -9,7 +9,7 @@
 
 use super::agent_execution::AgentExecutor;
 use super::sandbox_topology::TopologyManager;
-use agentd_protocol::{SandboxName, Task, TaskGraph, TaskId, VerificationStatus};
+use agentd_protocol::{SandboxName, Task, TaskId, VerificationStatus};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -52,7 +52,6 @@ pub struct VerificationPlan {
 /// Result of a single VF execution
 #[derive(Debug, Clone)]
 struct VfResult {
-    id: TaskId,
     passed: bool,
     output: String,
 }
@@ -658,7 +657,6 @@ impl VerificationLoop {
                     sandbox_name
                 );
                 return Ok(VfResult {
-                    id: vf.id.clone(),
                     passed: false,
                     output: format!(
                         "Timeout after {}s",
@@ -672,12 +670,10 @@ impl VerificationLoop {
 
         match result {
             Ok(r) => Ok(VfResult {
-                id: vf.id.clone(),
                 passed: r.success,
                 output: r.error.unwrap_or_default(),
             }),
             Err(e) => Ok(VfResult {
-                id: vf.id.clone(),
                 passed: false,
                 output: e.to_string(),
             }),

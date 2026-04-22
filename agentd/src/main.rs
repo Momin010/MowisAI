@@ -7,11 +7,6 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use libagent::config::MowisConfig;
 use libagent::setup::SetupWizard;
-use std::fs;
-use std::process::Command;
-use std::thread;
-use std::time::Duration;
-use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "agentd")]

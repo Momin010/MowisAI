@@ -1,12 +1,11 @@
 //! Layer 4: Agent Execution — Gemini tool-calling loop with checkpoint system
 
 use super::checkpoint::{CheckpointLog, CheckpointManager};
-use agentd_protocol::{AgentHandle, AgentResult, Checkpoint, TaskId};
+use agentd_protocol::{AgentHandle, AgentResult, Checkpoint};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Global flag for verbose output
@@ -174,7 +173,7 @@ impl AgentExecutor {
         })];
 
         // Restore from checkpoint if any
-        if let Some(last_checkpoint) = checkpoint_log.latest() {
+        if checkpoint_log.latest().is_some() {
             // Add checkpoint history to context
             let checkpoint_summary = checkpoint_log
                 .checkpoints
@@ -223,7 +222,7 @@ impl AgentExecutor {
         );
 
         // Tool-calling loop
-        for round in 0..self.max_tool_rounds {
+        for _ in 0..self.max_tool_rounds {
             let request_body = json!({
                 "contents": conversation,
                 "systemInstruction": {

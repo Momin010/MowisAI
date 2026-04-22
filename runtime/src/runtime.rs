@@ -12,7 +12,7 @@
 /// - Handling incremental provisioning and hot scaling
 
 use crate::agentd_client::{
-    AgentdClient, AgentdClientResult, ContainerControlAction, ContainerControlParams,
+    AgentdClient, ContainerControlAction, ContainerControlParams,
     CreateContainerParams, CreateSandboxParams,
 };
 use agentd_protocol::*;
