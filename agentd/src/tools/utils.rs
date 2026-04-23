@@ -29,7 +29,22 @@ impl Tool for EchoTool {
         "echo"
     }
     fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
-        Ok(json!({ "echo": input.to_string() }))
+        // Pass input fields through directly so callers get back what they sent
+        // (e.g. {"message":"hello"} → {"message":"hello","echo":"..."}).
+        // For non-object inputs wrap in {"message": <value>}.
+        let echo_str = serde_json::to_string(&input).unwrap_or_default();
+        let mut out = match input {
+            Value::Object(map) => Value::Object(map),
+            other => {
+                let mut m = serde_json::Map::new();
+                m.insert("message".to_string(), other);
+                Value::Object(m)
+            }
+        };
+        if let Value::Object(ref mut map) = out {
+            map.entry("echo").or_insert(Value::String(echo_str));
+        }
+        Ok(out)
     }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(EchoTool)
