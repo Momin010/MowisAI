@@ -7,7 +7,7 @@
 use super::mock_agent::MockAgentExecutor;
 use super::sandbox_topology::TopologyManager;
 use super::scheduler::Scheduler;
-use super::verification::{VerificationPlan, VerificationResult};
+use super::verification::{VerificationFunction, VerificationPlan, VerificationResult};
 use agentd_protocol::{SandboxConfig, SandboxName, Task, TaskGraph, TaskId};
 use anyhow::Result;
 use clap::Parser;
