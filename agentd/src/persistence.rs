@@ -136,14 +136,12 @@ impl PersistenceManager {
 /// Checkpoint system for periodic state snapshots
 pub struct Checkpointer {
     persistence: PersistenceManager,
-    checkpoint_interval: usize,
 }
 
 impl Checkpointer {
-    pub fn new(base_path: &Path, checkpoint_interval: usize) -> Self {
+    pub fn new(base_path: &Path) -> Self {
         Checkpointer {
             persistence: PersistenceManager::new(base_path),
-            checkpoint_interval,
         }
     }
 

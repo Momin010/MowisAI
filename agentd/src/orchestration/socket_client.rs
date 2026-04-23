@@ -16,9 +16,13 @@ use std::os::unix::net::UnixStream;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-/// Number of concurrent socket connections allowed.
-/// Must not exceed server's SLOW_WORKERS (128) to avoid server-side queueing.
-const POOL_WORKERS: usize = 96;
+use crate::socket_server::SLOW_WORKERS;
+/// Client pool sits ~75% of server's slow-worker count so bursts don't
+/// overflow the server-side queue. Derived, not hand-tuned — bump
+/// SLOW_WORKERS and this follows automatically.
+const POOL_WORKERS: usize = SLOW_WORKERS * 3 / 4;
+/// Belt-and-braces: never let the client outrun the server.
+const _: () = assert!(POOL_WORKERS < SLOW_WORKERS);
 
 /// Bounded queue depth. Requests beyond this block the caller until a worker
 /// is free. Prevents unbounded memory growth under extreme load.

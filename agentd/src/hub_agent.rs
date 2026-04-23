@@ -50,7 +50,7 @@ struct WorkerEntry {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-enum WorkerStatus {
+pub(crate) enum WorkerStatus {
     Idle,
     Assigned,
     Running,
@@ -312,8 +312,6 @@ impl LocalHubAgent {
             ))?;
 
         // Spawn thread to accept incoming connections
-        let socket_path = self.config.socket_path.clone();
-        
         // Clone Arc pointers for thread
         let workers_clone = Arc::clone(&self.workers);
         let team_task_clone = Arc::clone(&self.team_task);
@@ -327,8 +325,8 @@ impl LocalHubAgent {
                     Ok(mut socket) => {
                         // Clone Arc pointers for each connection
                         let workers_c = Arc::clone(&workers_clone);
-                        let team_task_c = Arc::clone(&team_task_clone);
-                        let completion_c = Arc::clone(&completion_clone);
+                        let _team_task_c = Arc::clone(&team_task_clone);
+                        let _completion_c = Arc::clone(&completion_clone);
                         let api_contracts_c = Arc::clone(&api_contracts_clone);
                         let team_id_c = team_id.clone();
 

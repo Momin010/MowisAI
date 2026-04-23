@@ -7,7 +7,7 @@
 use super::mock_agent::MockAgentExecutor;
 use super::sandbox_topology::TopologyManager;
 use super::scheduler::Scheduler;
-use super::verification::{VerificationPlan, VerificationResult, VerificationFunction};
+use super::verification::{VerificationPlan, VerificationResult};
 use agentd_protocol::{SandboxConfig, SandboxName, Task, TaskGraph, TaskId};
 use anyhow::Result;
 use clap::Parser;
@@ -557,6 +557,7 @@ impl SimulateCommand {
             self.tool_delay,
             self.verbose,
             self.project_root.join(".checkpoints"),
+            self.socket.clone(),
         )?);
 
         let topology = Arc::new(topology);
@@ -664,6 +665,10 @@ impl SimulateCommand {
             (stats.completed as f64 / stats.total_tasks as f64) * 100.0
         );
         log::info!("═══════════════════════════════════");
+
+        println!("SIMULATE_TOTAL_MS={}", duration.as_millis());
+        println!("SIMULATE_COMPLETED={}", stats.completed);
+        println!("SIMULATE_FAILED={}", stats.failed);
 
         if stats.failed > 0 {
             log::info!("\nFailed tasks:");

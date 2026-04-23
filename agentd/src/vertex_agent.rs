@@ -1140,6 +1140,7 @@ fn invoke_tool_via_socket(
     tool_name: &str,
     input: &Value,
 ) -> Result<Value> {
+
     // Allow only tools that are registered in the agentd tool registry.
     // This keeps the allow-list in sync with the real set of executable tools.
     let allowed = crate::tool_registry::list_all_tools();

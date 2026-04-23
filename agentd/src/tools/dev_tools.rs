@@ -20,7 +20,7 @@ impl Tool for LintTool {
 
         let path = resolve_path(ctx, path_str);
 
-        let (linter, cmd, output) = match language {
+        let (linter, _cmd, output) = match language {
             "js" | "javascript" | "typescript" | "auto" => {
                 let cmd = format!("timeout 5 eslint {} < /dev/null", path.display());
                 let output = Command::new("sh").arg("-c").arg(&cmd).output();
