@@ -62,6 +62,156 @@ pub async fn plan_task(
     Ok(output)
 }
 
+/// Plan a task using the *constrained* Standard-mode planner.
+///
+/// Uses a tighter system prompt that forces: 1 sandbox, ≤ 3 parallel agents,
+/// and discourages cross-service work — appropriate for Mode 2 tasks.
+pub async fn plan_task_standard(
+    prompt: &str,
+    project_root: &Path,
+    project_id: &str,
+    dir_tree: &str,
+) -> Result<PlannerOutput> {
+    log::info!("Standard planner (constrained):");
+    log::info!("  Prompt: {}...", &prompt.chars().take(100).collect::<String>());
+
+    if prompt.is_empty() {
+        return Err(anyhow!("Planner: Prompt cannot be empty"));
+    }
+    if !project_root.exists() {
+        return Err(anyhow!("Planner: Project root does not exist: {:?}", project_root));
+    }
+    if project_id.is_empty() {
+        return Err(anyhow!("Planner: Project ID cannot be empty"));
+    }
+
+    let gemini_response = call_gemini_planner_standard(prompt, dir_tree, project_id)
+        .await
+        .context("Gemini standard planner call failed")?;
+
+    let output = parse_planner_response(&gemini_response)
+        .context("Failed to parse standard planner response")?;
+
+    log::info!(
+        "  → Standard plan: {} tasks in {} sandbox(es)",
+        output.task_graph.tasks.len(),
+        output.sandbox_topology.sandboxes.len()
+    );
+
+    Ok(output)
+}
+
+/// Constrained Gemini call for Standard mode: 1 sandbox, ≤ 3 agents, no cross-service.
+async fn call_gemini_planner_standard(
+    prompt: &str,
+    dir_tree: &str,
+    project_id: &str,
+) -> Result<String> {
+    let access_token = super::gcloud_access_token()?;
+    let url = super::vertex_generate_url(project_id);
+
+    let system_prompt = r#"You are a fast task planner for an AI agent orchestration system operating in STANDARD mode.
+
+STANDARD MODE CONSTRAINTS (strictly enforced):
+- Output EXACTLY 1 sandbox
+- Output NO MORE than 3 tasks total
+- All tasks belong to that 1 sandbox (same hint)
+- Tasks may be parallel or sequential — use deps[] to express ordering
+- Do NOT create cross-service or cross-domain tasks
+- Keep scope tight — implement what is asked, nothing more
+
+Your job: output a JSON object with a task graph and a sandbox topology.
+
+Task graph format:
+{
+  "tasks": [
+    {"id": "t1", "description": "implement feature X", "deps": [], "hint": "main"},
+    {"id": "t2", "description": "write tests for X", "deps": ["t1"], "hint": "main"}
+  ]
+}
+
+Sandbox topology format:
+{
+  "sandboxes": [
+    {
+      "name": "main",
+      "scope": ".",
+      "tools": ["read_file", "write_file", "run_command", "git_commit"],
+      "max_agents": 3
+    }
+  ]
+}
+
+Output ONLY valid JSON in this exact format:
+{
+  "task_graph": { "tasks": [...] },
+  "sandbox_topology": { "sandboxes": [...] }
+}
+"#;
+
+    let user_message = format!(
+        "User prompt: {}\n\nDirectory tree:\n{}",
+        prompt, dir_tree
+    );
+
+    let request_body = serde_json::json!({
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": user_message}]
+            }
+        ],
+        "systemInstruction": {
+            "parts": [{"text": system_prompt}]
+        },
+        "generationConfig": super::vertex_generation_config_json(0.1)
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
+        .send()
+        .await
+        .context("Failed to send request to Gemini (standard planner)")?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "unknown error".to_string());
+        return Err(anyhow!("Gemini API error ({}): {}", status, error_text));
+    }
+
+    let response_json: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse Gemini response as JSON")?;
+
+    let text = response_json
+        .get("candidates")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.get(0))
+        .and_then(|p| p.get("text"))
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| anyhow!("Invalid Gemini response structure"))?;
+
+    if text.is_empty() {
+        return Err(anyhow!("Gemini returned empty response (standard planner)"));
+    }
+
+    Ok(text.to_string())
+}
+
+/// Expose directory-tree scan so the orchestrator can reuse it for the
+/// complexity classifier without scanning twice.
+pub fn scan_directory_tree_pub(root: &Path) -> Result<String> {
+    scan_directory_tree(root)
+}
+
 /// Scan directory tree using shell command (fast, no LLM)
 fn scan_directory_tree(root: &Path) -> Result<String> {
     // Validate root path exists

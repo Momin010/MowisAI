@@ -57,10 +57,6 @@ pub struct App {
     pub socket_pid: Option<u32>,
     pub dev_log: Vec<(String, String, u64)>,
     pub dev_mode_active: bool,
-    /// Explicit mode override set via /mode command.
-    /// None = auto-classify via complexity_classifier.
-    /// Some(mode) = force that mode for every orchestration run until cleared.
-    pub mode_override: Option<crate::orchestration::ComplexityMode>,
 }
 
 impl App {
@@ -93,7 +89,6 @@ impl App {
             socket_pid,
             dev_log: Vec::with_capacity(1000),
             dev_mode_active: false,
-            mode_override: None,
         };
 
         let welcome_line2 = match app.config.provider {
@@ -105,22 +100,6 @@ impl App {
                 "Provider: Grok AI (xAI) | Model: {}",
                 app.config.model
             ),
-            crate::config::AiProvider::Groq => format!(
-                "Provider: Groq (High-speed) | Model: {}",
-                app.config.model
-            ),
-            crate::config::AiProvider::Anthropic => format!(
-                "Provider: Anthropic | Model: {}",
-                app.config.model
-            ),
-            crate::config::AiProvider::OpenAi => format!(
-                "Provider: OpenAI | Model: {}",
-                app.config.model
-            ),
-            crate::config::AiProvider::Gemini => format!(
-                "Provider: Gemini API | Model: {}",
-                app.config.model
-            ),
         };
 
         app.messages.push(ChatMessage {
@@ -128,8 +107,7 @@ impl App {
             content: format!(
                 "Welcome to MowisAI! Type your message below and press Enter.\n\
                  {}\n\
-                 Just describe what you want to build — orchestration triggers automatically.\n\
-                 Type /help for commands, /mode to control orchestration depth, /quit to exit.",
+                 Type /help for commands, /quit or Ctrl+C to exit.",
                 welcome_line2
             ),
             timestamp: now(),
@@ -258,7 +236,7 @@ impl App {
 
         let intent = crate::intent::classify_intent(&text);
 
-        // Orchestrator mode forces all input to Build regardless of classification
+        // Override intent if orchestrator mode is enabled
         let intent = if self.orchestrator_mode_enabled {
             crate::intent::UserIntent::Build
         } else {
@@ -271,16 +249,9 @@ impl App {
                 self.send_to_gemini(text);
             }
             crate::intent::UserIntent::Build => {
-                let mode_label = match &self.mode_override {
-                    Some(m) => format!(" (mode: {})", m),
-                    None => " (auto-classify)".to_string(),
-                };
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: format!(
-                        "🔨 Build request detected{} — launching orchestration...",
-                        mode_label
-                    ),
+                    content: "\u{1f528} Build request detected \u{2014} launching orchestration...".into(),
                     timestamp: now(),
                 });
                 self.start_orchestration(text);
@@ -320,53 +291,23 @@ impl App {
             "/help" => {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "Commands:\n\
-                        \n  ── Orchestration ─────────────────────────────────────────\
-                        \n  /mode simple           — Force Simple mode (1 agent, no verification)\
-                        \n  /mode standard         — Force Standard mode (few agents, 1 verify round)\
-                        \n  /mode full             — Force Full mode (complete 7-layer pipeline)\
-                        \n  /mode auto             — Auto-classify mode (default, uses complexity scorer)\
-                        \n  /mode                  — Show current mode override\
-                        \n  /orchestrator          — Toggle: force ALL messages to trigger orchestration\
-                        \n\
-                        \n  ── General ────────────────────────────────────────────────\
-                        \n  /clear                 — Clear chat history\
-                        \n  /config                — Show current configuration\
-                        \n  /version               — Show version info\
-                        \n  /development           — Toggle development log view\
-                        \n  /kill-socket           — Kill the socket server\
-                        \n  /socket status         — Show socket server status\
-                        \n  /socket restart        — Restart the socket server\
-                        \n  /quit                  — Exit MowisAI\
-                        \n  /help                  — Show this message".into(),
+                    content: "Commands:\n  /quit                  — Exit MowisAI (kills socket server)\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /version               — Show version info\n  /orchestrator          — Enable orchestration mode (forces all prompts to use orchestrator)\n  /development           — Toggle development log view (shows all internal logs)\n  /kill-socket           — Explicitly kill the socket server\n  /socket status         — Show socket server status\n  /socket restart        — Restart the socket server\n  /help                  — Show this message".into(),
                     timestamp: now(),
                 });
             }
             "/config" => {
-                let mode_str = match &self.mode_override {
-                    Some(m) => format!("forced → {}", m),
-                    None => "auto (complexity classifier)".to_string(),
-                };
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!(
-                        "Configuration:\n  Version: {}\n  Project: {}\n  Model: {}\n  Socket: {}\n  Max Agents: {}\n  Orchestrator Mode: {}\n  Complexity Mode: {}\n  Socket PID: {}",
+                        "Configuration:\n  Version: {}\n  Project: {}\n  Model: {}\n  Socket: {}\n  Max Agents: {}\n  Orchestrator Mode: {}\n  Socket PID: {}",
                         crate::version::full_version(),
                         self.config.gcp_project_id,
                         self.config.model,
                         self.config.socket_path,
                         self.config.max_agents,
                         if self.orchestrator_mode_enabled { "ON ✓" } else { "OFF" },
-                        mode_str,
                         self.socket_pid.map_or("unknown".to_string(), |p| p.to_string())
                     ),
-                    timestamp: now(),
-                });
-            }
-            "/setup" => {
-                self.messages.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "To re-run the setup wizard:\n 1. Exit MowisAI (/quit)\n 2. Delete the config: rm ~/.mowisai/config.toml\n 3. Restart the application.".into(),
                     timestamp: now(),
                 });
             }
@@ -390,66 +331,10 @@ impl App {
                     role: MessageRole::System,
                     content: format!(
                         "🔧 Orchestrator Mode: {}\n\
-                         All subsequent messages will trigger orchestration (no chat responses).\n\
+                         All subsequent prompts will trigger the 7-phase orchestration pipeline.\n\
                          Use /orchestrator again to disable.",
                         status
                     ),
-                    timestamp: now(),
-                });
-            }
-            "/mode" => {
-                let current = match &self.mode_override {
-                    Some(m) => format!("forced → {}", m),
-                    None => "auto (complexity classifier)".to_string(),
-                };
-                self.messages.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: format!(
-                        "Current orchestration mode: {}\n\
-                         \n  /mode simple    — 1 agent, no planner, no merge, no verification\
-                         \n  /mode standard  — constrained planner, ≤3 agents, 1 verify round\
-                         \n  /mode full      — complete 7-layer pipeline\
-                         \n  /mode auto      — auto-classify based on task complexity (default)",
-                        current
-                    ),
-                    timestamp: now(),
-                });
-            }
-            "/mode auto" => {
-                self.mode_override = None;
-                self.messages.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "✓ Mode: auto — complexity classifier will decide Simple/Standard/Full automatically.".into(),
-                    timestamp: now(),
-                });
-            }
-            "/mode simple" => {
-                self.mode_override = Some(crate::orchestration::ComplexityMode::Simple);
-                self.messages.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "✓ Mode locked: simple\n\
-                        Next build request → 1 agent, no planner, no merge, no verification.\n\
-                        Use /mode auto to return to automatic classification.".into(),
-                    timestamp: now(),
-                });
-            }
-            "/mode standard" => {
-                self.mode_override = Some(crate::orchestration::ComplexityMode::Standard);
-                self.messages.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "✓ Mode locked: standard\n\
-                        Next build request → constrained planner, ≤3 agents, 1 verification round.\n\
-                        Use /mode auto to return to automatic classification.".into(),
-                    timestamp: now(),
-                });
-            }
-            "/mode full" => {
-                self.mode_override = Some(crate::orchestration::ComplexityMode::Full);
-                self.messages.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: "✓ Mode locked: full\n\
-                        Next build request → complete 7-layer pipeline (all sandboxes, full verification).\n\
-                        Use /mode auto to return to automatic classification.".into(),
                     timestamp: now(),
                 });
             }
@@ -645,103 +530,6 @@ impl App {
                     })
                     .ok();
             }
-            crate::config::AiProvider::Groq => {
-                self.conversation_history.push(serde_json::json!({
-                    "role": "user",
-                    "content": user_text
-                }));
-
-                let api_key = match self.config.groq_api_key() {
-                    Ok(k) => k,
-                    Err(e) => {
-                        self.messages.push(ChatMessage {
-                            role: MessageRole::System,
-                            content: format!("Error loading Groq API key: {}", e),
-                            timestamp: now(),
-                        });
-                        self.is_loading = false;
-                        return;
-                    }
-                };
-                let model = self.config.model.clone();
-                let messages = self.conversation_history.clone();
-
-                std::thread::Builder::new()
-                    .name("groq-stream".into())
-                    .spawn(move || {
-                        if let Some(tx) = tx {
-                            if let Err(e) = crate::groq_agent::stream_chat(&api_key, &model, &messages, tx.clone()) {
-                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
-                            }
-                        }
-                    })
-                    .ok();
-            }
-            crate::config::AiProvider::Anthropic => {
-                self.conversation_history.push(serde_json::json!({
-                    "role": "user",
-                    "content": user_text
-                }));
-
-                let api_key = self.config.anthropic_api_key().unwrap_or_default();
-                let model = self.config.model.clone();
-                let messages = self.conversation_history.clone();
-
-                std::thread::Builder::new()
-                    .name("anthropic-stream".into())
-                    .spawn(move || {
-                        if let Some(tx) = tx {
-                            if let Err(e) = crate::anthropic_agent::stream_chat(&api_key, &model, &messages, tx.clone()) {
-                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
-                            }
-                        }
-                    })
-                    .ok();
-            }
-            crate::config::AiProvider::OpenAi => {
-                self.conversation_history.push(serde_json::json!({
-                    "role": "user",
-                    "content": user_text
-                }));
-
-                let api_key = self.config.openai_api_key().unwrap_or_default();
-                let model = self.config.model.clone();
-                let messages = self.conversation_history.clone();
-
-                std::thread::Builder::new()
-                    .name("openai-stream".into())
-                    .spawn(move || {
-                        if let Some(tx) = tx {
-                            // Use Groq's stream helper as it is OpenAI compatible
-                            let url = "https://api.openai.com/v1/chat/completions";
-                            if let Err(e) = crate::openai_agent::stream_chat_custom(&api_key, &model, &messages, url, tx.clone()) {
-                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
-                            }
-                        }
-                    })
-                    .ok();
-            }
-            crate::config::AiProvider::Gemini => {
-                self.conversation_history.push(serde_json::json!({
-                    "role": "user",
-                    "parts": [{ "text": user_text }]
-                }));
-
-                let api_key = self.config.gemini_api_key().unwrap_or_default();
-                let model = self.config.model.clone();
-                let contents = self.conversation_history.clone();
-
-                std::thread::Builder::new()
-                    .name("gemini-api-stream".into())
-                    .spawn(move || {
-                        if let Some(tx) = tx {
-                            if let Err(e) = crate::gemini_agent::stream_chat(&api_key, &model, &contents, tx.clone()) {
-                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
-                            }
-                        }
-                    })
-                    .ok();
-            }
             crate::config::AiProvider::VertexAi => {
                 // Vertex AI uses Gemini content format (role / parts).
                 self.conversation_history.push(serde_json::json!({
@@ -779,7 +567,6 @@ impl App {
 
         let config = self.config.clone();
         let tx = self.event_tx.clone();
-        let mode_override = self.mode_override.clone();
 
         std::thread::Builder::new()
             .name("orchestrator".into())
@@ -798,7 +585,6 @@ impl App {
                     max_verification_rounds: 3,
                     staging_dir: None,
                     event_tx: Some(orch_event_tx),
-                    mode_override, // None = auto-classify; Some(m) = forced by /mode command
                 };
 
                 let orchestrator = crate::orchestration::NewOrchestrator::new(orch_config);
@@ -931,15 +717,13 @@ impl App {
         if let Some(last) = self.messages.last() {
             if last.role == MessageRole::Assistant {
                 let content = last.content.clone();
+                // Append in the format the active provider expects for multi-turn history.
                 let history_msg = match self.config.provider {
-                    crate::config::AiProvider::Grok | 
-                    crate::config::AiProvider::Groq |
-                    crate::config::AiProvider::Anthropic |
-                    crate::config::AiProvider::OpenAi => serde_json::json!({
+                    crate::config::AiProvider::Grok => serde_json::json!({
                         "role": "assistant",
                         "content": content
                     }),
-                    crate::config::AiProvider::VertexAi | crate::config::AiProvider::Gemini => serde_json::json!({
+                    crate::config::AiProvider::VertexAi => serde_json::json!({
                         "role": "model",
                         "parts": [{ "text": content }]
                     }),
@@ -1041,26 +825,9 @@ impl App {
 
     pub fn on_gemini_error(&mut self, error: String) {
         self.is_loading = false;
-        let mut content = format!("Error: {}", error);
-
-        if error.contains("Incorrect API key") || error.contains("401") || error.contains("invalid_api_key") {
-            let portal = match self.config.provider {
-                crate::config::AiProvider::VertexAi => "Google Cloud Console",
-                crate::config::AiProvider::Grok => "console.x.ai",
-                crate::config::AiProvider::Groq => "console.groq.com",
-                crate::config::AiProvider::Anthropic => "console.anthropic.com",
-                crate::config::AiProvider::OpenAi => "platform.openai.com",
-                crate::config::AiProvider::Gemini => "aistudio.google.com",
-            };
-            content.push_str(&format!(
-                "\n\nHint: Your API key appears to be invalid for {}. Check your credentials at {}. Type /setup to reset.",
-                self.config.provider, portal
-            ));
-        }
-
         self.messages.push(ChatMessage {
             role: MessageRole::System,
-            content,
+            content: format!("Error: {}", error),
             timestamp: now(),
         });
     }
