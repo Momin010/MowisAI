@@ -14,10 +14,12 @@ pub mod new_orchestrator;
 pub mod mock_agent;
 pub mod simulate;
 pub mod health;
+pub mod complexity_classifier;
 
 // Re-export main types
 pub use new_orchestrator::{NewOrchestrator, OrchestratorConfig, FinalOutput, OrchestratorEvent};
 pub use agent_execution::{set_verbose, is_verbose};
+pub use complexity_classifier::{ComplexityMode, ComplexityScore, classify_complexity};
 
 // KEEP: Still needed files
 pub mod session_store;
