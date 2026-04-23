@@ -54,6 +54,11 @@ pub fn classify_intent(message: &str) -> UserIntent {
         "implement ", "write a ", "write an ", "write the ",
         "develop a ", "develop an ", "develop the ",
         "generate ", "scaffold ",
+        // "Code me", "can you code", "code a", "code an" — user asking to write code
+        "code me", "code a ", "code an ", "code the ",
+        "can you code", "can you make", "can you build", "can you create",
+        "can you write", "can you develop", "can you implement",
+        "can you generate", "can you set up",
         // Modification
         "add ", "remove ", "delete ", "rename ",
         "refactor ", "rewrite ", "redesign ", "restructure ",
@@ -73,6 +78,12 @@ pub fn classify_intent(message: &str) -> UserIntent {
     // ── Weak Build signals (each worth 1 point) ──────────────────────────────
     // Contextual — more likely build than chat but need other signals too.
     let weak_build: &[&str] = &[
+        // Code artifacts — things that get built
+        "website", "web app", "webapp", "landing page", "landing-page",
+        "dashboard", "admin panel", "portfolio", "blog", "e-commerce",
+        "mobile app", "cli tool", "rest api", "graphql", "crud",
+        "microservice", "chatbot", "plugin", "extension", "script",
+        // Technical layers
         "api", "endpoint", "route", "controller", "service",
         "database", "schema", "migration", "model",
         "component", "module", "function", "class",
@@ -80,7 +91,9 @@ pub fn classify_intent(message: &str) -> UserIntent {
         "login", "signup", "register", "session", "jwt",
         "ui", "form", "button", "page", "layout",
         "deploy", "dockerfile", "ci/cd", "pipeline",
-        "my app", "my project", "my codebase", "my code",
+        // Ownership signals — "for my X" means they want it made
+        "for my ", "for our ", "for the ",
+        "my app", "my project", "my codebase", "my code", "my company",
         "the app", "the project", "the codebase",
         "the backend", "the frontend", "the api",
     ];
@@ -279,5 +292,56 @@ mod tests {
     fn test_no_input() {
         c("");
         c("   ");
+    }
+
+    // ── Real-world "can you X" patterns ──────────────────────────────────────
+    #[test]
+    fn test_can_you_code() {
+        b("can you code me a simple website for my car company bsdoom");
+        b("can you code a landing page for my startup");
+        b("can you make a dashboard for analytics");
+        b("can you build me a REST API");
+        b("can you create a login page");
+        b("can you write a Python script that parses CSV");
+        b("can you implement a search feature");
+    }
+
+    #[test]
+    fn test_artifact_keywords() {
+        b("make a website for my restaurant");
+        b("create a landing page");
+        b("build a dashboard with charts");
+        b("I need a portfolio website");
+        b("write a blog in Next.js");
+        b("create an e-commerce store");
+    }
+
+    #[test]
+    fn test_for_my_ownership() {
+        b("code a website for my car company");
+        b("build an app for my business");
+        b("make an admin panel for my project");
+    }
+
+    #[test]
+    fn test_natural_phrases_no_slash_word() {
+        b("I need a login page with JWT auth");
+        b("write the database migration for users");
+        b("refactor my components to use hooks");
+        b("fix the broken checkout flow");
+        b("set up CI/CD for this project");
+        b("integrate Stripe into the backend");
+    }
+
+    // ── Should still be Chat ─────────────────────────────────────────────────
+    #[test]
+    fn test_chat_stays_chat() {
+        c("what is a REST API?");
+        c("how does JWT work?");
+        c("explain OAuth 2.0");
+        c("what are the best practices for database design?");
+        c("hi");
+        c("thanks");
+        c("what should I use, React or Vue?");
     }
 }
