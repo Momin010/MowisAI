@@ -40,7 +40,7 @@ impl Agent {
         let child_sandbox = self.sandbox.spawn_child(config.resources.clone())?;
         let agent = Agent {
             sandbox: child_sandbox,
-            config,
+            _config: config,
         };
         log::info!(
             "spawned subagent {} from parent {}",
