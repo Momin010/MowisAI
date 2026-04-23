@@ -18,13 +18,13 @@ pub struct AgentResult {
 
 pub struct Agent {
     sandbox: Sandbox,
-    config: AgentConfig,
+    _config: AgentConfig,
 }
 
 impl Agent {
     pub fn spawn(config: AgentConfig) -> Result<Self, anyhow::Error> {
         let sandbox = Sandbox::new(config.resources.clone())?;
-        Ok(Agent { sandbox, config })
+        Ok(Agent { sandbox, _config: config })
     }
 
     pub fn run(&mut self, prompt: &str) -> Result<AgentResult, anyhow::Error> {
