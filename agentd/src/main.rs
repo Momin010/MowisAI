@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::thread;
 use libagent::config::MowisConfig;
 use libagent::setup::SetupWizard;
 

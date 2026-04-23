@@ -50,7 +50,7 @@ struct WorkerEntry {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) enum WorkerStatus {
+pub enum WorkerStatus {
     Idle,
     Assigned,
     Running,
