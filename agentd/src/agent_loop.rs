@@ -73,6 +73,7 @@ impl AgentLoop {
 
         // Main agent loop
         let mut final_result = String::from("No result");
+        let mut last_tool_result: Option<Value> = None;
         loop {
             self.current_iteration += 1;
             if self.current_iteration > self.max_iterations {
@@ -108,16 +109,27 @@ impl AgentLoop {
             // Reflection phase: evaluate result and update memory
             self.reflect(&tool_name, &result)?;
 
+            // Track last result for fallback output
+            last_tool_result = Some(result.clone());
+
             // Check if task is complete
             if let Some(task) = self.memory.short_term.pop_task() {
                 if task.state == TaskState::Completed {
-                    final_result = serde_json::to_string(&result.clone()).unwrap_or_default();
+                    final_result = serde_json::to_string(&result).unwrap_or_default();
                     break;
                 } else {
                     let mut updated_task = task;
                     updated_task.tools_used.push(tool_name);
                     self.memory.short_term.push_task(updated_task);
                 }
+            }
+        }
+
+        // If the task never reached Completed (e.g. max_iterations hit), return
+        // the last tool result so callers get useful output rather than "No result".
+        if final_result == "No result" {
+            if let Some(last) = last_tool_result {
+                final_result = serde_json::to_string(&last).unwrap_or(final_result);
             }
         }
 
