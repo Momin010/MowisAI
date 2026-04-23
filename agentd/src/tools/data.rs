@@ -48,9 +48,11 @@ impl Tool for JsonQueryTool {
         let data_str = input["data"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("json_query: missing data"))?;
-        let path = input["path"]
+        // Accept "query" (preferred) or "path" (legacy alias)
+        let path = input["query"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("json_query: missing path"))?;
+            .or_else(|| input["path"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("json_query: missing query"))?;
 
         let obj: Value = serde_json::from_str(data_str)?;
 
