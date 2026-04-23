@@ -3,6 +3,13 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 
+/// Recover a poisoned mutex by extracting its inner value.
+macro_rules! lock_store {
+    ($store:expr) => {
+        $store.lock().unwrap_or_else(|e| e.into_inner())
+    };
+}
+
 pub struct MemorySetTool;
 impl Tool for MemorySetTool {
     fn name(&self) -> &'static str {
@@ -14,7 +21,7 @@ impl Tool for MemorySetTool {
             .ok_or_else(|| anyhow::anyhow!("memory_set: missing key"))?;
         let value = input["value"].clone();
 
-        let mut store = MEMORY_STORE.lock().unwrap();
+        let mut store = lock_store!(MEMORY_STORE);
         store.insert(key.to_string(), value);
 
         Ok(json!({ "success": true, "key": key }))
@@ -34,7 +41,7 @@ impl Tool for MemoryGetTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("memory_get: missing key"))?;
 
-        let store = MEMORY_STORE.lock().unwrap();
+        let store = lock_store!(MEMORY_STORE);
         let value = store.get(key).cloned().unwrap_or(Value::Null);
 
         Ok(json!({ "value": value, "found": value != Value::Null }))
@@ -54,7 +61,7 @@ impl Tool for MemoryDeleteTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("memory_delete: missing key"))?;
 
-        let mut store = MEMORY_STORE.lock().unwrap();
+        let mut store = lock_store!(MEMORY_STORE);
         let existed = store.remove(key).is_some();
 
         Ok(json!({ "success": true, "existed": existed }))
@@ -70,7 +77,7 @@ impl Tool for MemoryListTool {
         "memory_list"
     }
     fn invoke(&self, _ctx: &ToolContext, _input: Value) -> anyhow::Result<Value> {
-        let store = MEMORY_STORE.lock().unwrap();
+        let store = lock_store!(MEMORY_STORE);
         let keys: Vec<String> = store.keys().cloned().collect();
 
         Ok(json!({ "keys": keys, "count": keys.len() }))
@@ -91,7 +98,7 @@ impl Tool for MemorySaveTool {
             .ok_or_else(|| anyhow::anyhow!("memory_save: missing path"))?;
 
         let json_str = {
-            let store = MEMORY_STORE.lock().unwrap();
+            let store = lock_store!(MEMORY_STORE);
             serde_json::to_string_pretty(&*store)?
         };
 
@@ -101,7 +108,7 @@ impl Tool for MemorySaveTool {
         }
         fs::write(&path, json_str)?;
 
-        let store = MEMORY_STORE.lock().unwrap();
+        let store = lock_store!(MEMORY_STORE);
         Ok(json!({ "success": true, "keys_saved": store.len() }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -125,11 +132,11 @@ impl Tool for MemoryLoadTool {
         let keys_loaded = data.len();
 
         {
-            let mut store = MEMORY_STORE.lock().unwrap();
+            let mut store = lock_store!(MEMORY_STORE);
             store.extend(data);
         }
 
-        let store = MEMORY_STORE.lock().unwrap();
+        let store = lock_store!(MEMORY_STORE);
         Ok(json!({ "success": true, "keys_loaded": keys_loaded, "total_keys": store.len() }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -145,14 +152,16 @@ impl Tool for SecretSetTool {
         "secret_set"
     }
     fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
-        let name = input["name"]
+        // Accept "key" (preferred by tests) or "name" (legacy)
+        let name = input["key"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("secret_set: missing name"))?;
+            .or_else(|| input["name"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("secret_set: missing key"))?;
         let value = input["value"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("secret_set: missing value"))?;
 
-        let mut store = SECRET_STORE.lock().unwrap();
+        let mut store = lock_store!(SECRET_STORE);
         store.insert(name.to_string(), value.to_string());
 
         Ok(json!({ "success": true }))
@@ -168,11 +177,13 @@ impl Tool for SecretGetTool {
         "secret_get"
     }
     fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
-        let name = input["name"]
+        // Accept "key" (preferred by tests) or "name" (legacy)
+        let name = input["key"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("secret_get: missing name"))?;
+            .or_else(|| input["name"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("secret_get: missing key"))?;
 
-        let store = SECRET_STORE.lock().unwrap();
+        let store = lock_store!(SECRET_STORE);
         match store.get(name) {
             Some(value) => Ok(json!({ "value": value })),
             None => Err(anyhow::anyhow!("secret not found: {}", name)),
