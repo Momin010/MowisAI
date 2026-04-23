@@ -75,12 +75,12 @@ struct AgentWorkResult {
 
 /// New 7-layer orchestrator
 pub struct NewOrchestrator {
-    _config: OrchestratorConfig,
+    config: OrchestratorConfig,
 }
 
 impl NewOrchestrator {
     pub fn new(config: OrchestratorConfig) -> Self {
-        Self { _config: config }
+        Self { config }
     }
 
     /// Run orchestration for a user prompt
