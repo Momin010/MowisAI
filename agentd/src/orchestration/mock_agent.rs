@@ -23,7 +23,7 @@ pub struct MockAgentExecutor {
 
 impl MockAgentExecutor {
     /// Create new mock agent executor
-    pub fn new(failure_rate: f64, tool_delay_ms: u64, verbose: bool, checkpoint_root: PathBuf) -> Result<Self> {
+    pub fn new(failure_rate: f64, tool_delay_ms: u64, verbose: bool, checkpoint_root: PathBuf, _socket_path: String) -> Result<Self> {
         std::fs::create_dir_all(&checkpoint_root)?;
         Ok(Self {
             failure_rate,

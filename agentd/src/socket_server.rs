@@ -18,9 +18,6 @@ use crate::{ResourceLimits, Sandbox};
 use crate::vm_backend::{boot_vm, exec_in_vm, stop_vm, VmHandle};
 
 const FAST_WORKERS: usize = 64;
-/// Server-side slow-path worker count. `pub(crate)` so the client-pool in
-/// `orchestration::socket_client` can derive its own worker count from this
-/// single source of truth. If you bump this, `POOL_WORKERS` scales with it.
 pub(crate) const SLOW_WORKERS: usize = 128;
 
 lazy_static! {

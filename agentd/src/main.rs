@@ -81,8 +81,7 @@ fn main() -> Result<()> {
 fn setup_signal_handlers() {
     use signal_hook::consts::signal::*;
     use signal_hook::iterator::Signals;
-    use std::thread;
-
+    
     match Signals::new(&[SIGINT, SIGTERM]) {
         Ok(mut signals) => {
             thread::spawn(move || {

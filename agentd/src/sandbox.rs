@@ -641,8 +641,7 @@ impl Sandbox {
         // create_checkpoint/restore_checkpoint which run as root in agentd.
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o755);
+                        let perms = std::fs::Permissions::from_mode(0o755);
             let _ = std::fs::set_permissions(&upper, perms.clone());
             let _ = std::fs::set_permissions(&work, perms.clone());
             let _ = std::fs::set_permissions(&root, perms);
