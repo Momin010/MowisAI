@@ -58,6 +58,7 @@ mod tests {
 
     // Test Layer 2: Overlayfs Topology
     #[tokio::test]
+    #[ignore = "requires running agentd socket at /tmp/agentd.sock (needs root)"]
     async fn test_sandbox_topology_creation() {
         use agentd_protocol::SandboxConfig;
         use libagent::orchestration::sandbox_topology::TopologyManager;
@@ -96,6 +97,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running agentd socket at /tmp/agentd.sock (needs root)"]
     async fn test_agent_layer_creation() {
         use agentd_protocol::SandboxConfig;
         use libagent::orchestration::sandbox_topology::TopologyManager;
@@ -354,6 +356,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a git repo at the working directory (run from project root with agentd running)"]
     async fn test_parallel_merge_multiple_diffs() {
         use libagent::orchestration::merge_worker::ParallelMergeCoordinator;
 
