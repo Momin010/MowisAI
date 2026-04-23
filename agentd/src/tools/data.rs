@@ -141,9 +141,11 @@ impl Tool for CsvWriteTool {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("csv_write: missing path"))?;
-        let rows = input["rows"]
+        // Accept "data" (preferred by callers) or "rows" (legacy alias)
+        let rows = input["data"]
             .as_array()
-            .ok_or_else(|| anyhow::anyhow!("csv_write: missing rows"))?;
+            .or_else(|| input["rows"].as_array())
+            .ok_or_else(|| anyhow::anyhow!("csv_write: missing data/rows"))?;
 
         let path = resolve_path(ctx, path_str);
         if let Some(parent) = path.parent() {
