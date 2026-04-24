@@ -330,10 +330,14 @@ impl TopologyManager {
             .join("root")
             .join("workspace");
 
-        log::debug!(
-            "  capture_agent_diff: workspace_root={} exists={}",
+        log::info!(
+            "  [diff] agent={} container={} workspace={} exists={} project_base={} exists={}",
+            &agent_id[..8.min(agent_id.len())],
+            &container_id[..8.min(container_id.len())],
             workspace_root.display(),
-            workspace_root.exists()
+            workspace_root.exists(),
+            project_base.display(),
+            project_base.exists(),
         );
 
         if workspace_root.exists() && project_base.exists() {
@@ -386,18 +390,61 @@ impl TopologyManager {
             sandbox_id
         );
 
+        // Strategy 2a: ls the workspace to see what the agent actually wrote
+        let ls_req = serde_json::json!({
+            "request_type": "invoke_tool",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "name": "run_command",
+            "input": { "cmd": "ls -la /workspace 2>&1 || echo 'ls failed'", "timeout": 10 }
+        });
+        let socket_path_ls = self.socket_path.clone();
+        let ls_req_c = ls_req.clone();
+        if let Ok(Ok(ls_resp)) = tokio::task::spawn_blocking(move || {
+            super::pooled_socket_request(&socket_path_ls, &ls_req_c)
+        }).await {
+            if let Some(r) = ls_resp.get("result") {
+                let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+                log::info!("  [diff/socket] /workspace contents:\n{}", out);
+            }
+        }
+
+        // Strategy 2b: git status to see staged/unstaged files
+        let status_req = serde_json::json!({
+            "request_type": "invoke_tool",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "name": "run_command",
+            "input": { "cmd": "cd /workspace && git status --short 2>&1 || echo 'git status failed'", "timeout": 10 }
+        });
+        let socket_path_st = self.socket_path.clone();
+        let status_req_c = status_req.clone();
+        if let Ok(Ok(st_resp)) = tokio::task::spawn_blocking(move || {
+            super::pooled_socket_request(&socket_path_st, &status_req_c)
+        }).await {
+            if let Some(r) = st_resp.get("result") {
+                let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+                log::info!("  [diff/socket] git status: {}", out.trim());
+            }
+        }
+
         let add_req = serde_json::json!({
             "request_type": "invoke_tool",
             "sandbox": sandbox_id,
             "container": container_id,
             "name": "run_command",
-            "input": { "cmd": "cd /workspace && git add -A", "timeout": 30 }
+            "input": { "cmd": "cd /workspace && git add -A 2>&1; echo exit:$?", "timeout": 30 }
         });
         let socket_path = self.socket_path.clone();
         let add_req_c = add_req.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(Ok(add_resp)) = tokio::task::spawn_blocking(move || {
             super::pooled_socket_request(&socket_path, &add_req_c)
-        }).await;
+        }).await {
+            if let Some(r) = add_resp.get("result") {
+                let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+                log::info!("  [diff/socket] git add -A: {}", out.trim());
+            }
+        }
 
         let diff_req = serde_json::json!({
             "request_type": "invoke_tool",
@@ -405,7 +452,7 @@ impl TopologyManager {
             "container": container_id,
             "name": "run_command",
             "input": {
-                "cmd": "cd /workspace && (git rev-parse HEAD 2>/dev/null && git diff --cached HEAD || git diff --cached)",
+                "cmd": "cd /workspace && git rev-parse HEAD 2>&1; echo ---; git diff --cached HEAD 2>&1; echo ---cached_done",
                 "timeout": 60
             }
         });
@@ -416,20 +463,36 @@ impl TopologyManager {
         }).await.context("spawn_blocking socket diff")??;
 
         if let Some(result) = resp.get("result") {
-            if let Some(stdout) = result.get("stdout").and_then(|s| s.as_str()) {
-                if !stdout.trim().is_empty() {
+            let stdout = result.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+            let stderr = result.get("stderr").and_then(|s| s.as_str()).unwrap_or("");
+            log::info!("  [diff/socket] diff stdout: {:?}", &stdout[..stdout.len().min(500)]);
+            if !stderr.trim().is_empty() {
+                log::warn!("  [diff/socket] diff stderr: {}", stderr.trim());
+            }
+            if !stdout.trim().is_empty() {
+                // Extract the actual diff portion (between --- and ---cached_done markers)
+                let diff_part = if let Some(idx) = stdout.find("---\n") {
+                    let after = &stdout[idx + 4..];
+                    if let Some(end) = after.find("---cached_done") {
+                        after[..end].to_string()
+                    } else {
+                        after.to_string()
+                    }
+                } else {
+                    stdout.to_string()
+                };
+
+                if !diff_part.trim().is_empty() && diff_part.contains("diff --git") {
                     log::info!(
                         "  ✓ Socket diff captured: {} bytes (agent {})",
-                        stdout.len(),
+                        diff_part.len(),
                         &agent_id[..8.min(agent_id.len())]
                     );
-                    return Ok(stdout.to_string());
+                    return Ok(diff_part);
                 }
             }
-            if let Some(stderr) = result.get("stderr").and_then(|s| s.as_str()) {
-                if !stderr.trim().is_empty() {
-                    log::warn!("  Socket diff stderr: {}", stderr);
-                }
+            if !stderr.trim().is_empty() {
+                log::warn!("  Socket diff stderr: {}", stderr);
             }
         }
 
