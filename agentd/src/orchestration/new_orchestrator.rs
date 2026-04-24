@@ -832,6 +832,15 @@ impl NewOrchestrator {
             .execute_task(&agent, prompt, &sandbox.tools, &system_prompt)
             .await;
 
+        // Capture host-side diff BEFORE sleeping the container.
+        // The in-container git diff (agent_result.git_diff) can be empty if the
+        // git state inside the container wasn't staged correctly.  The host-side
+        // `capture_agent_diff` uses `git diff --no-index` between the project root
+        // and the container's overlayfs upper directory — more reliable.
+        let host_diff = topology.capture_agent_diff(&agent.agent_id).await
+            .unwrap_or_default();
+        log::info!("  [simple] host diff size: {} bytes", host_diff.len());
+
         let _ = topology.sleep_agent_layer(&agent.agent_id, &sandbox.name).await;
         let _ = topology.cleanup_sleeping_containers().await;
 
@@ -839,7 +848,12 @@ impl NewOrchestrator {
 
         match result {
             Ok(agent_result) => {
-                let diff = agent_result.git_diff.clone().unwrap_or_default();
+                // Prefer host-side diff; fall back to in-container diff if host is empty
+                let diff = if !host_diff.is_empty() {
+                    host_diff
+                } else {
+                    agent_result.git_diff.clone().unwrap_or_default()
+                };
                 let success = agent_result.success;
 
                 send_ev(OrchestratorEvent::TaskCompleted {
@@ -1063,7 +1077,7 @@ impl NewOrchestrator {
                                 task_description
                             );
 
-                            let result = match executor_clone
+                            let mut result = match executor_clone
                                 .execute_task(&agent, &task_description, &sandbox.tools, &system_prompt)
                                 .await
                             {
@@ -1076,6 +1090,26 @@ impl NewOrchestrator {
                                     continue;
                                 }
                             };
+
+                            // Capture host-side diff BEFORE sleeping the agent.
+                            // If the in-container git diff is empty (common when the git
+                            // state inside the container isn't set up correctly), fall back
+                            // to `git diff --no-index` between the project root and the
+                            // container's overlayfs upper directory on the host.
+                            if result.git_diff.as_ref().map_or(true, |d| d.is_empty()) {
+                                if let Ok(host_diff) = topology_clone
+                                    .capture_agent_diff(&agent.agent_id)
+                                    .await
+                                {
+                                    if !host_diff.is_empty() {
+                                        log::info!(
+                                            "  [Worker {}] Using host-side diff ({} bytes)",
+                                            worker_id, host_diff.len()
+                                        );
+                                        result.git_diff = Some(host_diff);
+                                    }
+                                }
+                            }
 
                             if result.success {
                                 if let Some(ref diff) = result.git_diff {

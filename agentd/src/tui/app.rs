@@ -1204,10 +1204,18 @@ impl App {
         });
 
         if diff.trim().is_empty() {
-            // Nothing to save — informational only
+            // Empty diff — agent may have run but diff capture failed, or the agent
+            // genuinely made no changes (e.g. it only answered in text).
             self.messages.push(ChatMessage {
                 role: MessageRole::System,
-                content: "ℹ️  No code changes were produced (empty diff).".into(),
+                content: "⚠️  No code changes were captured (empty diff).\n\
+                    \nThis can happen when:\n\
+                    • The agent wrote files but the diff couldn't be captured (check logs)\n\
+                    • The agent answered in text without writing any files\n\
+                    • The socket server lost the container state\n\
+                    \nTip: Run /development to see full agent logs on the next run, \
+                    or try /mode full for more robust multi-agent execution."
+                    .into(),
                 timestamp: now(),
             });
         } else {

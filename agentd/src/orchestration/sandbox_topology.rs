@@ -263,7 +263,16 @@ impl TopologyManager {
         Ok(handle)
     }
 
-    /// Capture git diff from container upperdir against the read-only project base
+    /// Capture git diff from container upperdir against the read-only project base.
+    ///
+    /// Strategy (in order):
+    ///  1. Host-side `git diff --no-index` between `project_root` and the container's
+    ///     overlayfs `root/workspace` directory (reliable, includes all written files).
+    ///  2. Socket-side `git diff --cached HEAD` inside the container (fallback when the
+    ///     host path isn't accessible, e.g. when agentd runs as root but the orchestrator
+    ///     doesn't have read permission).
+    ///
+    /// Returns empty string (not an error) when the agent made no changes.
     pub async fn capture_agent_diff(&self, agent_id: &str) -> Result<String> {
         let containers = self.containers.read().await;
         let container_id = containers
@@ -279,6 +288,7 @@ impl TopologyManager {
             .clone();
         drop(agent_sandboxes);
 
+        // Resolve numeric sandbox IDs → human-readable sandbox name
         let sandbox_name = if recorded_sandbox.parse::<u64>().is_ok() {
             let sandboxes = self.sandboxes.read().await;
             let resolved = sandboxes
@@ -294,59 +304,141 @@ impl TopologyManager {
             drop(sandboxes);
             resolved
         } else {
-            recorded_sandbox
+            recorded_sandbox.clone()
+        };
+
+        // numeric sandbox ID (for socket calls)
+        let sandbox_id = {
+            let sandboxes = self.sandboxes.read().await;
+            sandboxes.get(&sandbox_name).cloned().unwrap_or(recorded_sandbox)
         };
 
         let scopes = self.sandbox_scopes.read().await;
         let scope = scopes.get(&sandbox_name).cloned().unwrap_or_default();
         drop(scopes);
 
-        let workspace_root = PathBuf::from(format!("/tmp/container-{}/root/workspace", container_id));
         let project_base = if scope.trim().is_empty() || scope == "/" {
             self.project_root.clone()
         } else {
             self.project_root.join(scope.trim_matches('/'))
         };
 
-        if !workspace_root.exists() {
-            return Err(anyhow!(
-                "Container workspace not found for agent {}: {}",
-                agent_id,
-                workspace_root.display()
-            ));
+        // Strategy 1: host-side diff (fast, no socket round-trip)
+        // Use temp_dir() so it works if /tmp is a symlink or on non-Linux systems.
+        let workspace_root = std::env::temp_dir()
+            .join(format!("container-{}", container_id))
+            .join("root")
+            .join("workspace");
+
+        log::debug!(
+            "  capture_agent_diff: workspace_root={} exists={}",
+            workspace_root.display(),
+            workspace_root.exists()
+        );
+
+        if workspace_root.exists() && project_base.exists() {
+            let diff_output = std::process::Command::new("git")
+                .arg("diff")
+                .arg("--no-index")
+                .arg("--binary")
+                .arg(&project_base)
+                .arg(&workspace_root)
+                .output();
+
+            match diff_output {
+                Ok(out) if out.status.success() || out.status.code() == Some(1) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                    if !stdout.trim().is_empty() {
+                        log::info!(
+                            "  ✓ Host-side diff captured: {} bytes (agent {})",
+                            stdout.len(),
+                            &agent_id[..8.min(agent_id.len())]
+                        );
+                        return Self::normalize_no_index_diff(&stdout, &project_base, &workspace_root);
+                    }
+                    // No diff → workspace identical to project — agent made no changes
+                    log::info!("  ℹ️  Host diff empty for agent {} — no changes", &agent_id[..8.min(agent_id.len())]);
+                    return Ok(String::new());
+                }
+                Ok(out) => {
+                    log::warn!(
+                        "  Host diff failed (exit {}): {}",
+                        out.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                Err(e) => {
+                    log::warn!("  Host diff spawn failed: {}", e);
+                }
+            }
+        } else {
+            log::warn!(
+                "  Host diff path not accessible: {} (exists={}), falling back to socket diff",
+                workspace_root.display(),
+                workspace_root.exists()
+            );
         }
 
-        if !project_base.exists() {
-            return Err(anyhow!(
-                "Project base not found for sandbox {}: {}",
-                sandbox_name,
-                project_base.display()
-            ));
+        // Strategy 2: socket-side diff via `git diff --cached HEAD` inside the container
+        log::info!(
+            "  Falling back to socket diff for agent {} in sandbox {}",
+            &agent_id[..8.min(agent_id.len())],
+            sandbox_id
+        );
+
+        let add_req = serde_json::json!({
+            "request_type": "invoke_tool",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "name": "run_command",
+            "input": { "cmd": "cd /workspace && git add -A", "timeout": 30 }
+        });
+        let socket_path = self.socket_path.clone();
+        let add_req_c = add_req.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            super::pooled_socket_request(&socket_path, &add_req_c)
+        }).await;
+
+        let diff_req = serde_json::json!({
+            "request_type": "invoke_tool",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "name": "run_command",
+            "input": {
+                "cmd": "cd /workspace && (git rev-parse HEAD 2>/dev/null && git diff --cached HEAD || git diff --cached)",
+                "timeout": 60
+            }
+        });
+        let socket_path2 = self.socket_path.clone();
+        let diff_req_c = diff_req.clone();
+        let resp = tokio::task::spawn_blocking(move || {
+            super::pooled_socket_request(&socket_path2, &diff_req_c)
+        }).await.context("spawn_blocking socket diff")??;
+
+        if let Some(result) = resp.get("result") {
+            if let Some(stdout) = result.get("stdout").and_then(|s| s.as_str()) {
+                if !stdout.trim().is_empty() {
+                    log::info!(
+                        "  ✓ Socket diff captured: {} bytes (agent {})",
+                        stdout.len(),
+                        &agent_id[..8.min(agent_id.len())]
+                    );
+                    return Ok(stdout.to_string());
+                }
+            }
+            if let Some(stderr) = result.get("stderr").and_then(|s| s.as_str()) {
+                if !stderr.trim().is_empty() {
+                    log::warn!("  Socket diff stderr: {}", stderr);
+                }
+            }
         }
 
-        let diff_output = std::process::Command::new("git")
-            .arg("diff")
-            .arg("--no-index")
-            .arg("--binary")
-            .arg(&project_base)
-            .arg(&workspace_root)
-            .output()
-            .with_context(|| {
-                format!(
-                    "Failed to capture diff for sandbox {} container {}",
-                    sandbox_name, container_id
-                )
-            })?;
-
-        if diff_output.status.success() || diff_output.status.code() == Some(1) {
-            let stdout = String::from_utf8_lossy(&diff_output.stdout).to_string();
-            return Self::normalize_no_index_diff(&stdout, &project_base, &workspace_root);
-        }
-
-        Err(anyhow!(
-            "Failed to diff container workspace: {}",
-            String::from_utf8_lossy(&diff_output.stderr)
-        ))
+        // Both strategies failed or found no changes
+        log::warn!(
+            "  ⚠️  capture_agent_diff: no diff found for agent {} (both strategies exhausted)",
+            &agent_id[..8.min(agent_id.len())]
+        );
+        Ok(String::new())
     }
 
     fn normalize_no_index_diff(raw_diff: &str, project_base: &std::path::Path, workspace_root: &std::path::Path) -> Result<String> {
