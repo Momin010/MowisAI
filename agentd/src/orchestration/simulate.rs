@@ -843,8 +843,8 @@ impl SimulateCommand {
                 .output();
         }
 
-        // Try git apply
-        let apply = self.try_git_apply_to_dir(output_dir, final_diff);
+        // Try git apply (with stderr captured for diagnostics on failure)
+        let (apply, apply_stderr) = self.try_git_apply_to_dir(output_dir, final_diff);
         if apply {
             log::info!("  [L7] ✅ git apply succeeded — files written to {}", output_dir.display());
             // List written files
@@ -863,11 +863,22 @@ impl SimulateCommand {
                 }
             }
         } else {
-            log::warn!(
-                "  [L7] git apply failed — the raw patch is still at {}",
-                patch_path.display()
+            log::info!(
+                "  [L7] git apply failed ({}), extracting files directly from diff...",
+                apply_stderr.lines().next().unwrap_or("unknown error")
             );
-            log::warn!("  [L7] To apply manually: cd {} && git apply mowisai_output.patch", output_dir.display());
+            // Fallback: parse the diff and write the new/modified files directly.
+            // This handles cases where git apply rejects the patch due to context
+            // mismatches or missing base files (common in simulation output repos).
+            let files_written = self.extract_files_from_diff(output_dir, final_diff);
+            if files_written > 0 {
+                log::info!("  [L7] ✅ Extracted {} file(s) from diff into {}", files_written, output_dir.display());
+            } else {
+                log::info!(
+                    "  [L7] No new files in diff — raw patch at {}",
+                    patch_path.display()
+                );
+            }
         }
 
         // Write a human-readable summary
@@ -888,7 +899,9 @@ impl SimulateCommand {
         Ok(())
     }
 
-    fn try_git_apply_to_dir(&self, dir: &PathBuf, diff: &str) -> bool {
+    /// Run `git apply` on the diff piped to stdin.
+    /// Returns `(success, stderr_text)`.
+    fn try_git_apply_to_dir(&self, dir: &PathBuf, diff: &str) -> (bool, String) {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
@@ -897,19 +910,83 @@ impl SimulateCommand {
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
         {
             Ok(c) => c,
-            Err(_) => return false,
+            Err(e) => return (false, e.to_string()),
         };
 
         if let Some(mut stdin) = child.stdin.take() {
             if stdin.write_all(diff.as_bytes()).is_err() {
-                return false;
+                return (false, "failed to write patch to stdin".to_string());
             }
         }
 
-        child.wait().map(|s| s.success()).unwrap_or(false)
+        match child.wait_with_output() {
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                (out.status.success(), stderr)
+            }
+            Err(e) => (false, e.to_string()),
+        }
+    }
+
+    /// Parse a unified diff and write every added/modified file directly to
+    /// `output_dir`. Used as a fallback when `git apply` rejects the patch
+    /// (e.g. context-mismatch in a fresh repo that doesn't have the base files).
+    ///
+    /// Only handles `+` lines (additions). Deletions and context lines are
+    /// ignored — the goal is to materialise the agent-written files on disk.
+    ///
+    /// Returns the number of files written.
+    fn extract_files_from_diff(&self, output_dir: &PathBuf, diff: &str) -> usize {
+        use std::collections::HashMap as HM;
+
+        // Map from file path → accumulated content lines
+        let mut files: HM<String, Vec<String>> = HM::new();
+        let mut current_file: Option<String> = None;
+
+        for line in diff.lines() {
+            if line.starts_with("+++ ") {
+                // "+++ b/path/to/file" or "+++ b/file"
+                let path = line[4..].trim_start_matches("b/").to_string();
+                // Skip the special /dev/null target (deleted files)
+                if path != "/dev/null" {
+                    current_file = Some(path.clone());
+                    files.entry(path).or_default();
+                } else {
+                    current_file = None;
+                }
+            } else if line.starts_with("--- ") || line.starts_with("diff --git ")
+                || line.starts_with("index ") || line.starts_with("new file mode")
+                || line.starts_with("deleted file mode") || line.starts_with("\\ No newline")
+                || line.starts_with("@@")
+            {
+                // Header lines — skip
+            } else if let Some(ref file) = current_file {
+                if let Some(content) = line.strip_prefix('+') {
+                    files.get_mut(file).unwrap().push(content.to_string());
+                }
+                // '-' and ' ' lines are base/context — skip
+            }
+        }
+
+        let mut written = 0usize;
+        for (rel_path, lines) in &files {
+            if lines.is_empty() {
+                continue;
+            }
+            let dest = output_dir.join(rel_path);
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let content = lines.join("\n") + "\n";
+            if std::fs::write(&dest, &content).is_ok() {
+                log::info!("  [L7]   + {}", rel_path);
+                written += 1;
+            }
+        }
+        written
     }
 }
