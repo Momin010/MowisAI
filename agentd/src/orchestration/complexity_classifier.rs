@@ -77,6 +77,46 @@ pub struct ComplexityScore {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Greenfield keywords — user wants something NEW, existing repo size irrelevant
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Phrases that indicate the user wants to build something brand new from
+/// scratch. When these appear, the existing codebase size is irrelevant and
+/// should not inflate the complexity score.
+const GREENFIELD_KEYWORDS: &[&str] = &[
+    // "for my X" — clearly building a new thing
+    "for my ", "for our ",
+    // Explicit new-thing markers
+    "a new ", "an new ", "brand new", "from scratch",
+    // Direct creation requests that imply a separate deliverable
+    "a website", "a web app", "a webapp", "a landing page",
+    "a dashboard", "a portfolio", "a blog", "an app",
+    "a mobile app", "a cli", "a script", "a tool",
+    "a chatbot", "a bot", "a game", "an api",
+    "a rest api", "a graphql api",
+    "a plugin", "an extension",
+    "a page", "a form", "a component",
+    "a service", "a microservice",
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Single-artifact keywords — request is for one discrete deliverable
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Phrases that indicate the request is for a single, self-contained output.
+/// These cap complexity at Standard — never Full — because even if the user
+/// says "entire website", it's still one thing.
+const SINGLE_ARTIFACT_KEYWORDS: &[&str] = &[
+    "website", "landing page", "web page", "webpage",
+    "portfolio", "blog", "dashboard", "admin panel",
+    "mobile app", "ios app", "android app",
+    "chrome extension", "browser extension", "vscode plugin",
+    "cli tool", "command line tool",
+    "a script", "a bot", "a chatbot",
+    "a game", "a calculator",
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Domain directory names — top-level dirs that indicate separate concerns
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -122,16 +162,23 @@ const SIMPLE_ACTION_KEYWORDS: &[&str] = &[
 /// directory tree string (the same string produced by [`planner::scan_directory_tree`]).
 ///
 /// This function is pure (no I/O, no async) and runs in ~1ms.
+///
+/// ## Key design principle
+///
+/// The **prompt** is the primary signal. The dir tree is only relevant for
+/// *modification* tasks (the user is changing existing code). For *greenfield*
+/// tasks ("build me a website", "create an app") the existing repo size is
+/// irrelevant — those are always Simple or Standard regardless of how large
+/// the current codebase is.
 pub fn classify_complexity(prompt: &str, dir_tree: &str) -> ComplexityScore {
     let prompt_lower = prompt.to_lowercase();
 
-    // ── 1. File count ────────────────────────────────────────────────────────
+    // ── 1. File/domain count — only used for modification tasks ─────────────
     let file_count = count_files(dir_tree);
-
-    // ── 2. Domain count ──────────────────────────────────────────────────────
     let domain_count = count_domains(dir_tree);
 
-    // ── 3. Prompt signals ────────────────────────────────────────────────────
+    // ── 2. Prompt signals ────────────────────────────────────────────────────
+
     let broad_scope = BROAD_SCOPE_KEYWORDS
         .iter()
         .any(|kw| prompt_lower.contains(kw));
@@ -144,34 +191,52 @@ pub fn classify_complexity(prompt: &str, dir_tree: &str) -> ComplexityScore {
         .iter()
         .any(|kw| prompt_lower.contains(kw));
 
-    // ── 4. Scoring ───────────────────────────────────────────────────────────
+    // Greenfield signal: user wants something NEW created from scratch.
+    // When true, the existing repo size is irrelevant — we ignore dir tree counts.
+    let is_greenfield = GREENFIELD_KEYWORDS
+        .iter()
+        .any(|kw| prompt_lower.contains(kw));
+
+    // Single-artifact signal: the request is for one discrete deliverable
+    // (a website, a script, a page, etc.) — caps at Standard at most.
+    let is_single_artifact = SINGLE_ARTIFACT_KEYWORDS
+        .iter()
+        .any(|kw| prompt_lower.contains(kw));
+
+    // ── 3. Scoring ───────────────────────────────────────────────────────────
     // Cross-service immediately forces Full regardless of other signals.
     let score: u8 = if cross_service {
         2
     } else {
         let mut s: u8 = 0;
 
-        // File count signal
-        if file_count > 20 {
-            s += 1;
-        }
-        if file_count > 50 {
-            s += 1; // bumps to 2
+        // Dir tree counts only matter for modification tasks.
+        // Greenfield tasks ignore repo size entirely.
+        if !is_greenfield {
+            if file_count > 20 {
+                s += 1;
+            }
+            if file_count > 50 {
+                s += 1;
+            }
+            if domain_count >= 3 {
+                s = s.max(2);
+            } else if domain_count == 2 {
+                s = s.max(1);
+            }
         }
 
-        // Domain count signal
-        if domain_count >= 3 {
-            s = s.max(2);
-        } else if domain_count == 2 {
+        // Broad scope bumps score by 1 (but not for single-artifact requests)
+        if broad_scope && !is_single_artifact {
             s = s.max(1);
         }
 
-        // Broad scope adds 1 point but won't make it Simple
-        if broad_scope {
-            s = s.max(1);
+        // Single artifact caps at Standard (score 1) — never Full from dir tree alone
+        if is_single_artifact && s > 1 {
+            s = 1;
         }
 
-        // Simple action with few files → force score down to 0
+        // Simple action + small scope → Simple
         if simple_action && file_count <= 20 && domain_count <= 1 {
             s = 0;
         }
