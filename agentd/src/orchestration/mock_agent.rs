@@ -134,8 +134,11 @@ impl MockAgentExecutor {
             });
         }
 
-        // Capture git diff
-        let git_diff = self.capture_git_diff(agent, topology).await?;
+        // Capture git diff via topology (two-strategy: host-side then socket fallback).
+        // This is more reliable than the inline capture_git_diff because
+        // topology.capture_agent_diff() logs exactly which strategy worked.
+        let git_diff = topology.capture_agent_diff(&agent.agent_id).await
+            .unwrap_or_default();
 
         if self.verbose {
             if !git_diff.is_empty() {
@@ -144,9 +147,12 @@ impl MockAgentExecutor {
                 for line in git_diff.lines().take(10) {
                     log::info!("  │ {}", line);
                 }
+                if git_diff.lines().count() > 10 {
+                    log::info!("  │ ... ({} more lines)", git_diff.lines().count() - 10);
+                }
                 log::info!("  └─────────────────────────────────────────");
             } else {
-                log::info!("\n  ℹ️  No changes detected");
+                log::info!("\n  ⚠️  No diff captured (both host-side and socket strategies returned empty)");
             }
         }
 
@@ -282,49 +288,6 @@ impl MockAgentExecutor {
         })
     }
 
-    /// Capture git diff from agent layer
-    async fn capture_git_diff(&self, agent: &AgentHandle, topology: &TopologyManager) -> Result<String> {
-        let sandbox_id = &agent.sandbox_name;
-        let container_id = &agent.container_id;
-
-        // Stage all changes
-        let add_request = json!({
-            "request_type": "invoke_tool",
-            "sandbox": sandbox_id,
-            "container": container_id,
-            "name": "run_command",
-            "input": {
-                "cmd": "cd /workspace && git add -A",
-                "timeout": 30
-            }
-        });
-
-        super::socket_roundtrip(topology.socket_path(), &add_request)
-            .map_err(|e| anyhow::anyhow!("Failed to stage changes: {}", e))?;
-
-        // Get diff
-        let diff_request = json!({
-            "request_type": "invoke_tool",
-            "sandbox": sandbox_id,
-            "container": container_id,
-            "name": "run_command",
-            "input": {
-                "cmd": "cd /workspace && git diff --cached HEAD",
-                "timeout": 60
-            }
-        });
-
-        let diff_response = super::socket_roundtrip(topology.socket_path(), &diff_request)
-            .map_err(|e| anyhow::anyhow!("Failed to get diff: {}", e))?;
-
-        if let Some(result) = diff_response.get("result") {
-            if let Some(stdout) = result.get("stdout").and_then(|o| o.as_str()) {
-                return Ok(stdout.to_string());
-            }
-        }
-
-        Ok(String::new())
-    }
 }
 
 /// Get current Unix timestamp
