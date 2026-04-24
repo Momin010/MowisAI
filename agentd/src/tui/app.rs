@@ -61,6 +61,12 @@ pub struct App {
     /// None = auto-classify via complexity_classifier.
     /// Some(mode) = force that mode for every orchestration run until cleared.
     pub mode_override: Option<crate::orchestration::ComplexityMode>,
+    /// The unified diff from the last successful orchestration run, waiting to
+    /// be saved.  Set by `on_orch_complete()`, cleared once the user saves or
+    /// discards it via `/save` / `/discard`.
+    pub pending_diff: Option<String>,
+    /// True while we're waiting for the user to provide a save path.
+    pub awaiting_save_path: bool,
 }
 
 impl App {
@@ -94,6 +100,8 @@ impl App {
             dev_log: Vec::with_capacity(1000),
             dev_mode_active: false,
             mode_override: None,
+            pending_diff: None,
+            awaiting_save_path: false,
         };
 
         let welcome_line2 = match app.config.provider {
@@ -250,6 +258,17 @@ impl App {
             return;
         }
 
+        // If we're waiting for a save path, treat non-slash input as a folder name
+        if self.awaiting_save_path {
+            self.messages.push(ChatMessage {
+                role: MessageRole::User,
+                content: text.clone(),
+                timestamp: now(),
+            });
+            self.handle_save(text);
+            return;
+        }
+
         self.messages.push(ChatMessage {
             role: MessageRole::User,
             content: text.clone(),
@@ -321,6 +340,11 @@ impl App {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: "Commands:\n\
+                        \n  ── Saving Output ──────────────────────────────────────────\
+                        \n  /save .                — Apply generated code into the CURRENT directory\
+                        \n  /save <folder>         — Write generated code into a new folder\
+                        \n  /discard               — Throw away the pending generated code\
+                        \n\
                         \n  ── Orchestration ─────────────────────────────────────────\
                         \n  /mode simple           — Force Simple mode (1 agent, no verification)\
                         \n  /mode standard         — Force Standard mode (few agents, 1 verify round)\
@@ -598,7 +622,30 @@ impl App {
                     }
                 }
             }
+            "/discard" => {
+                if self.pending_diff.is_some() {
+                    self.pending_diff = None;
+                    self.awaiting_save_path = false;
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "🗑️  Generated code discarded.".into(),
+                        timestamp: now(),
+                    });
+                } else {
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "Nothing to discard — no pending diff.".into(),
+                        timestamp: now(),
+                    });
+                }
+            }
             _ => {
+                // Check if it's a /save command (can have a path argument)
+                if cmd.starts_with("/save") {
+                    let path_arg = cmd.trim_start_matches("/save").trim();
+                    self.handle_save(path_arg.to_string());
+                    return;
+                }
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!("Unknown command: {}. Type /help for available commands.", cmd),
@@ -606,6 +653,119 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Apply the pending diff to `path_arg`.
+    /// - `""` or `"."` → current directory (git apply)
+    /// - anything else  → create that folder then write files from the diff
+    fn handle_save(&mut self, path_arg: String) {
+        let diff = match self.pending_diff.take() {
+            Some(d) => d,
+            None => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "Nothing to save — run a build first.".into(),
+                    timestamp: now(),
+                });
+                return;
+            }
+        };
+        self.awaiting_save_path = false;
+
+        let target = if path_arg.is_empty() || path_arg == "." {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            // Could be absolute or relative
+            let p = std::path::PathBuf::from(&path_arg);
+            if p.is_absolute() { p } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(&path_arg)
+            }
+        };
+
+        // Try to create the target directory if it doesn't exist
+        if !target.exists() {
+            if let Err(e) = std::fs::create_dir_all(&target) {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("✗ Failed to create directory {}: {}", target.display(), e),
+                    timestamp: now(),
+                });
+                // Put the diff back so they can try again
+                self.pending_diff = Some(diff);
+                self.awaiting_save_path = true;
+                return;
+            }
+        }
+
+        let target_str = target.display().to_string();
+
+        // Attempt 1: try `git apply` inside the target directory (works when
+        // the target is inside a git repo and the diff has git-style paths).
+        if Self::try_git_apply(&target, &diff) {
+            self.messages.push(ChatMessage {
+                role: MessageRole::System,
+                content: format!("✅ Code saved to {} via git apply.", target_str),
+                timestamp: now(),
+            });
+            return;
+        }
+
+        // Attempt 2: write the raw diff as a .patch file so nothing is lost.
+        let patch_path = target.join("mowisai_output.patch");
+        match std::fs::write(&patch_path, &diff) {
+            Ok(()) => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!(
+                        "✅ Diff saved to {}\n\
+                         (git apply failed — saved as raw patch file instead)\n\
+                         To apply manually: cd {} && git apply mowisai_output.patch",
+                        patch_path.display(),
+                        target_str
+                    ),
+                    timestamp: now(),
+                });
+            }
+            Err(e) => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("✗ Failed to write patch file: {}", e),
+                    timestamp: now(),
+                });
+                // Put the diff back so they can try a different path
+                self.pending_diff = Some(diff);
+                self.awaiting_save_path = true;
+            }
+        }
+    }
+
+    /// Run `git apply` with the given diff inside `dir`.  Returns true on success.
+    fn try_git_apply(dir: &std::path::Path, diff: &str) -> bool {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        // Feed the diff on stdin to avoid temp-file races
+        let mut child = match Command::new("git")
+            .args(["apply", "--whitespace=nowarn", "-"])
+            .current_dir(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        if let Some(mut stdin) = child.stdin.take() {
+            if stdin.write_all(diff.as_bytes()).is_err() {
+                return false;
+            }
+        }
+
+        child.wait().map(|s| s.success()).unwrap_or(false)
     }
 
     fn send_to_gemini(&mut self, user_text: String) {
@@ -883,14 +1043,19 @@ impl App {
                     Ok(output) => {
                         if let Some(ref tx) = tx {
                             let summary = format!(
-                                "Orchestration complete!\n\nSummary: {}\nTasks: {} total, {} completed, {} failed",
+                                "✅ Orchestration complete!\n\nSummary: {}\nTasks: {} total, {} completed, {} failed",
                                 output.summary,
                                 output.scheduler_stats.total_tasks,
                                 output.scheduler_stats.completed,
                                 output.scheduler_stats.failed,
                             );
-                            let _ = tx.send(TuiEvent::GeminiChunk(summary));
-                            let _ = tx.send(TuiEvent::GeminiDone);
+                            // Send the diff + summary so the TUI can prompt for
+                            // a save path.  OrchComplete is handled before
+                            // OrchDone so pending_diff is set first.
+                            let _ = tx.send(TuiEvent::OrchComplete {
+                                diff: output.merged_diff,
+                                summary,
+                            });
                             let _ = tx.send(TuiEvent::OrchDone);
                         }
                     }
@@ -1025,6 +1190,40 @@ impl App {
                 self.orch_total = total;
                 self.orch_completed = completed;
             }
+        }
+    }
+
+    /// Called when orchestration finishes successfully.  Stores the diff and
+    /// shows the save prompt.  `on_orch_done` fires immediately after.
+    pub fn on_orch_complete(&mut self, diff: String, summary: String) {
+        // Show the summary as an assistant message
+        self.messages.push(ChatMessage {
+            role: MessageRole::Assistant,
+            content: summary,
+            timestamp: now(),
+        });
+
+        if diff.trim().is_empty() {
+            // Nothing to save — informational only
+            self.messages.push(ChatMessage {
+                role: MessageRole::System,
+                content: "ℹ️  No code changes were produced (empty diff).".into(),
+                timestamp: now(),
+            });
+        } else {
+            self.pending_diff = Some(diff);
+            self.awaiting_save_path = true;
+            self.messages.push(ChatMessage {
+                role: MessageRole::System,
+                content: "💾 Where should the generated code be saved?\n\
+                    \n  /save .              — Apply changes into the CURRENT directory\
+                    \n  /save <folder>       — Write everything into a new folder (e.g. /save my-website)\
+                    \n  /discard             — Throw away the generated code\
+                    \n\
+                    \nThe changes are a unified diff — /save will run `git apply` (or write files directly if outside a git repo)."
+                    .into(),
+                timestamp: now(),
+            });
         }
     }
 

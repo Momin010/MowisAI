@@ -21,6 +21,9 @@ pub enum TuiEvent {
     GeminiDone,
     GeminiError(String),
     OrchEvent(OrchActivityEvent),
+    /// Fired when orchestration succeeds — carries the diff and summary so the
+    /// TUI can prompt the user where to save the generated code.
+    OrchComplete { diff: String, summary: String },
     OrchDone,
     LogEntry { level: String, message: String, timestamp: u64 },
 }
