@@ -449,14 +449,9 @@ impl AgentExecutor {
 
     /// Capture git diff from agent layer via socket API
     async fn capture_git_diff(&self, agent: &AgentHandle) -> Result<String> {
-        // CRITICAL: Git commands must run INSIDE the container, not on host
-        // The git repo was initialized inside the container via chroot,
-        // so we must use the socket API to run git commands inside the container
-
-        let sandbox_id = &agent.sandbox_name; // This is actually sandbox ID
+        let sandbox_id = &agent.sandbox_name;
         let container_id = &agent.container_id;
 
-        // Step 1: Stage all changes (git add -A)
         let add_request = json!({
             "request_type": "invoke_tool",
             "sandbox": sandbox_id,
@@ -467,9 +462,7 @@ impl AgentExecutor {
                 "timeout": 30
             }
         });
-
         let add_response = super::socket_roundtrip(&self.socket_path, &add_request)?;
-
         if is_verbose() {
             log::info!("  🔧 Staging all changes with git add -A");
             if let Some(result) = add_response.get("result") {
@@ -481,10 +474,6 @@ impl AgentExecutor {
             }
         }
 
-        // Step 2: Get diff against last commit.
-        // Use `git diff --cached HEAD` for repos that have commits.
-        // If HEAD doesn't exist (shouldn't happen after create_agent_layer fix,
-        // but kept as fallback), `git diff --cached` shows all staged files.
         let diff_request = json!({
             "request_type": "invoke_tool",
             "sandbox": sandbox_id,
@@ -495,10 +484,7 @@ impl AgentExecutor {
                 "timeout": 60
             }
         });
-
         let diff_response = super::socket_roundtrip(&self.socket_path, &diff_request)?;
-
-        // Extract diff from run_command result (stdout field)
         if let Some(result) = diff_response.get("result") {
             if let Some(stdout) = result.get("stdout").and_then(|o| o.as_str()) {
                 if !stdout.trim().is_empty() {
@@ -508,16 +494,12 @@ impl AgentExecutor {
                     return Ok(stdout.to_string());
                 }
             }
-
-            // Check for errors
             if let Some(stderr) = result.get("stderr").and_then(|s| s.as_str()) {
                 if !stderr.trim().is_empty() && stderr.contains("fatal") {
                     return Err(anyhow!("git diff failed: {}", stderr));
                 }
             }
         }
-
-        // No diff found (agent made no changes)
         if is_verbose() {
             log::info!("  ℹ️  No changes detected (empty diff)");
         }

@@ -231,6 +231,7 @@ pub struct SandboxConfig {
     pub scope: String, // Filesystem scope (e.g., "src/backend/")
     pub tools: Vec<String>, // Tools available to agents in this sandbox
     pub max_agents: usize,
+    pub image: Option<String>, // Container image (e.g., "alpine")
 }
 
 /// Sandbox topology produced by Fast Planner (Layer 1)
