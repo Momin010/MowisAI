@@ -32,8 +32,19 @@ fn run_inner(prompt: &str, api_key: &str, model: &str, socket_path: &str) -> Res
     let sb_resp = socket_roundtrip(socket_path, &create_sb)?;
     let sandbox_id = parse_ok_field(&sb_resp, "sandbox").context("create_sandbox")?;
 
+    // Guarantee destroy_sandbox on every exit path — error, early return, or panic.
+    // scopeguard::guard moves sandbox_id into the guard; access it via Deref.
+    let socket_path_cleanup = socket_path.to_string();
+    let sandbox_guard = scopeguard::guard(sandbox_id, move |id| {
+        log::info!("[grok] cleaning up sandbox {}", id);
+        let _ = socket_roundtrip(
+            &socket_path_cleanup,
+            &json!({ "request_type": "destroy_sandbox", "sandbox": id }),
+        );
+    });
+
     log::info!("[grok] creating container…");
-    let create_ct = json!({ "request_type": "create_container", "sandbox": &sandbox_id });
+    let create_ct = json!({ "request_type": "create_container", "sandbox": &*sandbox_guard });
     let ct_resp = socket_roundtrip(socket_path, &create_ct)?;
     let container_id = parse_ok_field(&ct_resp, "container").context("create_container")?;
 
@@ -98,7 +109,6 @@ fn run_inner(prompt: &str, api_key: &str, model: &str, socket_path: &str) -> Res
             .get("message")
             .ok_or_else(|| anyhow!("no message in xAI choice"))?;
 
-        // Collect any text content
         if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
             if !content.is_empty() {
                 println!("{}", content);
@@ -110,13 +120,11 @@ fn run_inner(prompt: &str, api_key: &str, model: &str, socket_path: &str) -> Res
             break;
         }
 
-        // Handle tool calls
         let tool_calls = match message.get("tool_calls").and_then(|v| v.as_array()) {
             Some(tc) if !tc.is_empty() => tc.clone(),
             _ => break,
         };
 
-        // Add the assistant message with tool_calls to history
         messages.push(message.clone());
 
         for tool_call in &tool_calls {
@@ -138,7 +146,7 @@ fn run_inner(prompt: &str, api_key: &str, model: &str, socket_path: &str) -> Res
 
             log::info!("[grok] tool call: {} {:?}", fn_name, fn_args);
 
-            let socket_req = build_socket_request(fn_name, &fn_args, &sandbox_id, &container_id);
+            let socket_req = build_socket_request(fn_name, &fn_args, &*sandbox_guard, &container_id);
             let tool_result = match socket_roundtrip(socket_path, &socket_req) {
                 Ok(r) => serde_json::to_string_pretty(&r).unwrap_or_else(|_| r.to_string()),
                 Err(e) => format!("{{\"error\": \"{}\"}}", e),
@@ -154,12 +162,7 @@ fn run_inner(prompt: &str, api_key: &str, model: &str, socket_path: &str) -> Res
         }
     }
 
-    log::info!("[grok] cleaning up sandbox {}", sandbox_id);
-    let _ = socket_roundtrip(
-        socket_path,
-        &json!({ "request_type": "destroy_sandbox", "sandbox": sandbox_id }),
-    );
-
+    // sandbox_guard drops here, triggering destroy_sandbox automatically.
     Ok(())
 }
 

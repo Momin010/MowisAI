@@ -361,10 +361,10 @@ fn read_masked_api_key(stdout: &mut io::Stdout) -> Result<String> {
     }
 }
 
-// ── Grok model picker (spacebar multi-select, at least one required) ──────────
+// ── Grok model picker (single-select radio, arrow keys + Enter) ───────────────
 
 fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
-    let mut selected: Vec<bool> = vec![true, false, false, false, false, false]; // grok-3 pre-selected
+    // cursor_idx IS the selected model — single selection, not multi.
     let mut cursor_idx: usize = 0;
 
     queue!(
@@ -373,7 +373,7 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
         Print("  Choose a Grok model:\n"),
         ResetColor,
         SetForegroundColor(Color::DarkGrey),
-        Print("  Space to toggle, \u{2191}/\u{2193} navigate, Enter to confirm (select at least one).\n\n"),
+        Print("  \u{2191}/\u{2193} navigate   Space/Enter select\n\n"),
         ResetColor,
     )?;
     stdout.flush()?;
@@ -386,21 +386,20 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
     terminal::enable_raw_mode()?;
     let result = (|| -> Result<String> {
         loop {
-            // Redraw model list
             execute!(stdout, cursor::MoveTo(0, menu_top_row))?;
             for (i, model) in GROK_MODELS.iter().enumerate() {
-                let check = if selected[i] { "\u{25c9}" } else { "\u{25cb}" }; // ◉ / ○
-                let row_color = if i == cursor_idx { Color::Green } else { Color::Reset };
-                let cursor_arrow = if i == cursor_idx { "\u{25ba}" } else { " " };
+                // ◉ = selected, ○ = not selected — exactly one ◉ at a time.
+                let radio = if i == cursor_idx { "\u{25c9}" } else { "\u{25cb}" };
+                let arrow = if i == cursor_idx { "\u{25ba}" } else { " " };
 
                 queue!(
                     stdout,
                     terminal::Clear(ClearType::CurrentLine),
                     SetForegroundColor(Color::DarkGrey),
-                    Print(format!("  {} ", cursor_arrow)),
-                    SetForegroundColor(if selected[i] { Color::Green } else { Color::DarkGrey }),
-                    Print(format!("{} ", check)),
-                    SetForegroundColor(row_color),
+                    Print(format!("  {} ", arrow)),
+                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::DarkGrey }),
+                    Print(format!("{} ", radio)),
+                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::Reset }),
                     Print(format!("{:<22}", model.label)),
                     SetForegroundColor(Color::DarkGrey),
                     Print(format!("  {}\n", model.note)),
@@ -408,19 +407,12 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
                 )?;
             }
 
-            let any_selected = selected.iter().any(|&s| s);
-            let hint = if any_selected {
-                "  Press Enter to confirm"
-            } else {
-                "  Select at least one model to continue"
-            };
             queue!(
                 stdout,
                 terminal::Clear(ClearType::CurrentLine),
                 Print("\n"),
-                SetForegroundColor(if any_selected { Color::DarkGrey } else { Color::Red }),
-                Print(hint),
-                Print("\n"),
+                SetForegroundColor(Color::DarkGrey),
+                Print("  Press Space or Enter to confirm\n"),
                 ResetColor,
             )?;
             stdout.flush()?;
@@ -432,14 +424,8 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
                 Event::Key(KeyEvent { code: KeyCode::Down, .. }) => {
                     if cursor_idx < GROK_MODELS.len() - 1 { cursor_idx += 1; }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => {
-                    selected[cursor_idx] = !selected[cursor_idx];
-                }
-                Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
-                    if any_selected {
-                        break;
-                    }
-                }
+                Event::Key(KeyEvent { code: KeyCode::Enter, .. })
+                | Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => break,
                 Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. })
                     if modifiers.contains(KeyModifiers::CONTROL) =>
                 {
@@ -450,15 +436,7 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
             }
         }
 
-        // Return the first selected model as the active model.
-        let primary = GROK_MODELS
-            .iter()
-            .zip(selected.iter())
-            .find(|(_, &s)| s)
-            .map(|(m, _)| m.id.to_string())
-            .unwrap_or_else(|| "grok-3".to_string());
-
-        Ok(primary)
+        Ok(GROK_MODELS[cursor_idx].id.to_string())
     })();
     terminal::disable_raw_mode()?;
 
