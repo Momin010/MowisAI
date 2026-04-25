@@ -144,12 +144,39 @@ fn find_gcloud() -> Option<std::path::PathBuf> {
 #[cfg(unix)]
 pub(crate) fn gcloud_access_token() -> anyhow::Result<String> {
     use anyhow::{anyhow, Context};
-    use std::process::Command;
     trace("gcloud auth print-access-token: starting");
     let gcloud = find_gcloud()
         .ok_or_else(|| anyhow!("gcloud not found. Install Google Cloud SDK and run: gcloud auth application-default login"))?;
-    let out = Command::new(&gcloud)
-        .args(["auth", "print-access-token"])
+
+    let mut cmd = std::process::Command::new(&gcloud);
+
+    // Choose token command based on whether ADC credentials file is set
+    let token_subcommand = if std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok() {
+        vec!["auth", "application-default", "print-access-token"]
+    } else {
+        vec!["auth", "print-access-token"]
+    };
+
+    cmd.args(&token_subcommand);
+
+    // Pass through credential-related env vars that sudo may have stripped
+    if let Ok(creds) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+        cmd.env("GOOGLE_APPLICATION_CREDENTIALS", creds);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        cmd.env("HOME", home);
+    }
+    if let Ok(cloudsdk) = std::env::var("CLOUDSDK_CONFIG") {
+        cmd.env("CLOUDSDK_CONFIG", cloudsdk);
+    }
+    // Also pass through the original user's config dir
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        let user_home = format!("/home/{}", user);
+        cmd.env("HOME", &user_home);
+        cmd.env("CLOUDSDK_CONFIG", format!("{}/.config/gcloud", user_home));
+    }
+
+    let out = cmd
         .output()
         .context("spawn gcloud — is it installed and on PATH? Install with: gcloud auth application-default login")?;
     if !out.status.success() {
