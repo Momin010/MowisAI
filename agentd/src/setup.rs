@@ -4,7 +4,7 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
-    style::{Color, Print, ResetColor, SetForegroundColor, Stylize},
+    style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, ClearType},
 };
 use std::io::{self, Write as _};
@@ -24,6 +24,44 @@ const GROK_MODELS: &[GrokModel] = &[
     GrokModel { id: "grok-3-mini-fast", label: "grok-3-mini-fast", note: "Lightweight + fast"             },
     GrokModel { id: "grok-2-1212",      label: "grok-2-1212",      note: "Previous generation"            },
     GrokModel { id: "grok-2-vision-1212", label: "grok-2-vision-1212", note: "Vision capabilities"       },
+];
+
+struct GroqModel {
+    id: &'static str,
+    label: &'static str,
+    note: &'static str,
+}
+
+const GROQ_MODELS: &[GroqModel] = &[
+    GroqModel { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", note: "Powerful & versatile"    },
+    GroqModel { id: "llama-3.1-8b-instant",    label: "Llama 3.1 8B",  note: "Blazing fast"           },
+    GroqModel { id: "mixtral-8x7b-32768",      label: "Mixtral 8x7B",  note: "Great reasoning"        },
+    GroqModel { id: "gemma2-9b-it",            label: "Gemma 2 9B",    note: "Google lightweight"     },
+];
+
+struct ModelOption {
+    id: &'static str,
+    label: &'static str,
+    note: &'static str,
+}
+
+const ANTHROPIC_MODELS: &[ModelOption] = &[
+    ModelOption { id: "claude-3-7-sonnet-20250219", label: "Claude 3.7 Sonnet", note: "Hybrid reasoning + tools" },
+    ModelOption { id: "claude-3-5-sonnet-20241022", label: "Claude 3.5 Sonnet", note: "Fast and reliable"        },
+    ModelOption { id: "claude-3-5-haiku-20241022",  label: "Claude 3.5 Haiku",  note: "Blazing fast"             },
+];
+
+const OPENAI_MODELS: &[ModelOption] = &[
+    ModelOption { id: "gpt-4o",            label: "GPT-4o",            note: "Standard flagship"          },
+    ModelOption { id: "o1",                label: "o1",                note: "Full reasoning capabilities" },
+    ModelOption { id: "o3-mini",           label: "o3-mini",           note: "Fast reasoning"             },
+    ModelOption { id: "gpt-4o-mini",       label: "GPT-4o Mini",       note: "Cost efficient"             },
+];
+
+const GEMINI_MODELS: &[ModelOption] = &[
+    ModelOption { id: "gemini-2.0-flash",           label: "Gemini 2.0 Flash",      note: "Next-gen speed"           },
+    ModelOption { id: "gemini-2.0-pro-exp-02-05",    label: "Gemini 2.0 Pro (Exp)",  note: "High reasoning"           },
+    ModelOption { id: "gemini-1.5-pro",             label: "Gemini 1.5 Pro",        note: "Large context"            },
 ];
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -49,6 +87,10 @@ impl SetupWizard {
         let config = match provider {
             AiProvider::VertexAi => setup_vertex(&mut stdout)?,
             AiProvider::Grok     => setup_grok(&mut stdout)?,
+            AiProvider::Groq     => setup_groq(&mut stdout)?,
+            AiProvider::Anthropic => setup_anthropic(&mut stdout)?,
+            AiProvider::OpenAi    => setup_openai(&mut stdout)?,
+            AiProvider::Gemini    => setup_gemini_api(&mut stdout)?,
         };
 
         config.save()?;
@@ -108,6 +150,10 @@ fn pick_provider(stdout: &mut io::Stdout) -> Result<AiProvider> {
     let options = [
         ("Vertex AI", "Google Cloud — requires gcloud CLI + auth"),
         ("Grok AI",   "xAI — requires an API key from console.x.ai"),
+        ("Groq",      "Groq Cloud — ultra-fast Llama/Mixtral (console.groq.com)"),
+        ("Anthropic", "Claude — requires API key from console.anthropic.com"),
+        ("OpenAI",    "GPT-4/o1 — requires API key from platform.openai.com"),
+        ("Gemini API", "Google AI Studio — standalone API key setup"),
     ];
     let mut cursor_idx: usize = 0;
 
@@ -120,7 +166,7 @@ fn pick_provider(stdout: &mut io::Stdout) -> Result<AiProvider> {
                 stdout,
                 terminal::Clear(ClearType::FromCursorDown),
                 SetForegroundColor(Color::White),
-                Print("  Choose your AI provider:\n\n"),
+                Print("  Choose your AI provider:\r\n\r\n"),
                 ResetColor,
             )?;
 
@@ -131,7 +177,7 @@ fn pick_provider(stdout: &mut io::Stdout) -> Result<AiProvider> {
                         SetForegroundColor(Color::Green),
                         Print(format!("  \u{25ba} {:<18}", name)),
                         SetForegroundColor(Color::DarkGrey),
-                        Print(format!("{}\n", desc)),
+                        Print(format!("{}\r\n", desc)),
                         ResetColor,
                     )?;
                 } else {
@@ -139,7 +185,7 @@ fn pick_provider(stdout: &mut io::Stdout) -> Result<AiProvider> {
                         stdout,
                         Print(format!("    {:<18}", name)),
                         SetForegroundColor(Color::DarkGrey),
-                        Print(format!("{}\n", desc)),
+                        Print(format!("{}\r\n", desc)),
                         ResetColor,
                     )?;
                 }
@@ -147,9 +193,9 @@ fn pick_provider(stdout: &mut io::Stdout) -> Result<AiProvider> {
 
             queue!(
                 stdout,
-                Print("\n"),
+                Print("\r\n"),
                 SetForegroundColor(Color::DarkGrey),
-                Print("  \u{2191}/\u{2193} navigate   Enter select\n"),
+                Print("  \u{2191}/\u{2193} navigate   Enter select\r\n"),
                 ResetColor,
             )?;
             stdout.flush()?;
@@ -171,7 +217,14 @@ fn pick_provider(stdout: &mut io::Stdout) -> Result<AiProvider> {
                 _ => {}
             }
         }
-        Ok(if cursor_idx == 0 { AiProvider::VertexAi } else { AiProvider::Grok })
+        Ok(match cursor_idx {
+            0 => AiProvider::VertexAi,
+            1 => AiProvider::Grok,
+            2 => AiProvider::Groq,
+            3 => AiProvider::Anthropic,
+            4 => AiProvider::OpenAi,
+            _ => AiProvider::Gemini,
+        })
     })();
     terminal::disable_raw_mode()?;
     result
@@ -281,8 +334,8 @@ fn setup_grok(stdout: &mut io::Stdout) -> Result<MowisConfig> {
     let api_key = read_masked_api_key(stdout)?;
 
     // Validate key looks plausible (xAI keys start with "xai-")
-    if api_key.len() < 8 {
-        anyhow::bail!("API key too short — please check your key from console.x.ai");
+    if !api_key.starts_with("xai-") || api_key.len() < 12 {
+        anyhow::bail!("Invalid API key format. xAI keys must start with 'xai-' and are typically longer than 12 characters.");
     }
 
     let model = pick_grok_model(stdout)?;
@@ -296,6 +349,142 @@ fn setup_grok(stdout: &mut io::Stdout) -> Result<MowisConfig> {
         model,
         ..MowisConfig::default()
     })
+}
+
+// ── Groq AI setup ─────────────────────────────────────────────────────────────
+
+fn setup_groq(stdout: &mut io::Stdout) -> Result<MowisConfig> {
+    clear_screen(stdout)?;
+    print_banner(stdout)?;
+
+    queue!(
+        stdout,
+        SetForegroundColor(Color::Cyan),
+        Print("  \u{25ba} Groq setup\n\n"),
+        ResetColor,
+    )?;
+    stdout.flush()?;
+
+    let api_key = read_masked_api_key_custom(stdout, "Groq", "console.groq.com")?;
+
+    // Validate Groq key format (starts with gsk_)
+    if !api_key.starts_with("gsk_") {
+        anyhow::bail!("Invalid Groq API key format. Groq keys must start with 'gsk_'.");
+    }
+
+    let model = pick_groq_model(stdout)?;
+    let encrypted = crate::crypto::encrypt(&api_key)?;
+
+    Ok(MowisConfig {
+        provider: AiProvider::Groq,
+        groq_api_key_enc: Some(encrypted),
+        groq_model: model.clone(),
+        model,
+        ..MowisConfig::default()
+    })
+}
+
+// ── Anthropic / OpenAI / Gemini Setup ──────────────────────────────────────────
+
+fn setup_anthropic(stdout: &mut io::Stdout) -> Result<MowisConfig> {
+    clear_screen(stdout)?;
+    print_banner(stdout)?;
+    let api_key = read_masked_api_key_custom(stdout, "Anthropic", "console.anthropic.com")?;
+    if !api_key.starts_with("sk-ant-") { anyhow::bail!("Invalid Anthropic key format."); }
+
+    let model = pick_model_generic(stdout, "Anthropic", ANTHROPIC_MODELS)?;
+    let encrypted = crate::crypto::encrypt(&api_key)?;
+
+    Ok(MowisConfig {
+        provider: AiProvider::Anthropic,
+        anthropic_api_key_enc: Some(encrypted),
+        anthropic_model: model.clone(),
+        model,
+        ..MowisConfig::default()
+    })
+}
+
+fn setup_openai(stdout: &mut io::Stdout) -> Result<MowisConfig> {
+    clear_screen(stdout)?;
+    print_banner(stdout)?;
+    let api_key = read_masked_api_key_custom(stdout, "OpenAI", "platform.openai.com")?;
+    if !api_key.starts_with("sk-") { anyhow::bail!("Invalid OpenAI key format."); }
+
+    let model = pick_model_generic(stdout, "OpenAI", OPENAI_MODELS)?;
+    let encrypted = crate::crypto::encrypt(&api_key)?;
+
+    Ok(MowisConfig {
+        provider: AiProvider::OpenAi,
+        openai_api_key_enc: Some(encrypted),
+        openai_model: model.clone(),
+        model,
+        ..MowisConfig::default()
+    })
+}
+
+fn setup_gemini_api(stdout: &mut io::Stdout) -> Result<MowisConfig> {
+    clear_screen(stdout)?;
+    print_banner(stdout)?;
+    let api_key = read_masked_api_key_custom(stdout, "Gemini", "aistudio.google.com")?;
+    
+    let model = pick_model_generic(stdout, "Gemini", GEMINI_MODELS)?;
+    let encrypted = crate::crypto::encrypt(&api_key)?;
+
+    Ok(MowisConfig {
+        provider: AiProvider::Gemini,
+        gemini_api_key_enc: Some(encrypted),
+        gemini_model: model.clone(),
+        model,
+        ..MowisConfig::default()
+    })
+}
+
+fn pick_model_generic(stdout: &mut io::Stdout, name: &str, options: &[ModelOption]) -> Result<String> {
+    let mut cursor_idx: usize = 0;
+    queue!(stdout, SetForegroundColor(Color::White), Print(format!("  Choose an {} model:\r\n", name)), ResetColor,
+           SetForegroundColor(Color::DarkGrey), Print("  \u{2191}/\u{2193} navigate   Space/Enter select\r\n\r\n"), ResetColor)?;
+    stdout.flush()?;
+
+    let menu_top_row = cursor::position()?.1;
+    terminal::enable_raw_mode()?;
+    let result = (|| -> Result<String> {
+        loop {
+            execute!(stdout, cursor::MoveTo(0, menu_top_row))?;
+            for (i, opt) in options.iter().enumerate() {
+                let radio = if i == cursor_idx { "\u{25c9}" } else { "\u{25cb}" };
+                let arrow = if i == cursor_idx { "\u{25ba}" } else { " " };
+                queue!(
+                    stdout,
+                    terminal::Clear(ClearType::CurrentLine),
+                    Print(format!("  {} ", arrow)),
+                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::DarkGrey }),
+                    Print(format!("{} ", radio)),
+                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::Reset }),
+                    Print(format!("{:<25}", opt.label)),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(format!("  {}\r\n", opt.note)),
+                    ResetColor,
+                )?;
+            }
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine), Print("\r\n  Press Enter to confirm\r\n"))?;
+            stdout.flush()?;
+
+            match event::read()? {
+                Event::Key(KeyEvent { code: KeyCode::Up, .. }) => if cursor_idx > 0 { cursor_idx -= 1; },
+                Event::Key(KeyEvent { code: KeyCode::Down, .. }) => if cursor_idx < options.len() - 1 { cursor_idx += 1; },
+                Event::Key(KeyEvent { code: KeyCode::Enter, .. }) | Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => break,
+                Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    terminal::disable_raw_mode()?;
+                    anyhow::bail!("Setup cancelled");
+                }
+                _ => {}
+            }
+        }
+        Ok(options[cursor_idx].id.to_string())
+    })();
+    terminal::disable_raw_mode()?;
+    println!();
+    result
 }
 
 // ── Masked API key input ──────────────────────────────────────────────────────
@@ -361,6 +550,55 @@ fn read_masked_api_key(stdout: &mut io::Stdout) -> Result<String> {
     }
 }
 
+fn read_masked_api_key_custom(stdout: &mut io::Stdout, name: &str, url: &str) -> Result<String> {
+    queue!(
+        stdout,
+        SetForegroundColor(Color::White),
+        Print(format!("  Paste your {} API key (from {}):\n", name, url)),
+        ResetColor,
+        SetForegroundColor(Color::DarkGrey),
+        Print("  The key will be encrypted and stored locally.\n\n"),
+        ResetColor,
+        Print("  > "),
+    )?;
+    stdout.flush()?;
+
+    let mut key_buf = String::new();
+    terminal::enable_raw_mode()?;
+    let result = (|| -> Result<String> {
+        loop {
+            match event::read()? {
+                Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
+                    if !key_buf.is_empty() { break; }
+                }
+                Event::Key(KeyEvent { code: KeyCode::Backspace, .. }) => {
+                    if key_buf.pop().is_some() {
+                        queue!(stdout, cursor::MoveLeft(1), Print(" "), cursor::MoveLeft(1))?;
+                        stdout.flush()?;
+                    }
+                }
+                Event::Key(KeyEvent { code: KeyCode::Char(c), modifiers, .. }) => {
+                    if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                        terminal::disable_raw_mode()?;
+                        anyhow::bail!("Setup cancelled");
+                    }
+                    key_buf.push(c);
+                    queue!(stdout, Print("\u{2022}"))?;
+                    stdout.flush()?;
+                }
+                _ => {}
+            }
+        }
+        Ok(key_buf)
+    })();
+    terminal::disable_raw_mode()?;
+    println!("\n");
+    match result {
+        Ok(k) => Ok(k.trim().to_string()),
+        Err(e) => Err(e),
+    }
+}
+
 // ── Grok model picker (single-select radio, arrow keys + Enter) ───────────────
 
 fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
@@ -370,10 +608,10 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
     queue!(
         stdout,
         SetForegroundColor(Color::White),
-        Print("  Choose a Grok model:\n"),
+        Print("  Choose a Grok model:\r\n"),
         ResetColor,
         SetForegroundColor(Color::DarkGrey),
-        Print("  \u{2191}/\u{2193} navigate   Space/Enter select\n\n"),
+        Print("  \u{2191}/\u{2193} navigate   Space/Enter select\r\n\r\n"),
         ResetColor,
     )?;
     stdout.flush()?;
@@ -402,7 +640,7 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
                     SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::Reset }),
                     Print(format!("{:<22}", model.label)),
                     SetForegroundColor(Color::DarkGrey),
-                    Print(format!("  {}\n", model.note)),
+                    Print(format!("  {}\r\n", model.note)),
                     ResetColor,
                 )?;
             }
@@ -410,9 +648,9 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
             queue!(
                 stdout,
                 terminal::Clear(ClearType::CurrentLine),
-                Print("\n"),
+                Print("\r\n"),
                 SetForegroundColor(Color::DarkGrey),
-                Print("  Press Space or Enter to confirm\n"),
+                Print("  Press Space or Enter to confirm\r\n"),
                 ResetColor,
             )?;
             stdout.flush()?;
@@ -440,6 +678,61 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
     })();
     terminal::disable_raw_mode()?;
 
+    println!();
+    result
+}
+
+fn pick_groq_model(stdout: &mut io::Stdout) -> Result<String> {
+    let mut cursor_idx: usize = 0;
+    queue!(stdout, SetForegroundColor(Color::White), Print("  Choose a Groq model:\r\n"), ResetColor,
+           SetForegroundColor(Color::DarkGrey), Print("  \u{2191}/\u{2193} navigate   Space/Enter select\r\n\r\n"), ResetColor)?;
+    stdout.flush()?;
+
+    let menu_top_row = cursor::position()?.1;
+    terminal::enable_raw_mode()?;
+    let result = (|| -> Result<String> {
+        loop {
+            execute!(stdout, cursor::MoveTo(0, menu_top_row))?;
+            for (i, model) in GROQ_MODELS.iter().enumerate() {
+                let radio = if i == cursor_idx { "\u{25c9}" } else { "\u{25cb}" };
+                let arrow = if i == cursor_idx { "\u{25ba}" } else { " " };
+                queue!(
+                    stdout,
+                    terminal::Clear(ClearType::CurrentLine),
+                    Print(format!("  {} ", arrow)),
+                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::DarkGrey }),
+                    Print(format!("{} ", radio)),
+                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::Reset }),
+                    Print(format!("{:<25}", model.label)),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(format!("  {}\r\n", model.note)),
+                    ResetColor,
+                )?;
+            }
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine), Print("\r\n  Press Enter to confirm\r\n"))?;
+            stdout.flush()?;
+
+            match event::read()? {
+                Event::Key(KeyEvent { code: KeyCode::Up, .. }) => {
+                    if cursor_idx > 0 { cursor_idx -= 1; }
+                }
+                Event::Key(KeyEvent { code: KeyCode::Down, .. }) => {
+                    if cursor_idx < GROQ_MODELS.len() - 1 { cursor_idx += 1; }
+                }
+                Event::Key(KeyEvent { code: KeyCode::Enter, .. })
+                | Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => break,
+                Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. })
+                    if modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    terminal::disable_raw_mode()?;
+                    anyhow::bail!("Setup cancelled");
+                }
+                _ => {}
+            }
+        }
+        Ok(GROQ_MODELS[cursor_idx].id.to_string())
+    })();
+    terminal::disable_raw_mode()?;
     println!();
     result
 }

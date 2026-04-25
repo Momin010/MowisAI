@@ -100,6 +100,22 @@ impl App {
                 "Provider: Grok AI (xAI) | Model: {}",
                 app.config.model
             ),
+            crate::config::AiProvider::Groq => format!(
+                "Provider: Groq (High-speed) | Model: {}",
+                app.config.model
+            ),
+            crate::config::AiProvider::Anthropic => format!(
+                "Provider: Anthropic | Model: {}",
+                app.config.model
+            ),
+            crate::config::AiProvider::OpenAi => format!(
+                "Provider: OpenAI | Model: {}",
+                app.config.model
+            ),
+            crate::config::AiProvider::Gemini => format!(
+                "Provider: Gemini API | Model: {}",
+                app.config.model
+            ),
         };
 
         app.messages.push(ChatMessage {
@@ -291,7 +307,7 @@ impl App {
             "/help" => {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "Commands:\n  /quit                  — Exit MowisAI (kills socket server)\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /version               — Show version info\n  /orchestrator          — Enable orchestration mode (forces all prompts to use orchestrator)\n  /development           — Toggle development log view (shows all internal logs)\n  /kill-socket           — Explicitly kill the socket server\n  /socket status         — Show socket server status\n  /socket restart        — Restart the socket server\n  /help                  — Show this message".into(),
+                    content: "Commands:\n  /quit                  — Exit MowisAI (kills socket server)\n  /clear                 — Clear chat history\n  /config                — Show current configuration\n  /version               — Show version info\n  /orchestrator          — Enable orchestration mode\n  /development           — Toggle development log view\n  /setup                 — Instructions to reset/re-run setup\n  /socket status         — Show socket server status\n  /socket restart        — Restart the socket server\n  /help                  — Show this message".into(),
                     timestamp: now(),
                 });
             }
@@ -308,6 +324,13 @@ impl App {
                         if self.orchestrator_mode_enabled { "ON ✓" } else { "OFF" },
                         self.socket_pid.map_or("unknown".to_string(), |p| p.to_string())
                     ),
+                    timestamp: now(),
+                });
+            }
+            "/setup" => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "To re-run the setup wizard:\n 1. Exit MowisAI (/quit)\n 2. Delete the config: rm ~/.mowisai/config.toml\n 3. Restart the application.".into(),
                     timestamp: now(),
                 });
             }
@@ -530,6 +553,103 @@ impl App {
                     })
                     .ok();
             }
+            crate::config::AiProvider::Groq => {
+                self.conversation_history.push(serde_json::json!({
+                    "role": "user",
+                    "content": user_text
+                }));
+
+                let api_key = match self.config.groq_api_key() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        self.messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: format!("Error loading Groq API key: {}", e),
+                            timestamp: now(),
+                        });
+                        self.is_loading = false;
+                        return;
+                    }
+                };
+                let model = self.config.model.clone();
+                let messages = self.conversation_history.clone();
+
+                std::thread::Builder::new()
+                    .name("groq-stream".into())
+                    .spawn(move || {
+                        if let Some(tx) = tx {
+                            if let Err(e) = crate::groq_agent::stream_chat(&api_key, &model, &messages, tx.clone()) {
+                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                            }
+                        }
+                    })
+                    .ok();
+            }
+            crate::config::AiProvider::Anthropic => {
+                self.conversation_history.push(serde_json::json!({
+                    "role": "user",
+                    "content": user_text
+                }));
+
+                let api_key = self.config.anthropic_api_key().unwrap_or_default();
+                let model = self.config.model.clone();
+                let messages = self.conversation_history.clone();
+
+                std::thread::Builder::new()
+                    .name("anthropic-stream".into())
+                    .spawn(move || {
+                        if let Some(tx) = tx {
+                            if let Err(e) = crate::anthropic_agent::stream_chat(&api_key, &model, &messages, tx.clone()) {
+                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                            }
+                        }
+                    })
+                    .ok();
+            }
+            crate::config::AiProvider::OpenAi => {
+                self.conversation_history.push(serde_json::json!({
+                    "role": "user",
+                    "content": user_text
+                }));
+
+                let api_key = self.config.openai_api_key().unwrap_or_default();
+                let model = self.config.model.clone();
+                let messages = self.conversation_history.clone();
+
+                std::thread::Builder::new()
+                    .name("openai-stream".into())
+                    .spawn(move || {
+                        if let Some(tx) = tx {
+                            // Use Groq's stream helper as it is OpenAI compatible
+                            let url = "https://api.openai.com/v1/chat/completions";
+                            if let Err(e) = crate::openai_agent::stream_chat_custom(&api_key, &model, &messages, url, tx.clone()) {
+                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                            }
+                        }
+                    })
+                    .ok();
+            }
+            crate::config::AiProvider::Gemini => {
+                self.conversation_history.push(serde_json::json!({
+                    "role": "user",
+                    "parts": [{ "text": user_text }]
+                }));
+
+                let api_key = self.config.gemini_api_key().unwrap_or_default();
+                let model = self.config.model.clone();
+                let contents = self.conversation_history.clone();
+
+                std::thread::Builder::new()
+                    .name("gemini-api-stream".into())
+                    .spawn(move || {
+                        if let Some(tx) = tx {
+                            if let Err(e) = crate::gemini_agent::stream_chat(&api_key, &model, &contents, tx.clone()) {
+                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                            }
+                        }
+                    })
+                    .ok();
+            }
             crate::config::AiProvider::VertexAi => {
                 // Vertex AI uses Gemini content format (role / parts).
                 self.conversation_history.push(serde_json::json!({
@@ -717,13 +837,15 @@ impl App {
         if let Some(last) = self.messages.last() {
             if last.role == MessageRole::Assistant {
                 let content = last.content.clone();
-                // Append in the format the active provider expects for multi-turn history.
                 let history_msg = match self.config.provider {
-                    crate::config::AiProvider::Grok => serde_json::json!({
+                    crate::config::AiProvider::Grok | 
+                    crate::config::AiProvider::Groq |
+                    crate::config::AiProvider::Anthropic |
+                    crate::config::AiProvider::OpenAi => serde_json::json!({
                         "role": "assistant",
                         "content": content
                     }),
-                    crate::config::AiProvider::VertexAi => serde_json::json!({
+                    crate::config::AiProvider::VertexAi | crate::config::AiProvider::Gemini => serde_json::json!({
                         "role": "model",
                         "parts": [{ "text": content }]
                     }),
@@ -825,9 +947,26 @@ impl App {
 
     pub fn on_gemini_error(&mut self, error: String) {
         self.is_loading = false;
+        let mut content = format!("Error: {}", error);
+
+        if error.contains("Incorrect API key") || error.contains("401") || error.contains("invalid_api_key") {
+            let portal = match self.config.provider {
+                crate::config::AiProvider::VertexAi => "Google Cloud Console",
+                crate::config::AiProvider::Grok => "console.x.ai",
+                crate::config::AiProvider::Groq => "console.groq.com",
+                crate::config::AiProvider::Anthropic => "console.anthropic.com",
+                crate::config::AiProvider::OpenAi => "platform.openai.com",
+                crate::config::AiProvider::Gemini => "aistudio.google.com",
+            };
+            content.push_str(&format!(
+                "\n\nHint: Your API key appears to be invalid for {}. Check your credentials at {}. Type /setup to reset.",
+                self.config.provider, portal
+            ));
+        }
+
         self.messages.push(ChatMessage {
             role: MessageRole::System,
-            content: format!("Error: {}", error),
+            content,
             timestamp: now(),
         });
     }

@@ -7,6 +7,10 @@ use anyhow::{Result, Context};
 pub enum AiProvider {
     VertexAi,
     Grok,
+    Groq,
+    Anthropic,
+    OpenAi,
+    Gemini,
 }
 
 impl Default for AiProvider {
@@ -20,6 +24,10 @@ impl std::fmt::Display for AiProvider {
         match self {
             AiProvider::VertexAi => write!(f, "Vertex AI (Google Cloud)"),
             AiProvider::Grok => write!(f, "Grok AI (xAI)"),
+            AiProvider::Groq => write!(f, "Groq (High-speed Inference)"),
+            AiProvider::Anthropic => write!(f, "Anthropic (Claude)"),
+            AiProvider::OpenAi => write!(f, "OpenAI (GPT)"),
+            AiProvider::Gemini => write!(f, "Google Gemini (API Key)"),
         }
     }
 }
@@ -43,6 +51,33 @@ pub struct MowisConfig {
     #[serde(default)]
     pub grok_model: String,
 
+    // ── Groq fields ─────────────────────────────────────────────────────────
+    /// AES-256-GCM encrypted Groq API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groq_api_key_enc: Option<String>,
+
+    /// Groq model selected (e.g. "llama-3.3-70b-versatile").
+    #[serde(default)]
+    pub groq_model: String,
+
+    // ── Anthropic fields ────────────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key_enc: Option<String>,
+    #[serde(default)]
+    pub anthropic_model: String,
+
+    // ── OpenAI fields ───────────────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_api_key_enc: Option<String>,
+    #[serde(default)]
+    pub openai_model: String,
+
+    // ── Gemini (Standalone) fields ──────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_api_key_enc: Option<String>,
+    #[serde(default)]
+    pub gemini_model: String,
+
     // ── Shared fields ───────────────────────────────────────────────────────
     pub socket_path: String,
     /// Active model identifier (Gemini model for VertexAi, Grok model for Grok).
@@ -60,6 +95,14 @@ impl Default for MowisConfig {
             gcp_project_id: String::new(),
             grok_api_key_enc: None,
             grok_model: String::new(),
+            groq_api_key_enc: None,
+            groq_model: String::new(),
+            anthropic_api_key_enc: None,
+            anthropic_model: String::new(),
+            openai_api_key_enc: None,
+            openai_model: String::new(),
+            gemini_api_key_enc: None,
+            gemini_model: String::new(),
             socket_path: "/tmp/mowisai.sock".into(),
             model: "gemini-2.5-pro".into(),
             max_agents: 1000,
@@ -125,11 +168,48 @@ impl MowisConfig {
         crate::crypto::decrypt(enc)
     }
 
+    /// Returns the decrypted Groq API key.
+    pub fn groq_api_key(&self) -> Result<String> {
+        let enc = self.groq_api_key_enc.as_deref()
+            .ok_or_else(|| anyhow::anyhow!("No Groq API key configured"))?;
+        crate::crypto::decrypt(enc)
+    }
+
+    pub fn anthropic_api_key(&self) -> Result<String> {
+        let enc = self.anthropic_api_key_enc.as_deref()
+            .ok_or_else(|| anyhow::anyhow!("No Anthropic API key configured"))?;
+        crate::crypto::decrypt(enc)
+    }
+
+    pub fn openai_api_key(&self) -> Result<String> {
+        let enc = self.openai_api_key_enc.as_deref()
+            .ok_or_else(|| anyhow::anyhow!("No OpenAI API key configured"))?;
+        crate::crypto::decrypt(enc)
+    }
+
+    pub fn gemini_api_key(&self) -> Result<String> {
+        let enc = self.gemini_api_key_enc.as_deref()
+            .ok_or_else(|| anyhow::anyhow!("No Gemini API key configured"))?;
+        crate::crypto::decrypt(enc)
+    }
+
     pub fn is_valid(&self) -> bool {
         match self.provider {
             AiProvider::VertexAi => !self.gcp_project_id.is_empty(),
             AiProvider::Grok => {
                 self.grok_api_key_enc.is_some() && !self.grok_model.is_empty()
+            }
+            AiProvider::Groq => {
+                self.groq_api_key_enc.is_some() && !self.groq_model.is_empty()
+            }
+            AiProvider::Anthropic => {
+                self.anthropic_api_key_enc.is_some() && !self.anthropic_model.is_empty()
+            }
+            AiProvider::OpenAi => {
+                self.openai_api_key_enc.is_some() && !self.openai_model.is_empty()
+            }
+            AiProvider::Gemini => {
+                self.gemini_api_key_enc.is_some() && !self.gemini_model.is_empty()
             }
         }
     }
