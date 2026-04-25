@@ -33,9 +33,8 @@ pub async fn plan_task(
     if prompt.is_empty() {
         return Err(anyhow!("Planner: Prompt cannot be empty"));
     }
-    if !project_root.exists() {
-        return Err(anyhow!("Planner: Project root does not exist: {:?}", project_root));
-    }
+    std::fs::create_dir_all(project_root)
+        .with_context(|| format!("Planner: Failed to create project root: {:?}", project_root))?;
     if project_id.is_empty() {
         return Err(anyhow!("Planner: Project ID cannot be empty"));
     }
@@ -78,9 +77,8 @@ pub async fn plan_task_standard(
     if prompt.is_empty() {
         return Err(anyhow!("Planner: Prompt cannot be empty"));
     }
-    if !project_root.exists() {
-        return Err(anyhow!("Planner: Project root does not exist: {:?}", project_root));
-    }
+    std::fs::create_dir_all(project_root)
+        .with_context(|| format!("Planner: Failed to create project root: {:?}", project_root))?;
     if project_id.is_empty() {
         return Err(anyhow!("Planner: Project ID cannot be empty"));
     }
@@ -214,10 +212,9 @@ pub fn scan_directory_tree_pub(root: &Path) -> Result<String> {
 
 /// Scan directory tree using shell command (fast, no LLM)
 fn scan_directory_tree(root: &Path) -> Result<String> {
-    // Validate root path exists
-    if !root.exists() {
-        return Err(anyhow!("Project root does not exist: {:?}", root));
-    }
+    // Create root path if it doesn't exist
+    std::fs::create_dir_all(root)
+        .with_context(|| format!("Failed to create project root directory: {:?}", root))?;
 
     #[cfg(target_os = "linux")]
     {
