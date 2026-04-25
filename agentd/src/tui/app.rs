@@ -1331,7 +1331,9 @@ impl App {
         self.orch_completed = 0;
         self.orch_total = 0;
         self.view_mode = MainView::Chat;
-        self.save_selector = None;
+        // Do NOT clear save_selector here — on_orch_complete sets it just before
+        // on_orch_done fires, and clearing it here would immediately destroy the
+        // overlay.  The selector is cleared by execute_save_option, /discard, or Esc.
     }
 
     pub fn on_gemini_error(&mut self, error: String) {
