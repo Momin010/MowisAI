@@ -77,6 +77,7 @@ mod tests {
             scope: "".to_string(),
             tools: vec!["read_file".to_string()],
             max_agents: 10,
+            image: None,
         };
 
         // Create sandbox layer
@@ -114,6 +115,7 @@ mod tests {
             scope: "".to_string(),
             tools: vec!["read_file".to_string()],
             max_agents: 10,
+            image: None,
         };
 
         topology.create_sandbox_layer(&sandbox_config).await.unwrap();
@@ -462,6 +464,7 @@ mod tests {
                 "run_command".to_string(),
             ],
             max_agents: 5,
+            image: None,
         };
 
         topology.create_sandbox_layer(&sandbox_config).await.unwrap();

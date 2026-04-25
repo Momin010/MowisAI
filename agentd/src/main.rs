@@ -49,6 +49,23 @@ fn main() -> Result<()> {
             tokio::runtime::Runtime::new()?.block_on(cmd.run())?;
         }
         None => {
+            // Verify skopeo is installed (required for container image pulls)
+            if !std::process::Command::new("skopeo")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                eprintln!("Error: skopeo is not installed. MowisAI uses skopeo to pull container images.\n");
+                eprintln!("Install it with:");
+                eprintln!("  Alpine/Codespaces:  sudo apk add skopeo");
+                eprintln!("  Ubuntu/Debian:      sudo apt-get install -y skopeo");
+                eprintln!("  Fedora/RHEL:        sudo dnf install -y skopeo");
+                eprintln!("  macOS (Homebrew):   brew install skopeo");
+                eprintln!("\nThen re-run MowisAI.");
+                std::process::exit(1);
+            }
+
             // Run TUI
             let log_path = MowisConfig::config_dir().join("mowisai.log");
             let _ = libagent::logging::init(&log_path);

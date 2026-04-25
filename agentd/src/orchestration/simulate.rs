@@ -769,6 +769,7 @@ impl SimulateCommand {
                     "run_command".to_string(),
                 ],
                 max_agents: (self.max_agents / self.sandboxes).max(1),
+                image: None,
             };
 
             topology.create_sandbox_layer(&config).await

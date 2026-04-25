@@ -792,6 +792,7 @@ impl NewOrchestrator {
                 "git_commit".to_string(),
             ],
             max_agents: 1,
+            image: Some("alpine".to_string()),
         };
         topology.create_sandbox_layer(&sandbox).await
             .context("Simple mode: failed to create sandbox layer")?;
