@@ -106,12 +106,49 @@ pub(crate) fn trace(msg: &str) {
 
 // ── Vertex / gcloud (shared by planner, agent_runner, orchestrator) ────────
 
+/// Locate the `gcloud` binary by trying a list of well-known paths.
+/// Under `sudo` the PATH is stripped, so the plain `gcloud` name may not
+/// resolve even when the SDK is installed.
+#[cfg(unix)]
+fn find_gcloud() -> Option<std::path::PathBuf> {
+    let candidates = [
+        "gcloud",
+        "/usr/lib/google-cloud-sdk/bin/gcloud",
+        "/usr/local/lib/google-cloud-sdk/bin/gcloud",
+        "/home/codespace/google-cloud-sdk/bin/gcloud",
+        "/root/google-cloud-sdk/bin/gcloud",
+        "/opt/google-cloud-sdk/bin/gcloud",
+        "/snap/bin/gcloud",
+    ];
+    for candidate in &candidates {
+        let path = std::path::Path::new(candidate);
+        if path.is_absolute() {
+            if path.exists() {
+                return Some(path.to_path_buf());
+            }
+        } else {
+            // Try spawning it to see if it's on PATH
+            if std::process::Command::new(candidate)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                return Some(std::path::PathBuf::from(candidate));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(unix)]
 pub(crate) fn gcloud_access_token() -> anyhow::Result<String> {
     use anyhow::{anyhow, Context};
     use std::process::Command;
     trace("gcloud auth print-access-token: starting");
-    let out = Command::new("gcloud")
+    let gcloud = find_gcloud()
+        .ok_or_else(|| anyhow!("gcloud not found. Install Google Cloud SDK and run: gcloud auth application-default login"))?;
+    let out = Command::new(&gcloud)
         .args(["auth", "print-access-token"])
         .output()
         .context("spawn gcloud — is it installed and on PATH? Install with: gcloud auth application-default login")?;
