@@ -359,7 +359,12 @@ impl TopologyManager {
                             stdout.len(),
                             &agent_id[..8.min(agent_id.len())]
                         );
-                        return Self::normalize_no_index_diff(&stdout, &project_base, &workspace_root);
+                        let filtered = Self::filter_git_internals(&stdout);
+                        if filtered.trim().is_empty() {
+                            log::info!("  ℹ️  Host diff empty after filtering for agent {} — no changes", &agent_id[..8.min(agent_id.len())]);
+                            return Ok(String::new());
+                        }
+                        return Self::normalize_no_index_diff(&filtered, &project_base, &workspace_root);
                     }
                     // No diff → workspace identical to project — agent made no changes
                     log::info!("  ℹ️  Host diff empty for agent {} — no changes", &agent_id[..8.min(agent_id.len())]);
@@ -503,6 +508,25 @@ impl TopologyManager {
             &agent_id[..8.min(agent_id.len())]
         );
         Ok(String::new())
+    }
+
+    /// Remove .git/ internal files from a raw `git diff --no-index` output.
+    fn filter_git_internals(diff: &str) -> String {
+        let mut result = String::new();
+        let mut skip_section = false;
+
+        for line in diff.lines() {
+            if line.starts_with("diff --git ") {
+                skip_section = line.contains("/.git/")
+                    || line.contains(" b/.git/")
+                    || line.contains(" a/.git/");
+            }
+            if !skip_section {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+        result
     }
 
     fn normalize_no_index_diff(raw_diff: &str, project_base: &std::path::Path, workspace_root: &std::path::Path) -> Result<String> {
