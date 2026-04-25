@@ -231,6 +231,10 @@ pub struct SandboxConfig {
     pub scope: String, // Filesystem scope (e.g., "src/backend/")
     pub tools: Vec<String>, // Tools available to agents in this sandbox
     pub max_agents: usize,
+    /// Optional OS image to pass to agentd create_sandbox (e.g. "alpine").
+    /// When None, agentd creates a plain tmpfs sandbox (no image needed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 /// Sandbox topology produced by Fast Planner (Layer 1)

@@ -93,8 +93,7 @@ impl TopologyManager {
     /// Create sandbox via agentd socket API
     pub async fn create_sandbox_layer(&self, config: &SandboxConfig) -> Result<()> {
         // Call agentd to create sandbox with project root mounted.
-        // No "image" field — socket server creates a plain tmpfs sandbox (no skopeo needed).
-        let request = json!({
+        let mut request = json!({
             "request_type": "create_sandbox",
             "packages": config.tools.iter()
                 .filter_map(|tool| self.tool_to_package(tool))
@@ -102,6 +101,12 @@ impl TopologyManager {
             "project_root": self.project_root.to_string_lossy(),
             "scope": config.scope.clone(),
         });
+
+        // Include the "image" field if the sandbox config specifies one.
+        // The socket server's SocketRequest uses the field name "image".
+        if let Some(ref img) = config.image {
+            request["image"] = serde_json::Value::String(img.clone());
+        }
 
         let socket_path = self.socket_path.clone();
         let response = tokio::task::spawn_blocking(move || {
@@ -350,12 +355,25 @@ impl TopologyManager {
     }
 
     fn normalize_no_index_diff(raw_diff: &str, project_base: &std::path::Path, workspace_root: &std::path::Path) -> Result<String> {
-        let base = project_base.to_string_lossy().replace('\\', "/");
-        let workspace = workspace_root.to_string_lossy().replace('\\', "/");
+        // Strip trailing "/." or "/" so "/tmp/foo/." and "/tmp/foo" both normalize the same way.
+        let clean = |p: &std::path::Path| -> String {
+            let s = p.to_string_lossy().replace('\\', "/");
+            let s = s.trim_end_matches('.');
+            let s = s.trim_end_matches('/');
+            s.to_string()
+        };
+        let base_str = clean(project_base);
+        let workspace_str = clean(workspace_root);
+        let base_slash = format!("{}/", base_str);
+        let workspace_slash = format!("{}/", workspace_str);
         let mut normalized = String::new();
 
         for line in raw_diff.lines() {
-            let mut updated = line.replace(&base, "a").replace(&workspace, "b");
+            let mut updated = line
+                .replace(&base_slash, "a/")
+                .replace(&workspace_slash, "b/")
+                .replace(&base_str, "a")
+                .replace(&workspace_str, "b");
             if let Some(rest) = updated.strip_prefix("diff --git ") {
                 let mut parts = rest.split_whitespace();
                 if let (Some(lhs), Some(rhs)) = (parts.next(), parts.next()) {
