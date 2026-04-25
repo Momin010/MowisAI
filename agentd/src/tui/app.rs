@@ -1,4 +1,4 @@
-use crate::config::MowisConfig;
+﻿use crate::config::MowisConfig;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::mpsc;
 use super::event::{OrchActivityEvent, TuiEvent};
@@ -22,6 +22,21 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SaveOption {
+    CurrentDir,
+    SpecificPath,
+    CreateFolder,
+}
+
+#[derive(Debug, Clone)]
+pub struct SaveSelector {
+    pub selected: usize,
+    pub custom_path_input: String,
+    pub custom_path_cursor: usize,
+    pub typing_path: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -65,8 +80,8 @@ pub struct App {
     /// be saved.  Set by `on_orch_complete()`, cleared once the user saves or
     /// discards it via `/save` / `/discard`.
     pub pending_diff: Option<String>,
-    /// True while we're waiting for the user to provide a save path.
-    pub awaiting_save_path: bool,
+    /// Interactive save selector overlay (replaces awaiting_save_path).
+    pub save_selector: Option<SaveSelector>,
 }
 
 impl App {
@@ -101,7 +116,7 @@ impl App {
             dev_mode_active: false,
             mode_override: None,
             pending_diff: None,
-            awaiting_save_path: false,
+            save_selector: None,
         };
 
         let welcome_line2 = match app.config.provider {
@@ -137,7 +152,7 @@ impl App {
                 "Welcome to MowisAI! Type your message below and press Enter.\n\
                  {}\n\
                  Just describe what you want to build — orchestration triggers automatically.\n\
-                 Type /help for commands, /mode to control orchestration depth, /quit to exit.",
+                 Type /help for commands, /mode to control orchestration depth, /quit to exit.”,
                 welcome_line2
             ),
             timestamp: now(),
@@ -156,6 +171,57 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+
+        // Save selector overlay intercepts all keys when active
+        if let Some(ref mut sel) = self.save_selector {
+            match key.code {
+                KeyCode::Esc => {
+                    self.save_selector = None;
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "Save cancelled. Run /save to try again, or /discard to throw away.".into(),
+                        timestamp: now(),
+                    });
+                }
+                KeyCode::Up => {
+                    if !sel.typing_path {
+                        sel.selected = sel.selected.saturating_sub(1);
+                    }
+                }
+                KeyCode::Down => {
+                    if !sel.typing_path {
+                        sel.selected = (sel.selected + 1).min(2);
+                    }
+                }
+                KeyCode::Enter => {
+                    if sel.selected == 1 && !sel.typing_path {
+                        sel.typing_path = true;
+                    } else {
+                        let selected = sel.selected;
+                        let custom_path = sel.custom_path_input.clone();
+                        self.save_selector = None;
+                        self.execute_save_option(selected, custom_path);
+                    }
+                }
+                KeyCode::Char(c) if sel.typing_path => {
+                    sel.custom_path_input.insert(sel.custom_path_cursor, c);
+                    sel.custom_path_cursor += c.len_utf8();
+                }
+                KeyCode::Backspace if sel.typing_path => {
+                    if sel.custom_path_cursor > 0 {
+                        let prev = sel.custom_path_input[..sel.custom_path_cursor]
+                            .char_indices()
+                            .next_back()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        sel.custom_path_input.remove(prev);
+                        sel.custom_path_cursor = prev;
+                    }
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -242,6 +308,38 @@ impl App {
             _ => {}
         }
     }
+    fn execute_save_option(&mut self, option: usize, custom_path: String) {
+        match option {
+            0 => {
+                // Save to current directory
+                self.handle_save(".".to_string());
+            }
+            1 => {
+                // Save to specific path
+                if custom_path.trim().is_empty() {
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "No path entered. Code discarded. Run the build again to retry.".into(),
+                        timestamp: now(),
+                    });
+                    self.pending_diff = None;
+                } else {
+                    self.handle_save(custom_path);
+                }
+            }
+            2 => {
+                // Create folder in CWD
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let folder_name = format!("mowisai-output-{}", ts);
+                self.handle_save(folder_name);
+            }
+            _ => {}
+        }
+    }
+
 
     fn submit_input(&mut self) {
         let text = self.input_text.trim().to_string();
@@ -255,17 +353,6 @@ impl App {
 
         if text.starts_with('/') {
             self.handle_command(&text);
-            return;
-        }
-
-        // If we're waiting for a save path, treat non-slash input as a folder name
-        if self.awaiting_save_path {
-            self.messages.push(ChatMessage {
-                role: MessageRole::User,
-                content: text.clone(),
-                timestamp: now(),
-            });
-            self.handle_save(text);
             return;
         }
 
@@ -297,7 +384,7 @@ impl App {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!(
-                        "🔨 Build request detected{} — launching orchestration...",
+                        "ðŸ”¨ Build request detected{} â€” launching orchestration...",
                         mode_label
                     ),
                     timestamp: now(),
@@ -340,35 +427,35 @@ impl App {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: "Commands:\n\
-                        \n  ── Saving Output ──────────────────────────────────────────\
-                        \n  /save .                — Apply generated code into the CURRENT directory\
-                        \n  /save <folder>         — Write generated code into a new folder\
-                        \n  /discard               — Throw away the pending generated code\
+                        \n  â”€â”€ Saving Output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\
+                        \n  /save .                â€” Apply generated code into the CURRENT directory\
+                        \n  /save <folder>         â€” Write generated code into a new folder\
+                        \n  /discard               â€” Throw away the pending generated code\
                         \n\
-                        \n  ── Orchestration ─────────────────────────────────────────\
-                        \n  /mode simple           — Force Simple mode (1 agent, no verification)\
-                        \n  /mode standard         — Force Standard mode (few agents, 1 verify round)\
-                        \n  /mode full             — Force Full mode (complete 7-layer pipeline)\
-                        \n  /mode auto             — Auto-classify mode (default, uses complexity scorer)\
-                        \n  /mode                  — Show current mode override\
-                        \n  /orchestrator          — Toggle: force ALL messages to trigger orchestration\
+                        \n  â”€â”€ Orchestration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\
+                        \n  /mode simple           â€” Force Simple mode (1 agent, no verification)\
+                        \n  /mode standard         â€” Force Standard mode (few agents, 1 verify round)\
+                        \n  /mode full             â€” Force Full mode (complete 7-layer pipeline)\
+                        \n  /mode auto             â€” Auto-classify mode (default, uses complexity scorer)\
+                        \n  /mode                  â€” Show current mode override\
+                        \n  /orchestrator          â€” Toggle: force ALL messages to trigger orchestration\
                         \n\
-                        \n  ── General ────────────────────────────────────────────────\
-                        \n  /clear                 — Clear chat history\
-                        \n  /config                — Show current configuration\
-                        \n  /version               — Show version info\
-                        \n  /development           — Toggle development log view\
-                        \n  /kill-socket           — Kill the socket server\
-                        \n  /socket status         — Show socket server status\
-                        \n  /socket restart        — Restart the socket server\
-                        \n  /quit                  — Exit MowisAI\
-                        \n  /help                  — Show this message".into(),
+                        \n  â”€â”€ General â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\
+                        \n  /clear                 â€” Clear chat history\
+                        \n  /config                â€” Show current configuration\
+                        \n  /version               â€” Show version info\
+                        \n  /development           â€” Toggle development log view\
+                        \n  /kill-socket           â€” Kill the socket server\
+                        \n  /socket status         â€” Show socket server status\
+                        \n  /socket restart        â€” Restart the socket server\
+                        \n  /quit                  â€” Exit MowisAI\
+                        \n  /help                  â€” Show this message".into(),
                     timestamp: now(),
                 });
             }
             "/config" => {
                 let mode_str = match &self.mode_override {
-                    Some(m) => format!("forced → {}", m),
+                    Some(m) => format!("forced â†’ {}", m),
                     None => "auto (complexity classifier)".to_string(),
                 };
                 self.messages.push(ChatMessage {
@@ -380,7 +467,7 @@ impl App {
                         self.config.model,
                         self.config.socket_path,
                         self.config.max_agents,
-                        if self.orchestrator_mode_enabled { "ON ✓" } else { "OFF" },
+                        if self.orchestrator_mode_enabled { "ON âœ“" } else { "OFF" },
                         mode_str,
                         self.socket_pid.map_or("unknown".to_string(), |p| p.to_string())
                     ),
@@ -409,11 +496,11 @@ impl App {
             }
             "/orchestrator" => {
                 self.orchestrator_mode_enabled = !self.orchestrator_mode_enabled;
-                let status = if self.orchestrator_mode_enabled { "ON ✓" } else { "OFF" };
+                let status = if self.orchestrator_mode_enabled { "ON âœ“" } else { "OFF" };
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!(
-                        "🔧 Orchestrator Mode: {}\n\
+                        "ðŸ”§ Orchestrator Mode: {}\n\
                          All subsequent messages will trigger orchestration (no chat responses).\n\
                          Use /orchestrator again to disable.",
                         status
@@ -423,17 +510,17 @@ impl App {
             }
             "/mode" => {
                 let current = match &self.mode_override {
-                    Some(m) => format!("forced → {}", m),
+                    Some(m) => format!("forced â†’ {}", m),
                     None => "auto (complexity classifier)".to_string(),
                 };
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!(
                         "Current orchestration mode: {}\n\
-                         \n  /mode simple    — 1 agent, no planner, no merge, no verification\
-                         \n  /mode standard  — constrained planner, ≤3 agents, 1 verify round\
-                         \n  /mode full      — complete 7-layer pipeline\
-                         \n  /mode auto      — auto-classify based on task complexity (default)",
+                         \n  /mode simple    â€” 1 agent, no planner, no merge, no verification\
+                         \n  /mode standard  â€” constrained planner, â‰¤3 agents, 1 verify round\
+                         \n  /mode full      â€” complete 7-layer pipeline\
+                         \n  /mode auto      â€” auto-classify based on task complexity (default)",
                         current
                     ),
                     timestamp: now(),
@@ -443,7 +530,7 @@ impl App {
                 self.mode_override = None;
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "✓ Mode: auto — complexity classifier will decide Simple/Standard/Full automatically.".into(),
+                    content: "âœ“ Mode: auto â€” complexity classifier will decide Simple/Standard/Full automatically.".into(),
                     timestamp: now(),
                 });
             }
@@ -451,8 +538,8 @@ impl App {
                 self.mode_override = Some(crate::orchestration::ComplexityMode::Simple);
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "✓ Mode locked: simple\n\
-                        Next build request → 1 agent, no planner, no merge, no verification.\n\
+                    content: "âœ“ Mode locked: simple\n\
+                        Next build request â†’ 1 agent, no planner, no merge, no verification.\n\
                         Use /mode auto to return to automatic classification.".into(),
                     timestamp: now(),
                 });
@@ -461,8 +548,8 @@ impl App {
                 self.mode_override = Some(crate::orchestration::ComplexityMode::Standard);
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "✓ Mode locked: standard\n\
-                        Next build request → constrained planner, ≤3 agents, 1 verification round.\n\
+                    content: "âœ“ Mode locked: standard\n\
+                        Next build request â†’ constrained planner, â‰¤3 agents, 1 verification round.\n\
                         Use /mode auto to return to automatic classification.".into(),
                     timestamp: now(),
                 });
@@ -471,8 +558,8 @@ impl App {
                 self.mode_override = Some(crate::orchestration::ComplexityMode::Full);
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "✓ Mode locked: full\n\
-                        Next build request → complete 7-layer pipeline (all sandboxes, full verification).\n\
+                    content: "âœ“ Mode locked: full\n\
+                        Next build request â†’ complete 7-layer pipeline (all sandboxes, full verification).\n\
                         Use /mode auto to return to automatic classification.".into(),
                     timestamp: now(),
                 });
@@ -501,7 +588,7 @@ impl App {
                 }
             }
             "/socket status" => {
-                let status = if self.socket_pid.is_some() { "RUNNING ✓" } else { "STOPPED ✗" };
+                let status = if self.socket_pid.is_some() { "RUNNING âœ“" } else { "STOPPED âœ—" };
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!(
@@ -532,14 +619,14 @@ impl App {
                             self.socket_pid = Some(new_pid);
                             self.messages.push(ChatMessage {
                                 role: MessageRole::System,
-                                content: format!("✓ Socket server restarted successfully (PID: {})", new_pid),
+                                content: format!("âœ“ Socket server restarted successfully (PID: {})", new_pid),
                                 timestamp: now(),
                             });
                         }
                         Err(e) => {
                             self.messages.push(ChatMessage {
                                 role: MessageRole::System,
-                                content: format!("✗ Failed to restart socket server: {}", e),
+                                content: format!("âœ— Failed to restart socket server: {}", e),
                                 timestamp: now(),
                             });
                         }
@@ -558,7 +645,7 @@ impl App {
                     self.view_mode = MainView::Development;
                     self.messages.push(ChatMessage {
                         role: MessageRole::System,
-                        content: "Development mode ON — showing all internal logs. Tab cycles Chat → Orchestration → Development. /development to toggle off.".into(),
+                        content: "Development mode ON â€” showing all internal logs. Tab cycles Chat â†’ Orchestration â†’ Development. /development to toggle off.".into(),
                         timestamp: now(),
                     });
                 } else {
@@ -588,14 +675,14 @@ impl App {
                                 let _ = crate::save_socket_pid(pid);
                                 self.messages.push(ChatMessage {
                                     role: MessageRole::System,
-                                    content: format!("✓ Connected to existing socket server (PID: {})", pid),
+                                    content: format!("âœ“ Connected to existing socket server (PID: {})", pid),
                                     timestamp: now(),
                                 });
                             }
                             Err(_) => {
                                 self.messages.push(ChatMessage {
                                     role: MessageRole::System,
-                                    content: "✓ Socket server is responsive but PID unknown".into(),
+                                    content: "âœ“ Socket server is responsive but PID unknown".into(),
                                     timestamp: now(),
                                 });
                             }
@@ -607,14 +694,14 @@ impl App {
                                 self.socket_pid = Some(pid);
                                 self.messages.push(ChatMessage {
                                     role: MessageRole::System,
-                                    content: format!("🚀 Socket server started successfully (PID: {})", pid),
+                                    content: format!("ðŸš€ Socket server started successfully (PID: {})", pid),
                                     timestamp: now(),
                                 });
                             }
                             Err(e) => {
                                 self.messages.push(ChatMessage {
                                     role: MessageRole::System,
-                                    content: format!("✗ Failed to start socket server: {}", e),
+                                    content: format!("âœ— Failed to start socket server: {}", e),
                                     timestamp: now(),
                                 });
                             }
@@ -625,16 +712,16 @@ impl App {
             "/discard" => {
                 if self.pending_diff.is_some() {
                     self.pending_diff = None;
-                    self.awaiting_save_path = false;
+                    self.save_selector = None;
                     self.messages.push(ChatMessage {
                         role: MessageRole::System,
-                        content: "🗑️  Generated code discarded.".into(),
+                        content: "ðŸ—‘ï¸  Generated code discarded.".into(),
                         timestamp: now(),
                     });
                 } else {
                     self.messages.push(ChatMessage {
                         role: MessageRole::System,
-                        content: "Nothing to discard — no pending diff.".into(),
+                        content: "Nothing to discard â€” no pending diff.".into(),
                         timestamp: now(),
                     });
                 }
@@ -656,21 +743,21 @@ impl App {
     }
 
     /// Apply the pending diff to `path_arg`.
-    /// - `""` or `"."` → current directory (git apply)
-    /// - anything else  → create that folder then write files from the diff
+    /// - `""` or `"."` â†’ current directory (git apply)
+    /// - anything else  â†’ create that folder then write files from the diff
     fn handle_save(&mut self, path_arg: String) {
         let diff = match self.pending_diff.take() {
             Some(d) => d,
             None => {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: "Nothing to save — run a build first.".into(),
+                    content: "Nothing to save â€” run a build first.".into(),
                     timestamp: now(),
                 });
                 return;
             }
         };
-        self.awaiting_save_path = false;
+        // (save_selector is already cleared by execute_save_option before calling handle_save)
 
         let target = if path_arg.is_empty() || path_arg == "." {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -689,12 +776,12 @@ impl App {
             if let Err(e) = std::fs::create_dir_all(&target) {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: format!("✗ Failed to create directory {}: {}", target.display(), e),
+                    content: format!("âœ— Failed to create directory {}: {}", target.display(), e),
                     timestamp: now(),
                 });
                 // Put the diff back so they can try again
                 self.pending_diff = Some(diff);
-                self.awaiting_save_path = true;
+                self.save_selector = Some(SaveSelector { selected: 0, custom_path_input: String::new(), custom_path_cursor: 0, typing_path: false });
                 return;
             }
         }
@@ -706,7 +793,7 @@ impl App {
         if Self::try_git_apply(&target, &diff) {
             self.messages.push(ChatMessage {
                 role: MessageRole::System,
-                content: format!("✅ Code saved to {} via git apply.", target_str),
+                content: format!("âœ… Code saved to {} via git apply.", target_str),
                 timestamp: now(),
             });
             return;
@@ -719,8 +806,8 @@ impl App {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: format!(
-                        "✅ Diff saved to {}\n\
-                         (git apply failed — saved as raw patch file instead)\n\
+                        "âœ… Diff saved to {}\n\
+                         (git apply failed â€” saved as raw patch file instead)\n\
                          To apply manually: cd {} && git apply mowisai_output.patch",
                         patch_path.display(),
                         target_str
@@ -731,12 +818,12 @@ impl App {
             Err(e) => {
                 self.messages.push(ChatMessage {
                     role: MessageRole::System,
-                    content: format!("✗ Failed to write patch file: {}", e),
+                    content: format!("âœ— Failed to write patch file: {}", e),
                     timestamp: now(),
                 });
                 // Put the diff back so they can try a different path
                 self.pending_diff = Some(diff);
-                self.awaiting_save_path = true;
+                self.save_selector = Some(SaveSelector { selected: 0, custom_path_input: String::new(), custom_path_cursor: 0, typing_path: false });
             }
         }
     }
@@ -963,7 +1050,7 @@ impl App {
 
                 let orchestrator = crate::orchestration::NewOrchestrator::new(orch_config);
 
-                // Forward orchestrator events to TUI (skip Done — main thread sends OrchDone)
+                // Forward orchestrator events to TUI (skip Done â€” main thread sends OrchDone)
                 if let Some(ref tx) = tx {
                     let tx_clone = tx.clone();
                     std::thread::spawn(move || {
@@ -1043,7 +1130,7 @@ impl App {
                     Ok(output) => {
                         if let Some(ref tx) = tx {
                             let summary = format!(
-                                "✅ Orchestration complete!\n\nSummary: {}\nTasks: {} total, {} completed, {} failed",
+                                "âœ… Orchestration complete!\n\nSummary: {}\nTasks: {} total, {} completed, {} failed",
                                 output.summary,
                                 output.scheduler_stats.total_tasks,
                                 output.scheduler_stats.completed,
@@ -1204,15 +1291,15 @@ impl App {
         });
 
         if diff.trim().is_empty() {
-            // Empty diff — agent may have run but diff capture failed, or the agent
+            // Empty diff â€” agent may have run but diff capture failed, or the agent
             // genuinely made no changes (e.g. it only answered in text).
             self.messages.push(ChatMessage {
                 role: MessageRole::System,
-                content: "⚠️  No code changes were captured (empty diff).\n\
+                content: "âš ï¸  No code changes were captured (empty diff).\n\
                     \nThis can happen when:\n\
-                    • The agent wrote files but the diff couldn't be captured (check logs)\n\
-                    • The agent answered in text without writing any files\n\
-                    • The socket server lost the container state\n\
+                    â€¢ The agent wrote files but the diff couldn't be captured (check logs)\n\
+                    â€¢ The agent answered in text without writing any files\n\
+                    â€¢ The socket server lost the container state\n\
                     \nTip: Run /development to see full agent logs on the next run, \
                     or try /mode full for more robust multi-agent execution."
                     .into(),
@@ -1220,16 +1307,16 @@ impl App {
             });
         } else {
             self.pending_diff = Some(diff);
-            self.awaiting_save_path = true;
+            // Open the interactive save selector overlay
+            self.save_selector = Some(SaveSelector {
+                selected: 0,
+                custom_path_input: String::new(),
+                custom_path_cursor: 0,
+                typing_path: false,
+            });
             self.messages.push(ChatMessage {
                 role: MessageRole::System,
-                content: "💾 Where should the generated code be saved?\n\
-                    \n  /save .              — Apply changes into the CURRENT directory\
-                    \n  /save <folder>       — Write everything into a new folder (e.g. /save my-website)\
-                    \n  /discard             — Throw away the generated code\
-                    \n\
-                    \nThe changes are a unified diff — /save will run `git apply` (or write files directly if outside a git repo)."
-                    .into(),
+                content: "Code generated! Use Up/Down to choose where to save, Enter to confirm.".into(),
                 timestamp: now(),
             });
         }
@@ -1244,6 +1331,7 @@ impl App {
         self.orch_completed = 0;
         self.orch_total = 0;
         self.view_mode = MainView::Chat;
+        self.save_selector = None;
     }
 
     pub fn on_gemini_error(&mut self, error: String) {
