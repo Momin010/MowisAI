@@ -66,12 +66,8 @@ pub struct TopologyManager {
 impl TopologyManager {
     /// Create new topology manager
     pub fn new(project_root: PathBuf, socket_path: String) -> Result<Self> {
-        if !project_root.exists() {
-            return Err(anyhow!(
-                "Project root does not exist: {:?}",
-                project_root
-            ));
-        }
+        std::fs::create_dir_all(&project_root)
+            .with_context(|| format!("Failed to create project root directory: {:?}", project_root))?;
 
         Ok(Self {
             socket_path,

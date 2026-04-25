@@ -107,6 +107,8 @@ fn main() -> Result<()> {
             };
 
             let project_root = std::path::PathBuf::from(&cmd.project_root);
+            // Auto-create project root if it doesn't exist
+            std::fs::create_dir_all(&project_root)?;
             let overlay_root = std::env::temp_dir().join("mowisai-overlays");
             let checkpoint_root = std::env::temp_dir().join("mowisai-checkpoints");
             let merge_work_dir = std::env::temp_dir().join("mowisai-merge");
