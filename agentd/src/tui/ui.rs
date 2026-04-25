@@ -1,9 +1,10 @@
-﻿use super::app::{App, MainView, MessageRole, SaveSelector};
+﻿use super::app::{App, MainView, MessageRole};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap},
+    Frame,
 };
 
 const SPINNER_FRAMES: &[&str] = &["\u{28fe}", "\u{28f7}", "\u{28ef}", "\u{289f}", "\u{287f}", "\u{28bf}", "\u{28fb}", "\u{28fd}"];
