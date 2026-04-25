@@ -2,50 +2,65 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sha2::{Digest, Sha256};
 
-/// Derive a 32-byte AES-256 key from stable machine identifiers.
-/// The key is derived from hostname + OS username + a fixed salt so it stays
-/// consistent across process restarts on the same machine but is different on
-/// every other machine — no key ever leaves the host.
-fn machine_key() -> Key<Aes256Gcm> {
-    let hostname = hostname();
-    let username = username();
+/// Path to the machine-id file (created once, never changes on this host).
+fn machine_id_path() -> std::path::PathBuf {
+    crate::config::MowisConfig::config_dir().join("machine-id")
+}
 
+/// Read the machine-id, generating and persisting a random one on first call.
+///
+/// Fails with an error rather than falling back to a predictable constant —
+/// the caller must be able to encrypt/decrypt reliably or not at all.
+fn machine_id() -> Result<String> {
+    let path = machine_id_path();
+
+    if path.exists() {
+        let id = std::fs::read_to_string(&path)
+            .context("reading ~/.mowisai/machine-id")?;
+        let id = id.trim().to_string();
+        if id.is_empty() {
+            bail!("machine-id file is empty — delete ~/.mowisai/machine-id and re-run setup");
+        }
+        return Ok(id);
+    }
+
+    // First run: generate a random 32-byte ID and persist it.
+    let mut raw = [0u8; 32];
+    use aes_gcm::aead::rand_core::RngCore;
+    OsRng.fill_bytes(&mut raw);
+    let id = BASE64.encode(raw);
+
+    let dir = crate::config::MowisConfig::config_dir();
+    std::fs::create_dir_all(&dir).context("creating ~/.mowisai/")?;
+    std::fs::write(&path, &id).context("writing ~/.mowisai/machine-id")?;
+
+    // Restrict to owner-read only — it's the root of key derivation.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400));
+    }
+
+    Ok(id)
+}
+
+/// Derive a 32-byte AES-256 key from the persistent machine-id.
+fn machine_key() -> Result<Key<Aes256Gcm>> {
+    let id = machine_id()?;
     let mut hasher = Sha256::new();
-    hasher.update(hostname.as_bytes());
-    hasher.update(b"|");
-    hasher.update(username.as_bytes());
+    hasher.update(id.as_bytes());
     hasher.update(b"|mowisai-provider-key-v1");
     let bytes: [u8; 32] = hasher.finalize().into();
-    *Key::<Aes256Gcm>::from_slice(&bytes)
-}
-
-fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| {
-            std::process::Command::new("hostname")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| "unknown-host".into())
-        })
-}
-
-fn username() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "unknown-user".into())
+    Ok(*Key::<Aes256Gcm>::from_slice(&bytes))
 }
 
 /// Encrypt `plaintext` with AES-256-GCM.  Returns `"<nonce_b64>:<ciphertext_b64>"`.
 pub fn encrypt(plaintext: &str) -> Result<String> {
-    let key = machine_key();
+    let key = machine_key().context("deriving machine encryption key")?;
     let cipher = Aes256Gcm::new(&key);
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
@@ -74,14 +89,15 @@ pub fn decrypt(encoded: &str) -> Result<String> {
         bail!("invalid nonce length: expected 12 bytes, got {}", nonce_bytes.len());
     }
 
-    let key = machine_key();
+    let key = machine_key().context("deriving machine encryption key")?;
     let cipher = Aes256Gcm::new(&key);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let plaintext = cipher
         .decrypt(nonce, ciphertext.as_ref())
         .map_err(|_| anyhow::anyhow!(
-            "decryption failed — the config was saved on a different machine or is corrupted"
+            "decryption failed — the config was saved on a different machine, \
+             or ~/.mowisai/machine-id was deleted"
         ))?;
 
     String::from_utf8(plaintext).context("decrypted bytes are not valid UTF-8")
