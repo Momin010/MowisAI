@@ -1,4 +1,4 @@
-//! New 7-layer orchestration system entry point
+﻿//! New 7-layer orchestration system entry point
 
 use super::scheduler::{Scheduler, SchedulerStats};
 
@@ -92,9 +92,9 @@ impl NewOrchestrator {
     /// Routing gate: scans the directory tree heuristically (~1ms, no LLM),
     /// classifies complexity, then dispatches to the appropriate mode executor:
     ///
-    /// - **Simple**   → `run_simple()`   — 1 agent, no merge, no verification
-    /// - **Standard** → `run_standard()` — constrained planner, 1 sandbox, 1 verify round
-    /// - **Full**     → `run_full()`     — full 7-layer pipeline (current behaviour)
+    /// - **Simple**   â†’ `run_simple()`   â€” 1 agent, no merge, no verification
+    /// - **Standard** â†’ `run_standard()` â€” constrained planner, 1 sandbox, 1 verify round
+    /// - **Full**     â†’ `run_full()`     â€” full 7-layer pipeline (current behaviour)
     pub async fn run(&self, prompt: &str) -> Result<FinalOutput> {
         let start_time = std::time::Instant::now();
 
@@ -111,7 +111,7 @@ impl NewOrchestrator {
             };
         }
 
-        // ── Routing gate ──────────────────────────────────────────────────────
+        // â”€â”€ Routing gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Scan directory tree once (reused by planner if we call Standard/Full).
         let dir_tree = scan_directory_tree_pub(&self.config.project_root)
             .unwrap_or_default();
@@ -122,7 +122,7 @@ impl NewOrchestrator {
         } else {
             let score = classify_complexity(prompt, &dir_tree);
             log::info!(
-                "Complexity classifier → mode={} (score={}, files≈{}, domains={}, broad_scope={}, cross_service={})",
+                "Complexity classifier â†’ mode={} (score={}, filesâ‰ˆ{}, domains={}, broad_scope={}, cross_service={})",
                 score.mode, score.score, score.file_count, score.domain_count,
                 score.broad_scope, score.cross_service
             );
@@ -146,7 +146,7 @@ impl NewOrchestrator {
             }
         }
 
-        // ── Full mode: Layer 1 ────────────────────────────────────────────────
+        // â”€â”€ Full mode: Layer 1 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         send_event!(OrchestratorEvent::LayerProgress { layer: 1, message: "Planning tasks...".into() });
         log::info!("Layer 1: Planning tasks (full mode)...");
         let planner_output = plan_task(prompt, &self.config.project_root, &self.config.project_id)
@@ -154,7 +154,7 @@ impl NewOrchestrator {
             .context("Fast planner failed")?;
 
         log::info!(
-            "  → Generated {} tasks across {} sandboxes",
+            "  â†’ Generated {} tasks across {} sandboxes",
             planner_output.task_graph.tasks.len(),
             planner_output.sandbox_topology.sandboxes.len()
         );
@@ -169,7 +169,7 @@ impl NewOrchestrator {
 
         for sandbox in &planner_output.sandbox_topology.sandboxes {
             topology.create_sandbox_layer(sandbox).await?;
-            log::info!("  → Created sandbox: {}", sandbox.name);
+            log::info!("  â†’ Created sandbox: {}", sandbox.name);
         }
 
         // Layer 3: Scheduler
@@ -182,7 +182,7 @@ impl NewOrchestrator {
             )?
         );
 
-        log::info!("  → Scheduler ready with {} tasks", planner_output.task_graph.tasks.len());
+        log::info!("  â†’ Scheduler ready with {} tasks", planner_output.task_graph.tasks.len());
 
         // Layer 4: Agent Execution (TRUE PARALLELISM)
         send_event!(OrchestratorEvent::LayerProgress { layer: 4, message: "Executing tasks with agents...".into() });
@@ -205,7 +205,7 @@ impl NewOrchestrator {
         // Dynamic agent cap based on available system resources
         let system_cap = 1000; // Upper safety bound
         let max_concurrent_agents = self.config.max_agents.min(system_cap);
-        log::info!("  → Agent pool: {} concurrent workers (user requested: {}, system cap: {})",
+        log::info!("  â†’ Agent pool: {} concurrent workers (user requested: {}, system cap: {})",
             max_concurrent_agents, self.config.max_agents, system_cap);
 
         let mut handles = Vec::new();
@@ -394,7 +394,7 @@ impl NewOrchestrator {
                             // Sleep container instead of destroying (pool for reuse)
                             let _ = topology_clone.sleep_agent_layer(&agent.agent_id, &sandbox.name).await;
 
-                            log::info!("    ✓ [Worker {}] Completed: {}", worker_id, task_description);
+                            log::info!("    âœ“ [Worker {}] Completed: {}", worker_id, task_description);
 
                             // Break inner loop to try getting another task
                             break;
@@ -435,7 +435,7 @@ impl NewOrchestrator {
 
         // Wait for all workers to complete with timeout
         let worker_timeout = tokio::time::Duration::from_secs(1800); // 30 minute max
-        log::info!("  → Waiting for all workers to complete (max 30 minutes)...");
+        log::info!("  â†’ Waiting for all workers to complete (max 30 minutes)...");
 
         let all_workers = async {
             for handle in handles {
@@ -444,9 +444,9 @@ impl NewOrchestrator {
         };
 
         match tokio::time::timeout(worker_timeout, all_workers).await {
-            Ok(_) => log::info!("  → All workers completed successfully"),
+            Ok(_) => log::info!("  â†’ All workers completed successfully"),
             Err(_) => {
-                log::warn!("  ⚠️  Workers timed out after 30 minutes");
+                log::warn!("  âš ï¸  Workers timed out after 30 minutes");
             }
         }
         let _ = stats_handle.await;
@@ -462,7 +462,7 @@ impl NewOrchestrator {
 
         // Get scheduler stats
         let scheduler_stats = scheduler.get_stats().await;
-        log::info!("  → Completed: {}/{} tasks", scheduler_stats.completed, scheduler_stats.total_tasks);
+        log::info!("  â†’ Completed: {}/{} tasks", scheduler_stats.completed, scheduler_stats.total_tasks);
 
         // Layer 5: Intelligent Merge Review (per sandbox)
         log::info!("Layer 5: Reviewing and merging agent contributions per sandbox...");
@@ -489,7 +489,7 @@ impl NewOrchestrator {
                 .collect();
 
             if contributions.is_empty() {
-                log::info!("  → Sandbox {} has no changes", sandbox_name);
+                log::info!("  â†’ Sandbox {} has no changes", sandbox_name);
                 sandbox_results.insert(
                     sandbox_name.clone(),
                     SandboxResult {
@@ -504,7 +504,7 @@ impl NewOrchestrator {
             }
 
             log::info!(
-                "  → Reviewing {} agent contribution(s) for sandbox: {}",
+                "  â†’ Reviewing {} agent contribution(s) for sandbox: {}",
                 contributions.len(),
                 sandbox_name
             );
@@ -519,7 +519,7 @@ impl NewOrchestrator {
             // Detect conflicts between contributions
             let conflicts = ConflictDetector::detect(&contributions);
             if !conflicts.is_empty() {
-                log::info!("    → Detected {} conflict(s)", conflicts.len());
+                log::info!("    â†’ Detected {} conflict(s)", conflicts.len());
             }
 
             // Review with 5-minute timeout
@@ -528,19 +528,19 @@ impl NewOrchestrator {
 
             let merged_diff = match tokio::time::timeout(review_timeout, review_future).await {
                 Ok(Ok(review_result)) => {
-                    log::info!("    ✓ {}", review_result.summary);
+                    log::info!("    âœ“ {}", review_result.summary);
                     review_result.final_diff
                 }
                 Ok(Err(e)) => {
                     log::warn!(
-                        "  ⚠️  Merge review failed for {}: {}. Falling back to concatenation.",
+                        "  âš ï¸  Merge review failed for {}: {}. Falling back to concatenation.",
                         sandbox_name, e
                     );
                     fallback_diff
                 }
                 Err(_) => {
                     log::warn!(
-                        "  ⚠️  Merge review timed out for {} after 5 minutes. Falling back to concatenation.",
+                        "  âš ï¸  Merge review timed out for {} after 5 minutes. Falling back to concatenation.",
                         sandbox_name
                     );
                     fallback_diff
@@ -605,7 +605,7 @@ impl NewOrchestrator {
                     match tokio::time::timeout(verify_timeout, verify_future).await {
                         Ok(Ok(vr)) => {
                             log::info!(
-                                "  ✓ {} — {:?} ({} passed, {} failed, {} rounds)",
+                                "  âœ“ {} â€” {:?} ({} passed, {} failed, {} rounds)",
                                 sandbox_name,
                                 vr.status,
                                 vr.passed_tests.len(),
@@ -623,13 +623,13 @@ impl NewOrchestrator {
                             verification_status.insert(sandbox_name.clone(), vr.status);
                         }
                         Ok(Err(e)) => {
-                            log::warn!("  ⚠ Verification failed for {}: {}", sandbox_name, e);
+                            log::warn!("  âš  Verification failed for {}: {}", sandbox_name, e);
                             sandbox_result.verification_status = VerificationStatus::Failed;
                             verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
                         }
                         Err(_) => {
                             log::warn!(
-                                "  ⚠ Verification timed out for {} after {} minutes, skipping",
+                                "  âš  Verification timed out for {} after {} minutes, skipping",
                                 sandbox_name,
                                 verify_timeout.as_secs() / 60
                             );
@@ -660,7 +660,7 @@ impl NewOrchestrator {
             .collect();
 
         let final_merge = if sandbox_diffs.len() > 1 {
-            log::info!("  → Cross-sandbox review: {} sandbox diff(s)", sandbox_diffs.len());
+            log::info!("  â†’ Cross-sandbox review: {} sandbox diff(s)", sandbox_diffs.len());
 
             // Treat each sandbox's merged diff as an agent contribution
             let cross_contributions: Vec<AgentContribution> = sandbox_diffs
@@ -685,7 +685,7 @@ impl NewOrchestrator {
 
             let cross_conflicts = ConflictDetector::detect(&cross_contributions);
             if !cross_conflicts.is_empty() {
-                log::info!("  → Detected {} cross-sandbox conflict(s)", cross_conflicts.len());
+                log::info!("  â†’ Detected {} cross-sandbox conflict(s)", cross_conflicts.len());
             }
 
             let merge_timeout = tokio::time::Duration::from_secs(300);
@@ -693,15 +693,15 @@ impl NewOrchestrator {
 
             match tokio::time::timeout(merge_timeout, review_future).await {
                 Ok(Ok(review_result)) => {
-                    log::info!("  → {}", review_result.summary);
+                    log::info!("  â†’ {}", review_result.summary);
                     review_result.final_diff
                 }
                 Ok(Err(e)) => {
-                    log::warn!("  ⚠️  Cross-sandbox review failed: {}. Using concatenation.", e);
+                    log::warn!("  âš ï¸  Cross-sandbox review failed: {}. Using concatenation.", e);
                     fallback_diff
                 }
                 Err(_) => {
-                    log::warn!("  ⚠️  Cross-sandbox review timed out. Using concatenation.");
+                    log::warn!("  âš ï¸  Cross-sandbox review timed out. Using concatenation.");
                     fallback_diff
                 }
             }
@@ -722,7 +722,7 @@ impl NewOrchestrator {
         let duration = start_time.elapsed().as_secs();
 
         let health_status = health_monitor.get_status().await;
-        log::info!("\n✓ Orchestration complete!");
+        log::info!("\nâœ“ Orchestration complete!");
         log::info!("  Total duration: {}s", duration);
         log::info!("  Agents used: {}", agent_count);
         log::info!("  Tasks completed: {}/{}", scheduler_stats.completed, scheduler_stats.total_tasks);
@@ -752,9 +752,9 @@ impl NewOrchestrator {
         })
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Mode 1: Simple — single agent, no planner, no merge, no verification
-    // ─────────────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Mode 1: Simple â€” single agent, no planner, no merge, no verification
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async fn run_simple(
         &self,
@@ -836,7 +836,7 @@ impl NewOrchestrator {
         // The in-container git diff (agent_result.git_diff) can be empty if the
         // git state inside the container wasn't staged correctly.  The host-side
         // `capture_agent_diff` uses `git diff --no-index` between the project root
-        // and the container's overlayfs upper directory — more reliable.
+        // and the container's overlayfs upper directory â€” more reliable.
         let host_diff = topology.capture_agent_diff(&agent.agent_id).await
             .unwrap_or_default();
         log::info!("  [simple] host diff size: {} bytes", host_diff.len());
@@ -862,6 +862,9 @@ impl NewOrchestrator {
                     success,
                     diff_size: diff.len(),
                 });
+                send_ev(OrchestratorEvent::LayerProgress { layer: 5, message: "Merge (single agent — pass-through)".into() });
+                send_ev(OrchestratorEvent::LayerProgress { layer: 6, message: "Verification skipped (simple mode).".into() });
+                send_ev(OrchestratorEvent::LayerProgress { layer: 7, message: "Output ready.".into() });
                 send_ev(OrchestratorEvent::Done);
 
                 let sandbox_result = SandboxResult {
@@ -885,7 +888,7 @@ impl NewOrchestrator {
                     pending: 0,
                 };
 
-                log::info!("✓ Simple mode complete in {}s", duration);
+                log::info!("âœ“ Simple mode complete in {}s", duration);
                 Ok(FinalOutput {
                     merged_diff: diff,
                     sandbox_results,
@@ -922,9 +925,9 @@ impl NewOrchestrator {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Mode 2: Standard — constrained planner, 1 sandbox, 1 verification round
-    // ─────────────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Mode 2: Standard â€” constrained planner, 1 sandbox, 1 verification round
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async fn run_standard(
         &self,
@@ -954,7 +957,7 @@ impl NewOrchestrator {
         .context("Standard planner failed")?;
 
         log::info!(
-            "  → Standard plan: {} tasks, {} sandbox(es)",
+            "  â†’ Standard plan: {} tasks, {} sandbox(es)",
             planner_output.task_graph.tasks.len(),
             planner_output.sandbox_topology.sandboxes.len()
         );
@@ -986,7 +989,7 @@ impl NewOrchestrator {
             )?
         );
 
-        // Layer 4 — cap at 3 concurrent agents (standard mode)
+        // Layer 4 â€” cap at 3 concurrent agents (standard mode)
         send_ev(OrchestratorEvent::LayerProgress {
             layer: 4,
             message: "Executing tasks (standard mode)...".into(),
@@ -1193,8 +1196,8 @@ impl NewOrchestrator {
         match tokio::time::timeout(timeout, async {
             for h in handles { let _ = h.await; }
         }).await {
-            Ok(_) => log::info!("  → Standard workers completed"),
-            Err(_) => log::warn!("  ⚠ Standard workers timed out after 15 minutes"),
+            Ok(_) => log::info!("  â†’ Standard workers completed"),
+            Err(_) => log::warn!("  âš  Standard workers timed out after 15 minutes"),
         }
 
         let _ = topology.cleanup_sleeping_containers().await;
@@ -1295,7 +1298,7 @@ impl NewOrchestrator {
                     ).await {
                         Ok(Ok(vr)) => {
                             log::info!(
-                                "  ✓ {} — {:?} ({} passed, {} failed)",
+                                "  âœ“ {} â€” {:?} ({} passed, {} failed)",
                                 sandbox_name, vr.status,
                                 vr.passed_tests.len(), vr.failed_tests.len()
                             );
@@ -1308,12 +1311,12 @@ impl NewOrchestrator {
                             verification_status.insert(sandbox_name.clone(), vr.status);
                         }
                         Ok(Err(e)) => {
-                            log::warn!("  ⚠ Verification failed for {}: {}", sandbox_name, e);
+                            log::warn!("  âš  Verification failed for {}: {}", sandbox_name, e);
                             sandbox_result.verification_status = VerificationStatus::Failed;
                             verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
                         }
                         Err(_) => {
-                            log::warn!("  ⚠ Verification timed out for {}", sandbox_name);
+                            log::warn!("  âš  Verification timed out for {}", sandbox_name);
                             sandbox_result.verification_status = VerificationStatus::NotStarted;
                             verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
                         }
@@ -1326,7 +1329,8 @@ impl NewOrchestrator {
             }
         }
 
-        // No Layer 7 in standard mode (single sandbox)
+        send_ev(OrchestratorEvent::LayerProgress { layer: 7, message: "Final output (single sandbox — no cross-sandbox merge needed).".into() });
+        // No Layer 7 cross-sandbox merge needed in standard mode (single sandbox)
         let final_merge = sandbox_results
             .values()
             .find_map(|r| r.merged_diff.clone())
@@ -1343,7 +1347,7 @@ impl NewOrchestrator {
         let collected_errors = execution_errors.read().await.clone();
         let agent_count = planner_output.task_graph.tasks.len().min(max_concurrent);
 
-        log::info!("✓ Standard mode complete in {}s", duration);
+        log::info!("âœ“ Standard mode complete in {}s", duration);
 
         if let Some(ref tx) = self.config.event_tx {
             let _ = tx.send(OrchestratorEvent::Done);
