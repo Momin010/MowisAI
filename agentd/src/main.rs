@@ -89,9 +89,9 @@ fn main() -> Result<()> {
             // Enable verbose logging if requested
             if cmd.verbose {
                 libagent::orchestration::agent_execution::set_verbose(true);
-                std::env::set_var("RUST_LOG", "debug");
+                unsafe { std::env::set_var("RUST_LOG", "debug"); }
             } else {
-                std::env::set_var("RUST_LOG", "info");
+                unsafe { std::env::set_var("RUST_LOG", "info"); }
             }
 
             // Init logging to stderr so user sees everything
