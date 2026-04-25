@@ -28,6 +28,8 @@ pub mod security;
 pub mod socket_server;
 pub mod tool_registry;
 pub mod tools;
+pub mod crypto;
+pub mod grok_agent;
 pub mod vertex_agent;
 pub mod worker_agent;
 pub mod intent;

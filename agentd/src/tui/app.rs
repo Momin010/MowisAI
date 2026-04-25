@@ -91,13 +91,24 @@ impl App {
             dev_mode_active: false,
         };
 
+        let welcome_line2 = match app.config.provider {
+            crate::config::AiProvider::VertexAi => format!(
+                "Provider: Vertex AI | Project: {} | Model: {}",
+                app.config.gcp_project_id, app.config.model
+            ),
+            crate::config::AiProvider::Grok => format!(
+                "Provider: Grok AI (xAI) | Model: {}",
+                app.config.model
+            ),
+        };
+
         app.messages.push(ChatMessage {
             role: MessageRole::System,
             content: format!(
                 "Welcome to MowisAI! Type your message below and press Enter.\n\
-                 Project: {} | Model: {}\n\
+                 {}\n\
                  Type /help for commands, /quit or Ctrl+C to exit.",
-                app.config.gcp_project_id, app.config.model
+                welcome_line2
             ),
             timestamp: now(),
         });
@@ -483,26 +494,65 @@ impl App {
     }
 
     fn send_to_gemini(&mut self, user_text: String) {
-        self.conversation_history.push(serde_json::json!({
-            "role": "user",
-            "parts": [{ "text": &user_text }]
-        }));
-
-        let project_id = self.config.gcp_project_id.clone();
-        let model = self.config.model.clone();
-        let contents = self.conversation_history.clone();
         let tx = self.event_tx.clone();
 
-        std::thread::Builder::new()
-            .name("gemini-stream".into())
-            .spawn(move || {
-                if let Some(tx) = tx {
-                    if let Err(e) = call_gemini_streaming(&project_id, &model, &contents, tx.clone()) {
-                        let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+        match self.config.provider {
+            crate::config::AiProvider::Grok => {
+                // xAI uses the OpenAI message format (role/content objects).
+                self.conversation_history.push(serde_json::json!({
+                    "role": "user",
+                    "content": user_text
+                }));
+
+                let api_key = match self.config.grok_api_key() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        self.messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: format!("Error loading Grok API key: {}", e),
+                            timestamp: now(),
+                        });
+                        self.is_loading = false;
+                        return;
                     }
-                }
-            })
-            .ok();
+                };
+                let model = self.config.model.clone();
+                let messages = self.conversation_history.clone();
+
+                std::thread::Builder::new()
+                    .name("grok-stream".into())
+                    .spawn(move || {
+                        if let Some(tx) = tx {
+                            if let Err(e) = crate::grok_agent::stream_chat(&api_key, &model, &messages, tx.clone()) {
+                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                            }
+                        }
+                    })
+                    .ok();
+            }
+            crate::config::AiProvider::VertexAi => {
+                // Vertex AI uses Gemini content format (role / parts).
+                self.conversation_history.push(serde_json::json!({
+                    "role": "user",
+                    "parts": [{ "text": user_text }]
+                }));
+
+                let project_id = self.config.gcp_project_id.clone();
+                let model = self.config.model.clone();
+                let contents = self.conversation_history.clone();
+
+                std::thread::Builder::new()
+                    .name("gemini-stream".into())
+                    .spawn(move || {
+                        if let Some(tx) = tx {
+                            if let Err(e) = call_gemini_streaming(&project_id, &model, &contents, tx.clone()) {
+                                let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                            }
+                        }
+                    })
+                    .ok();
+            }
+        }
     }
 
     fn start_orchestration(&mut self, prompt: String) {
@@ -667,10 +717,18 @@ impl App {
         if let Some(last) = self.messages.last() {
             if last.role == MessageRole::Assistant {
                 let content = last.content.clone();
-                self.conversation_history.push(serde_json::json!({
-                    "role": "model",
-                    "parts": [{ "text": content }]
-                }));
+                // Append in the format the active provider expects for multi-turn history.
+                let history_msg = match self.config.provider {
+                    crate::config::AiProvider::Grok => serde_json::json!({
+                        "role": "assistant",
+                        "content": content
+                    }),
+                    crate::config::AiProvider::VertexAi => serde_json::json!({
+                        "role": "model",
+                        "parts": [{ "text": content }]
+                    }),
+                };
+                self.conversation_history.push(history_msg);
             }
         }
     }
