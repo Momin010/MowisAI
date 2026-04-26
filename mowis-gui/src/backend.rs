@@ -2,6 +2,18 @@ use crate::types::{BackendEvent, FileDiff, FrontendCommand, Task, TaskStatus};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+// ── Helper macro (must be defined before the async fns that use it) ───────────
+
+/// Send a `BackendEvent` through an `mpsc::Sender`; return early from the
+/// surrounding `async fn` if the receiver has been dropped.
+macro_rules! send_or_return {
+    ($tx:expr, $event:expr) => {
+        if $tx.send($event).await.is_err() {
+            return;
+        }
+    };
+}
+
 // ── Public surface ─────────────────────────────────────────────────────────────
 
 /// Bridge between the egui main thread and the async agentd daemon.
@@ -33,8 +45,8 @@ impl Backend {
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(r) => r,
                     Err(e) => {
-                        // Cannot send the event because the channel requires async;
-                        // best we can do is log and exit the thread.
+                        // Cannot send the event because the channel requires
+                        // async; best we can do is log and exit the thread.
                         log::error!("Failed to create tokio runtime: {e}");
                         return;
                     }
@@ -72,7 +84,7 @@ async fn run(
     });
 
     // 3. Command handler (drives the main loop).
-    run_command_handler(project_dir, command_rx, event_tx).await;
+    run_command_handler(command_rx, event_tx).await;
 }
 
 // ── 1. Daemon launcher ─────────────────────────────────────────────────────────
@@ -102,7 +114,7 @@ async fn ensure_daemon(
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn agentd ({bin:?}): {e}"))?;
 
-    // Wait up to 2 s for the socket to appear.
+    // Wait up to 2 s for the socket to appear and become connectable.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         if tokio::fs::metadata(SOCKET_PATH).await.is_ok() && socket_connectable().await {
@@ -120,12 +132,12 @@ async fn ensure_daemon(
     Ok(Some(child))
 }
 
-/// Try a quick connection to the Unix socket; returns true on success.
+/// Try a quick connection to the Unix socket; returns `true` on success.
 async fn socket_connectable() -> bool {
     tokio::net::UnixStream::connect(SOCKET_PATH).await.is_ok()
 }
 
-/// Find the agentd binary, falling back to `./agentd` in the cwd.
+/// Find the agentd binary, falling back to `./agentd` relative to the cwd.
 fn locate_binary(name: &str) -> std::path::PathBuf {
     which::which(name).unwrap_or_else(|_| std::path::PathBuf::from(format!("./{name}")))
 }
@@ -152,17 +164,18 @@ async fn poll_git_diffs(
     event_tx: &mpsc::Sender<BackendEvent>,
 ) -> Result<()> {
     // List files that changed relative to HEAD.
-    let output = tokio::process::Command::new("git")
+    let name_output = tokio::process::Command::new("git")
         .args(["diff", "HEAD", "--name-only"])
         .current_dir(project_dir)
         .output()
         .await?;
 
-    if !output.status.success() {
-        return Ok(()); // Not a git repo or no commits yet — silently skip.
+    if !name_output.status.success() {
+        // Not a git repo, no commits yet, or git not available — silently skip.
+        return Ok(());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&name_output.stdout);
     let changed_files: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
 
     for path in changed_files {
@@ -194,7 +207,6 @@ async fn poll_git_diffs(
 // ── 3. Command handler ─────────────────────────────────────────────────────────
 
 async fn run_command_handler(
-    _project_dir: String,
     mut command_rx: mpsc::Receiver<FrontendCommand>,
     event_tx: mpsc::Sender<BackendEvent>,
 ) {
@@ -202,9 +214,8 @@ async fn run_command_handler(
         match cmd {
             FrontendCommand::StartOrchestration { prompt } => {
                 let tx = event_tx.clone();
-                let p = prompt.clone();
                 tokio::spawn(async move {
-                    handle_start_orchestration(p, tx).await;
+                    handle_start_orchestration(prompt, tx).await;
                 });
             }
 
@@ -226,7 +237,8 @@ async fn run_command_handler(
 
 // ── 4. Socket communication ────────────────────────────────────────────────────
 
-/// Write a single JSON message (followed by a newline) to the agentd socket.
+/// Write a single JSON message (followed by a newline) to the agentd socket,
+/// then drain any immediate response lines.
 async fn send_socket_json(
     payload: serde_json::Value,
     event_tx: &mpsc::Sender<BackendEvent>,
@@ -245,7 +257,8 @@ async fn send_socket_json(
         .await
         .map_err(|e| anyhow::anyhow!("Socket write failed: {e}"))?;
 
-    // Read any immediate response lines.
+    // Read any immediate response lines (socket may close quickly for stop
+    // commands, so we tolerate EOF gracefully).
     let reader = tokio::io::BufReader::new(stream);
     read_socket_responses(reader, event_tx).await?;
 
@@ -253,7 +266,7 @@ async fn send_socket_json(
 }
 
 /// Drain newline-delimited JSON responses from the socket until EOF or error,
-/// converting known message shapes into `BackendEvent`s.
+/// converting recognised message shapes into `BackendEvent`s.
 async fn read_socket_responses(
     reader: tokio::io::BufReader<tokio::net::UnixStream>,
     event_tx: &mpsc::Sender<BackendEvent>,
@@ -271,6 +284,7 @@ async fn read_socket_responses(
             Ok(v) => {
                 if let Some(event) = socket_value_to_event(&v) {
                     if event_tx.send(event).await.is_err() {
+                        // GUI has shut down.
                         break;
                     }
                 } else {
@@ -286,8 +300,8 @@ async fn read_socket_responses(
     Ok(())
 }
 
-/// Map a JSON value received from the socket into a `BackendEvent` where
-/// the shape is recognised; returns `None` for unknown messages.
+/// Map a JSON value received from the socket into a `BackendEvent` where the
+/// shape is recognised; returns `None` for unknown messages.
 fn socket_value_to_event(v: &serde_json::Value) -> Option<BackendEvent> {
     let msg_type = v.get("type")?.as_str()?;
 
@@ -339,8 +353,9 @@ fn parse_task_status(v: &serde_json::Value) -> TaskStatus {
 // ── StartOrchestration handler ─────────────────────────────────────────────────
 
 async fn handle_start_orchestration(prompt: String, event_tx: mpsc::Sender<BackendEvent>) {
-    // 1. Forward the command to the socket (best-effort — the daemon might not
-    //    be running yet, or the full protocol might not be wired).
+    // 1. Forward the command to the socket (best-effort).
+    //    The daemon might not yet speak the full protocol, so we do not abort
+    //    on failure — the simulated stream below keeps the UI responsive.
     let payload = serde_json::json!({
         "type":       "orchestrate",
         "prompt":     prompt,
@@ -350,22 +365,17 @@ async fn handle_start_orchestration(prompt: String, event_tx: mpsc::Sender<Backe
 
     if let Err(e) = send_socket_json(payload, &event_tx).await {
         log::warn!("Could not deliver orchestrate command to socket: {e}");
-        // Fall through to the simulated stream so the UI stays responsive
-        // even before the real socket protocol is wired up.
     }
 
-    // 2. Simulated task stream — keeps the UI working end-to-end during
-    //    development, before the real agentd socket protocol is complete.
+    // 2. Simulated task stream — makes the UI functional during development
+    //    before the real socket protocol is complete.
     simulate_task_stream(prompt, event_tx).await;
 }
 
-/// Emit a handful of synthetic events so that the GUI task/chat panels render
-/// correctly during development.  These do NOT replace real socket events —
-/// once the daemon produces `task_added` / `agent_chunk` messages they will
-/// appear alongside (or instead of) these.
+/// Emit a handful of synthetic events so that the GUI task panel and chat view
+/// render correctly during development.
 async fn simulate_task_stream(prompt: String, event_tx: mpsc::Sender<BackendEvent>) {
-    // Synthetic task graph based on the user's prompt.
-    let tasks = vec![
+    let tasks = [
         Task {
             id: "t1".into(),
             description: format!("Analyse: {prompt}"),
@@ -386,6 +396,7 @@ async fn simulate_task_stream(prompt: String, event_tx: mpsc::Sender<BackendEven
         },
     ];
 
+    // Announce all tasks first.
     for task in &tasks {
         if event_tx.send(BackendEvent::TaskAdded(task.clone())).await.is_err() {
             return;
@@ -393,21 +404,19 @@ async fn simulate_task_stream(prompt: String, event_tx: mpsc::Sender<BackendEven
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     }
 
-    // Mark t1 running then complete.
+    // ── t1: running → stream reply → complete ───────────────────────────────
     send_or_return!(
         event_tx,
         BackendEvent::TaskUpdated { id: "t1".into(), status: TaskStatus::Running }
     );
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // Stream some agent chunks simulating a reply.
     let reply_chunks = [
         "Understood. Analysing your request…\n",
         "Breaking the work into parallel tasks.\n",
         "Agents are spinning up inside isolated sandboxes.\n",
         "I will keep you updated as each task completes.\n",
     ];
-
     for chunk in reply_chunks {
         if event_tx.send(BackendEvent::AgentChunk(chunk.to_owned())).await.is_err() {
             return;
@@ -420,7 +429,7 @@ async fn simulate_task_stream(prompt: String, event_tx: mpsc::Sender<BackendEven
         BackendEvent::TaskUpdated { id: "t1".into(), status: TaskStatus::Complete }
     );
 
-    // t2 running → complete.
+    // ── t2: running → complete ───────────────────────────────────────────────
     send_or_return!(
         event_tx,
         BackendEvent::TaskUpdated { id: "t2".into(), status: TaskStatus::Running }
@@ -431,7 +440,7 @@ async fn simulate_task_stream(prompt: String, event_tx: mpsc::Sender<BackendEven
         BackendEvent::TaskUpdated { id: "t2".into(), status: TaskStatus::Complete }
     );
 
-    // t3 running → complete.
+    // ── t3: running → complete ───────────────────────────────────────────────
     send_or_return!(
         event_tx,
         BackendEvent::TaskUpdated { id: "t3".into(), status: TaskStatus::Running }
@@ -444,19 +453,3 @@ async fn simulate_task_stream(prompt: String, event_tx: mpsc::Sender<BackendEven
 
     let _ = event_tx.send(BackendEvent::OrchestrationComplete).await;
 }
-
-/// Early-return helper for the simulation loop — avoids a cascade of
-/// `if .is_err() { return; }` checks.
-macro_rules! send_or_return {
-    ($tx:expr, $event:expr) => {
-        if $tx.send($event).await.is_err() {
-            return;
-        }
-    };
-}
-
-// The macro must be defined before it is used, but Rust macros are
-// textually scoped within a module so `send_or_return!` is only
-// visible inside this file.  Re-export prevention is not needed for
-// a private macro.
-use send_or_return;
