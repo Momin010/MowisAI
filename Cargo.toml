@@ -1,5 +1,5 @@
 [workspace]
-members = ["agentd", "agentd-protocol", "runtime"]
+members = ["agentd", "agentd-protocol", "runtime", "mowis-gui"]
 resolver = "2"
 
 [workspace.dependencies]
