@@ -46,9 +46,9 @@ struct ModelOption {
 }
 
 const ANTHROPIC_MODELS: &[ModelOption] = &[
-    ModelOption { id: "claude-3-7-sonnet-20250219", label: "Claude 3.7 Sonnet", note: "Hybrid reasoning + tools" },
-    ModelOption { id: "claude-3-5-sonnet-20241022", label: "Claude 3.5 Sonnet", note: "Fast and reliable"        },
-    ModelOption { id: "claude-3-5-haiku-20241022",  label: "Claude 3.5 Haiku",  note: "Blazing fast"             },
+    ModelOption { id: "claude-opus-4-7",           label: "Claude Opus 4.7",   note: "Most capable — complex tasks"  },
+    ModelOption { id: "claude-sonnet-4-6",         label: "Claude Sonnet 4.6", note: "Smart + fast, 1M context"      },
+    ModelOption { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5",  note: "Fast, cost-efficient"          },
 ];
 
 const OPENAI_MODELS: &[ModelOption] = &[
@@ -59,9 +59,9 @@ const OPENAI_MODELS: &[ModelOption] = &[
 ];
 
 const GEMINI_MODELS: &[ModelOption] = &[
-    ModelOption { id: "gemini-2.0-flash",           label: "Gemini 2.0 Flash",      note: "Next-gen speed"           },
-    ModelOption { id: "gemini-2.0-pro-exp-02-05",    label: "Gemini 2.0 Pro (Exp)",  note: "High reasoning"           },
-    ModelOption { id: "gemini-1.5-pro",             label: "Gemini 1.5 Pro",        note: "Large context"            },
+    ModelOption { id: "gemini-2.5-pro",        label: "Gemini 2.5 Pro",        note: "Frontier — highest quality"  },
+    ModelOption { id: "gemini-2.5-flash",      label: "Gemini 2.5 Flash",      note: "Fast, balanced"              },
+    ModelOption { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", note: "Lightweight, cost-efficient" },
 ];
 
 // ── Public API ────────────────────────────────────────────────────────────────
