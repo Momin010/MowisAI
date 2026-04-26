@@ -116,6 +116,7 @@ fn main() -> Result<()> {
             // Build LlmConfig: prefer saved MowisConfig; fall back to Vertex AI with --project flag
             let llm_config = MowisConfig::load()
                 .ok()
+                .flatten()
                 .and_then(|cfg| libagent::orchestration::provider_client::LlmConfig::from_config(&cfg).ok())
                 .unwrap_or_else(|| libagent::orchestration::provider_client::LlmConfig::vertex(&cmd.project));
 
