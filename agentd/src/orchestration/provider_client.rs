@@ -182,7 +182,7 @@ pub async fn generate_text(
             .await
         }
         AiProvider::Anthropic => {
-            generate_text_anthropic(llm_config, system_prompt, user_message, temperature).await
+            generate_text_anthropic(llm_config, system_prompt, user_message, json_mode, temperature).await
         }
     }
 }
@@ -325,6 +325,7 @@ async fn generate_text_anthropic(
     llm_config: &LlmConfig,
     system_prompt: &str,
     user_message: &str,
+    json_mode: bool,
     temperature: f64,
 ) -> Result<String> {
     let api_key = llm_config
@@ -332,10 +333,21 @@ async fn generate_text_anthropic(
         .as_deref()
         .ok_or_else(|| anyhow!("No Anthropic API key configured"))?;
 
+    // Anthropic has no native json_mode — use assistant prefill with "{" to
+    // force the model to begin a JSON object, guaranteeing parseable output.
+    let messages = if json_mode {
+        json!([
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": "{"}
+        ])
+    } else {
+        json!([{"role": "user", "content": user_message}])
+    };
+
     let body = json!({
         "model": llm_config.model,
         "system": system_prompt,
-        "messages": [{"role": "user", "content": user_message}],
+        "messages": messages,
         "max_tokens": 8192,
         "temperature": temperature
     });
@@ -363,7 +375,7 @@ async fn generate_text_anthropic(
         .await
         .context("parse Anthropic generate_text response")?;
 
-    resp_json
+    let text = resp_json
         .get("content")
         .and_then(|c| c.as_array())
         .and_then(|arr| {
@@ -373,8 +385,14 @@ async fn generate_text_anthropic(
         })
         .and_then(|b| b.get("text"))
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("Anthropic: unexpected response structure in generate_text"))
-        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("Anthropic: unexpected response structure in generate_text"))?;
+
+    // When json_mode prefill was used the model continues from "{", so restore it.
+    if json_mode {
+        Ok(format!("{{{}", text))
+    } else {
+        Ok(text.to_string())
+    }
 }
 
 // ── Tool-calling loop ─────────────────────────────────────────────────────────
