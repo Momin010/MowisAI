@@ -113,8 +113,14 @@ fn main() -> Result<()> {
             let checkpoint_root = std::env::temp_dir().join("mowisai-checkpoints");
             let merge_work_dir = std::env::temp_dir().join("mowisai-merge");
 
+            // Build LlmConfig: prefer saved MowisConfig; fall back to Vertex AI with --project flag
+            let llm_config = MowisConfig::load()
+                .ok()
+                .and_then(|cfg| libagent::orchestration::provider_client::LlmConfig::from_config(&cfg).ok())
+                .unwrap_or_else(|| libagent::orchestration::provider_client::LlmConfig::vertex(&cmd.project));
+
             let config = libagent::orchestration::new_orchestrator::OrchestratorConfig {
-                project_id: cmd.project.clone(),
+                llm_config,
                 socket_path: cmd.socket.clone(),
                 project_root: project_root.clone(),
                 overlay_root,

@@ -52,7 +52,8 @@ pub struct FailedTask {
 
 /// Main orchestrator configuration
 pub struct OrchestratorConfig {
-    pub project_id: String,
+    /// Provider credentials and model selection (replaces the old `project_id` field).
+    pub llm_config: super::provider_client::LlmConfig,
     pub socket_path: String,
     pub project_root: PathBuf,
     pub overlay_root: PathBuf,
@@ -149,7 +150,7 @@ impl NewOrchestrator {
         // â”€â”€ Full mode: Layer 1 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         send_event!(OrchestratorEvent::LayerProgress { layer: 1, message: "Planning tasks...".into() });
         log::info!("Layer 1: Planning tasks (full mode)...");
-        let planner_output = plan_task(prompt, &self.config.project_root, &self.config.project_id)
+        let planner_output = plan_task(prompt, &self.config.project_root, &self.config.llm_config)
             .await
             .context("Fast planner failed")?;
 
@@ -188,7 +189,7 @@ impl NewOrchestrator {
         send_event!(OrchestratorEvent::LayerProgress { layer: 4, message: "Executing tasks with agents...".into() });
         log::info!("Layer 4: Executing tasks with agents...");
         let agent_executor = Arc::new(AgentExecutor::new(
-            self.config.project_id.clone(),
+            self.config.llm_config.clone(),
             self.config.socket_path.clone(),
             self.config.checkpoint_root.clone(),
         )?);
@@ -466,7 +467,7 @@ impl NewOrchestrator {
 
         // Layer 5: Intelligent Merge Review (per sandbox)
         log::info!("Layer 5: Reviewing and merging agent contributions per sandbox...");
-        let reviewer = MergeReviewerAgent::new(self.config.project_id.clone());
+        let reviewer = MergeReviewerAgent::new(self.config.llm_config.clone());
         let mut sandbox_results = HashMap::new();
 
         for (sandbox_name, agent_work_results) in &sandbox_agent_results {
@@ -564,7 +565,7 @@ impl NewOrchestrator {
         log::info!("Layer 6: Verifying sandbox results...");
 
         let verification_loop = VerificationLoop::new(
-            self.config.project_id.clone(),
+            self.config.llm_config.clone(),
             self.config.max_verification_rounds,
         );
 
@@ -804,7 +805,7 @@ impl NewOrchestrator {
         });
 
         let executor = AgentExecutor::new(
-            self.config.project_id.clone(),
+            self.config.llm_config.clone(),
             self.config.socket_path.clone(),
             self.config.checkpoint_root.clone(),
         )?;
@@ -951,7 +952,7 @@ impl NewOrchestrator {
         let planner_output = plan_task_standard(
             prompt,
             &self.config.project_root,
-            &self.config.project_id,
+            &self.config.llm_config,
             dir_tree,
         )
         .await
@@ -996,7 +997,7 @@ impl NewOrchestrator {
             message: "Executing tasks (standard mode)...".into(),
         });
         let executor = Arc::new(AgentExecutor::new(
-            self.config.project_id.clone(),
+            self.config.llm_config.clone(),
             self.config.socket_path.clone(),
             self.config.checkpoint_root.clone(),
         )?);
@@ -1211,7 +1212,7 @@ impl NewOrchestrator {
             layer: 5,
             message: "Merging (standard mode)...".into(),
         });
-        let reviewer = MergeReviewerAgent::new(self.config.project_id.clone());
+        let reviewer = MergeReviewerAgent::new(self.config.llm_config.clone());
         let mut sandbox_results = HashMap::new();
 
         for (sandbox_name, agent_work_results) in &sandbox_agent_results {
@@ -1265,7 +1266,7 @@ impl NewOrchestrator {
             layer: 6,
             message: "Verifying (standard mode, 1 round)...".into(),
         });
-        let verification_loop = VerificationLoop::new(self.config.project_id.clone(), 1);
+        let verification_loop = VerificationLoop::new(self.config.llm_config.clone(), 1);
         let mut verification_status = HashMap::new();
 
         let executor_ref = &*executor;

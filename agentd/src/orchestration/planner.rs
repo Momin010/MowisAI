@@ -3,6 +3,7 @@
 //! Replaces old Context Gatherer (128 rounds) + Architect + Sandbox Owner
 //! with ONE LLM call that produces both task graph AND sandbox topology
 
+use super::provider_client::{generate_text, LlmConfig};
 use agentd_protocol::{SandboxTopology, TaskGraph, TaskId};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -22,39 +23,32 @@ pub struct PlannerOutput {
 pub async fn plan_task(
     prompt: &str,
     project_root: &Path,
-    project_id: &str,
+    llm_config: &LlmConfig,
 ) -> Result<PlannerOutput> {
     log::info!("Starting fast planner:");
     log::info!("  Prompt: {}...", &prompt.chars().take(100).collect::<String>());
     log::info!("  Project root: {:?}", project_root);
-    log::info!("  Project ID: {}", project_id);
+    log::info!("  Provider: {}", llm_config.provider);
 
-    // Validate inputs
     if prompt.is_empty() {
         return Err(anyhow!("Planner: Prompt cannot be empty"));
     }
     std::fs::create_dir_all(project_root)
         .with_context(|| format!("Planner: Failed to create project root: {:?}", project_root))?;
-    if project_id.is_empty() {
-        return Err(anyhow!("Planner: Project ID cannot be empty"));
-    }
 
-    // Step 1: Shell scan to get directory tree
     log::info!("  Scanning directory tree...");
     let dir_tree = scan_directory_tree(project_root)
         .context("Failed to scan directory tree")?;
     log::info!("  Directory scan complete: {} bytes", dir_tree.len());
 
-    // Step 2: Single Gemini call with prompt + dir tree
-    log::info!("  Calling Gemini planner...");
-    let gemini_response = call_gemini_planner(prompt, &dir_tree, project_id)
+    log::info!("  Calling LLM planner...");
+    let llm_response = call_llm_planner(prompt, &dir_tree, llm_config)
         .await
-        .context("Gemini planner call failed")?;
-    log::info!("  Gemini call complete: {} bytes", gemini_response.len());
+        .context("LLM planner call failed")?;
+    log::info!("  LLM call complete: {} bytes", llm_response.len());
 
-    // Step 3: Parse response into task graph + topology
     log::info!("  Parsing planner response...");
-    let output = parse_planner_response(&gemini_response)
+    let output = parse_planner_response(&llm_response)
         .context("Failed to parse planner response")?;
     log::info!("  Planning complete!");
 
@@ -68,7 +62,7 @@ pub async fn plan_task(
 pub async fn plan_task_standard(
     prompt: &str,
     project_root: &Path,
-    project_id: &str,
+    llm_config: &LlmConfig,
     dir_tree: &str,
 ) -> Result<PlannerOutput> {
     log::info!("Standard planner (constrained):");
@@ -79,15 +73,12 @@ pub async fn plan_task_standard(
     }
     std::fs::create_dir_all(project_root)
         .with_context(|| format!("Planner: Failed to create project root: {:?}", project_root))?;
-    if project_id.is_empty() {
-        return Err(anyhow!("Planner: Project ID cannot be empty"));
-    }
 
-    let gemini_response = call_gemini_planner_standard(prompt, dir_tree, project_id)
+    let llm_response = call_llm_planner_standard(prompt, dir_tree, llm_config)
         .await
-        .context("Gemini standard planner call failed")?;
+        .context("LLM standard planner call failed")?;
 
-    let output = parse_planner_response(&gemini_response)
+    let output = parse_planner_response(&llm_response)
         .context("Failed to parse standard planner response")?;
 
     log::info!(
@@ -99,15 +90,12 @@ pub async fn plan_task_standard(
     Ok(output)
 }
 
-/// Constrained Gemini call for Standard mode: 1 sandbox, ≤ 3 agents, no cross-service.
-async fn call_gemini_planner_standard(
+/// Constrained LLM call for Standard mode: 1 sandbox, ≤ 3 agents, no cross-service.
+async fn call_llm_planner_standard(
     prompt: &str,
     dir_tree: &str,
-    project_id: &str,
+    llm_config: &LlmConfig,
 ) -> Result<String> {
-    let access_token = super::gcloud_access_token()?;
-    let url = super::vertex_generate_url(project_id);
-
     let system_prompt = r#"You are a fast task planner for an AI agent orchestration system operating in STANDARD mode.
 
 STANDARD MODE CONSTRAINTS (strictly enforced):
@@ -152,56 +140,15 @@ Output ONLY valid JSON in this exact format:
         prompt, dir_tree
     );
 
-    let request_body = serde_json::json!({
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": user_message}]
-            }
-        ],
-        "systemInstruction": {
-            "parts": [{"text": system_prompt}]
-        },
-        "generationConfig": super::vertex_generation_config_json(0.1)
-    });
-
-    let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json")
-        .json(&request_body)
-        .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
-        .send()
+    let text = generate_text(llm_config, system_prompt, &user_message, true, 0.1)
         .await
-        .context("Failed to send request to Gemini (standard planner)")?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let error_text = response.text().await.unwrap_or_else(|_| "unknown error".to_string());
-        return Err(anyhow!("Gemini API error ({}): {}", status, error_text));
-    }
-
-    let response_json: serde_json::Value = response
-        .json()
-        .await
-        .context("Failed to parse Gemini response as JSON")?;
-
-    let text = response_json
-        .get("candidates")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|p| p.get(0))
-        .and_then(|p| p.get("text"))
-        .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("Invalid Gemini response structure"))?;
+        .context("LLM standard planner call failed")?;
 
     if text.is_empty() {
-        return Err(anyhow!("Gemini returned empty response (standard planner)"));
+        return Err(anyhow!("LLM returned empty response (standard planner)"));
     }
 
-    Ok(text.to_string())
+    Ok(text)
 }
 
 /// Expose directory-tree scan so the orchestrator can reuse it for the
@@ -308,24 +255,18 @@ fn walk_dir_recursive(path: &Path, depth: usize, max_depth: usize, output: &mut 
     Ok(())
 }
 
-/// Call Gemini planner with prompt + directory tree
-async fn call_gemini_planner(
+/// Call LLM planner with prompt + directory tree (full mode).
+async fn call_llm_planner(
     prompt: &str,
     dir_tree: &str,
-    project_id: &str,
+    llm_config: &LlmConfig,
 ) -> Result<String> {
     if prompt.is_empty() {
         return Err(anyhow!("Empty prompt provided to planner"));
     }
-    if project_id.is_empty() {
-        return Err(anyhow!("Empty project_id provided to planner"));
-    }
     if dir_tree.is_empty() {
         return Err(anyhow!("Empty directory tree from scan"));
     }
-
-    let access_token = super::gcloud_access_token()?;
-    let url = super::vertex_generate_url(project_id);
 
     let system_prompt = r#"You are a fast task planner for an AI agent orchestration system.
 
@@ -380,57 +321,15 @@ Output ONLY valid JSON in this exact format:
         prompt, dir_tree
     );
 
-    let request_body = serde_json::json!({
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": user_message}]
-            }
-        ],
-        "systemInstruction": {
-            "parts": [{"text": system_prompt}]
-        },
-        "generationConfig": super::vertex_generation_config_json(0.1)
-    });
-
-    let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json")
-        .json(&request_body)
-        .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
-        .send()
+    let text = generate_text(llm_config, system_prompt, &user_message, true, 0.1)
         .await
-        .context("Failed to send request to Gemini")?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let error_text = response.text().await.unwrap_or_else(|_| "unknown error".to_string());
-        return Err(anyhow!("Gemini API error ({}): {}", status, error_text));
-    }
-
-    let response_json: serde_json::Value = response
-        .json()
-        .await
-        .context("Failed to parse Gemini response as JSON")?;
-
-    // Extract text from response
-    let text = response_json
-        .get("candidates")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|p| p.get(0))
-        .and_then(|p| p.get("text"))
-        .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow!("Invalid Gemini response structure: missing candidates/content/parts/text"))?;
+        .context("LLM planner call failed")?;
 
     if text.is_empty() {
-        return Err(anyhow!("Gemini returned empty response"));
+        return Err(anyhow!("LLM returned empty response (planner)"));
     }
 
-    Ok(text.to_string())
+    Ok(text)
 }
 
 /// Parse planner response into structured output

@@ -1034,8 +1034,10 @@ impl App {
                 let (orch_event_tx, orch_event_rx) = std::sync::mpsc::channel();
 
                 let project_root = std::env::current_dir().unwrap_or_default();
+                let llm_config = crate::orchestration::provider_client::LlmConfig::from_config(&config)
+                    .unwrap_or_else(|_| crate::orchestration::provider_client::LlmConfig::vertex(&config.gcp_project_id));
                 let orch_config = crate::orchestration::OrchestratorConfig {
-                    project_id: config.gcp_project_id.clone(),
+                    llm_config,
                     socket_path: config.socket_path.clone(),
                     project_root,
                     overlay_root: std::path::PathBuf::from(&config.overlay_root),

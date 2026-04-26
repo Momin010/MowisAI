@@ -8,6 +8,7 @@
 //! flaky verification.
 
 use super::agent_execution::AgentExecutor;
+use super::provider_client::{generate_text, LlmConfig};
 use super::sandbox_topology::TopologyManager;
 use agentd_protocol::{SandboxName, Task, TaskId, VerificationStatus};
 use anyhow::{anyhow, Context, Result};
@@ -71,16 +72,16 @@ pub struct VerificationResult {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct VerificationPlanner {
-    project_id: String,
+    llm_config: LlmConfig,
     pub max_rounds: usize,
     /// Per-VF execution timeout in seconds
     pub max_test_execution_time: u64,
 }
 
 impl VerificationPlanner {
-    pub fn new(project_id: String, max_rounds: usize) -> Self {
+    pub fn new(llm_config: LlmConfig, max_rounds: usize) -> Self {
         Self {
-            project_id,
+            llm_config,
             max_rounds,
             max_test_execution_time: 60,
         }
@@ -96,9 +97,6 @@ impl VerificationPlanner {
         merged_diff: &str,
         original_tasks: &[Task],
     ) -> Result<VerificationPlan> {
-        let access_token = super::gcloud_access_token()?;
-        let url = super::vertex_generate_url(&self.project_id);
-
         // CRITICAL: The system prompt asks for DETERMINISTIC shell commands,
         // not vague descriptions. This is what makes VFs stable across rounds.
         let system_prompt = r#"You are a verification function planner for a multi-agent code execution system.
@@ -154,51 +152,11 @@ Standard VF set (adapt to detected toolchain):
             sandbox_name, task_summaries, merged_diff
         );
 
-        let request_body = json!({
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": user_message}]
-                }
-            ],
-            "systemInstruction": {
-                "parts": [{"text": system_prompt}]
-            },
-            "generationConfig": super::vertex_generation_config_json(0.1)
-        });
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .timeout(std::time::Duration::from_secs(60))
-            .send()
+        let text = generate_text(&self.llm_config, system_prompt, &user_message, true, 0.1)
             .await
-            .context("Failed to send VF planning request")?;
+            .context("LLM VF planning request failed")?;
 
-        if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Gemini API error during VF planning: {}", error_text));
-        }
-
-        let response_json: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse VF planning response")?;
-
-        let text = response_json
-            .get("candidates")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("content"))
-            .and_then(|c| c.get("parts"))
-            .and_then(|p| p.get(0))
-            .and_then(|p| p.get("text"))
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| anyhow!("Invalid VF planning response structure"))?;
-
-        let json_str = extract_json(text);
+        let json_str = extract_json(&text);
 
         #[derive(Deserialize)]
         struct VfPlanJson {
@@ -232,9 +190,6 @@ Standard VF set (adapt to detected toolchain):
         vf_command: &str,
         failure_output: &str,
     ) -> Result<Vec<Task>> {
-        let access_token = super::gcloud_access_token()?;
-        let url = super::vertex_generate_url(&self.project_id);
-
         let system_prompt = r#"You are a test failure analyzer. Given a failed verification command and its output, generate fix tasks.
 
 Output JSON in this format:
@@ -252,50 +207,14 @@ Each fix task must be specific, actionable, and directly address the failure out
             failed_vf_id, vf_command, failure_output
         );
 
-        let request_body = json!({
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": user_message}]
-                }
-            ],
-            "systemInstruction": {
-                "parts": [{"text": system_prompt}]
-            },
-            "generationConfig": super::vertex_generation_config_json(0.3)
-        });
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .timeout(std::time::Duration::from_secs(60))
-            .send()
+        let text = match generate_text(&self.llm_config, system_prompt, &user_message, true, 0.3)
             .await
-            .context("Failed to send fix task request")?;
+        {
+            Ok(t) => t,
+            Err(_) => return Ok(vec![]),
+        };
 
-        if !response.status().is_success() {
-            return Ok(vec![]);
-        }
-
-        let response_json: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse fix task response")?;
-
-        let text = response_json
-            .get("candidates")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("content"))
-            .and_then(|c| c.get("parts"))
-            .and_then(|p| p.get(0))
-            .and_then(|p| p.get("text"))
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| anyhow!("Invalid fix task response structure"))?;
-
-        let json_str = extract_json(text);
+        let json_str = extract_json(&text);
 
         #[derive(Deserialize)]
         struct FixTasksJson {
@@ -328,9 +247,9 @@ pub struct VerificationLoop {
 }
 
 impl VerificationLoop {
-    pub fn new(project_id: String, max_rounds: usize) -> Self {
+    pub fn new(llm_config: LlmConfig, max_rounds: usize) -> Self {
         Self {
-            planner: VerificationPlanner::new(project_id.clone(), max_rounds),
+            planner: VerificationPlanner::new(llm_config, max_rounds),
             max_rounds,
         }
     }
@@ -946,13 +865,19 @@ These VFs cover the main implementation."#;
 
     #[test]
     fn test_with_test_timeout_sets_value() {
-        let vl = VerificationLoop::new("proj".to_string(), 3).with_test_timeout(120);
+        let vl = VerificationLoop::new(
+            super::provider_client::LlmConfig::vertex("proj"),
+            3,
+        ).with_test_timeout(120);
         assert_eq!(vl.planner.max_test_execution_time, 120);
     }
 
     #[test]
     fn test_default_timeout_is_60s() {
-        let vl = VerificationLoop::new("proj".to_string(), 3);
+        let vl = VerificationLoop::new(
+            super::provider_client::LlmConfig::vertex("proj"),
+            3,
+        );
         assert_eq!(vl.planner.max_test_execution_time, 60);
     }
 
@@ -960,7 +885,10 @@ These VFs cover the main implementation."#;
 
     #[test]
     fn test_planner_new_defaults() {
-        let p = VerificationPlanner::new("test-project".to_string(), 5);
+        let p = VerificationPlanner::new(
+            super::provider_client::LlmConfig::vertex("test-project"),
+            5,
+        );
         assert_eq!(p.max_test_execution_time, 60);
         assert_eq!(p.max_rounds, 5);
     }
