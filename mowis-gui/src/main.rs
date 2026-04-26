@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod platform;
 mod theme;
 mod types;
 mod views;

@@ -116,10 +116,25 @@ impl FileDiff {
     }
 }
 
+// ── First-run setup progress ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum SetupProgress {
+    Checking,
+    Downloading { label: String, pct: u8 },
+    Installing { step: String },
+    Starting,
+    Ready,
+    Warning(String),
+    Failed(String),
+}
+
 // ── Backend <-> Frontend events ───────────────────────────────────────────────
 
 #[derive(Debug)]
 pub enum BackendEvent {
+    /// First-run setup progress (downloading VM image, starting daemon, etc.)
+    SetupProgress(SetupProgress),
     DaemonStarted,
     DaemonFailed(String),
     /// A new task appeared in the task graph.

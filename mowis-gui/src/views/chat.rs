@@ -167,7 +167,7 @@ fn render_message(ctx: &egui::Context, ui: &mut egui::Ui, msg: &ChatMessage) {
 
         // ── User message — right-aligned, blue bubble ─────────────────────────
         MessageRole::User => {
-            ui.with_layout(Layout::right_to_left(Align::Top), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 ui.set_max_width(max_bubble_width);
 
                 ui.vertical(|ui| {
@@ -183,7 +183,7 @@ fn render_message(ctx: &egui::Context, ui: &mut egui::Ui, msg: &ChatMessage) {
                             );
                         });
 
-                    ui.with_layout(Layout::right_to_left(Align::Top), |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                         render_timestamp(ui, msg);
                     });
                 });
@@ -192,7 +192,7 @@ fn render_message(ctx: &egui::Context, ui: &mut egui::Ui, msg: &ChatMessage) {
 
         // ── Agent message — left-aligned, dark bubble, optional cursor ────────
         MessageRole::Agent => {
-            ui.with_layout(Layout::left_to_right(Align::Top), |ui| {
+            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
                 ui.set_max_width(max_bubble_width);
 
                 ui.vertical(|ui| {

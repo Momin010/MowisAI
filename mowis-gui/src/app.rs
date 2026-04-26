@@ -3,13 +3,14 @@ use crate::theme::Theme;
 use crate::types::{BackendEvent, ChatMessage, FileDiff, FrontendCommand, Task, TaskStatus};
 use crate::views::{build::BuildView, chat::ChatView, diff::DiffView, landing::LandingView};
 use crate::widgets::{show_status_bar, StatusBarState};
-use egui::{CentralPanel, Frame, SidePanel, TopBottomPanel};
-use std::time::Instant;
+use egui::{CentralPanel, Frame, RichText, SidePanel, TopBottomPanel};
+use std::time::{Duration, Instant};
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq)]
 enum Screen {
+    Setup,
     Landing,
     Main,
 }
@@ -36,6 +37,10 @@ pub struct MowisApp {
     // Status bar
     daemon_running: bool,
     started_at: Instant,
+
+    // Setup screen state
+    setup_label: String,
+    setup_pct: u8,
 }
 
 impl MowisApp {
@@ -49,7 +54,7 @@ impl MowisApp {
         let backend = Backend::spawn(project_dir);
 
         Self {
-            screen: Screen::Landing,
+            screen: Screen::Setup,
             landing: LandingView::new(),
             chat: ChatView::default(),
             build: BuildView::default(),
@@ -60,6 +65,8 @@ impl MowisApp {
             backend,
             daemon_running: false,
             started_at: Instant::now(),
+            setup_label: "Starting AI engine…".into(),
+            setup_pct: 0,
         }
     }
 
@@ -68,8 +75,45 @@ impl MowisApp {
     fn drain_backend_events(&mut self) {
         while let Ok(event) = self.backend.event_rx.try_recv() {
             match event {
+                BackendEvent::SetupProgress(p) => {
+                    use crate::types::SetupProgress;
+                    let label = match p {
+                        SetupProgress::Checking => {
+                            self.setup_pct = 5;
+                            "Checking for AI engine…".into()
+                        }
+                        SetupProgress::Downloading { label, pct } => {
+                            self.setup_pct = pct;
+                            format!("Downloading {label}… {pct}%")
+                        }
+                        SetupProgress::Installing { step } => {
+                            self.setup_pct = 80;
+                            format!("Installing: {step}")
+                        }
+                        SetupProgress::Starting => {
+                            self.setup_pct = 90;
+                            "Starting AI engine…".into()
+                        }
+                        SetupProgress::Ready => {
+                            self.setup_pct = 100;
+                            self.daemon_running = true;
+                            if self.screen == Screen::Setup {
+                                self.screen = Screen::Landing;
+                            }
+                            "AI engine ready.".into()
+                        }
+                        SetupProgress::Warning(w) => format!("Warning: {w}"),
+                        SetupProgress::Failed(e) => format!("Setup failed: {e}"),
+                    };
+                    self.setup_label = label.clone();
+                    self.messages.push(ChatMessage::system(label));
+                }
                 BackendEvent::DaemonStarted => {
                     self.daemon_running = true;
+                    self.setup_pct = 100;
+                    if self.screen == Screen::Setup {
+                        self.screen = Screen::Landing;
+                    }
                     self.messages.push(ChatMessage::system("Daemon connected."));
                 }
                 BackendEvent::DaemonFailed(e) => {
@@ -172,6 +216,7 @@ impl eframe::App for MowisApp {
         self.drain_backend_events();
 
         match self.screen {
+            Screen::Setup => self.render_setup(ctx),
             Screen::Landing => self.render_landing(ctx),
             Screen::Main => self.render_main(ctx),
         }
@@ -181,6 +226,75 @@ impl eframe::App for MowisApp {
 // ── Screen renderers ──────────────────────────────────────────────────────────
 
 impl MowisApp {
+    fn render_setup(&mut self, ctx: &egui::Context) {
+        // Keep the screen animating while we wait for the daemon.
+        ctx.request_repaint_after(Duration::from_millis(100));
+
+        CentralPanel::default()
+            .frame(Frame::none().fill(Theme::BG_APP))
+            .show(ctx, |ui| {
+                let available = ui.available_size();
+
+                // Content height estimate: title ~50 + gap ~12 + label ~20 +
+                // gap ~16 + progress ~12 + gap ~16 + spinner ~20 = ~146px
+                let content_h = 146.0_f32;
+                let top_pad = ((available.y - content_h) * 0.5).max(40.0);
+
+                ui.allocate_ui_with_layout(
+                    available,
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(top_pad);
+
+                        // ── Title ─────────────────────────────────────────────
+                        ui.label(
+                            RichText::new("MowisAI")
+                                .font(egui::FontId::proportional(42.0))
+                                .color(Theme::TEXT_PRIMARY)
+                                .strong(),
+                        );
+
+                        ui.add_space(12.0);
+
+                        // ── Current setup label ───────────────────────────────
+                        ui.label(
+                            RichText::new(&self.setup_label)
+                                .font(Theme::font_body())
+                                .color(Theme::TEXT_SECONDARY),
+                        );
+
+                        ui.add_space(16.0);
+
+                        // ── Progress bar ──────────────────────────────────────
+                        let fraction = self.setup_pct as f32 / 100.0;
+                        ui.add(
+                            egui::ProgressBar::new(fraction)
+                                .desired_width(400.0)
+                                .fill(Theme::ACCENT_BLUE),
+                        );
+
+                        ui.add_space(16.0);
+
+                        // ── Spinner (animated dots) ───────────────────────────
+                        // Derive a tick from wall-clock time so it animates
+                        // independently of frame rate.
+                        let tick = (self.started_at.elapsed().as_millis() / 400) as usize;
+                        let dots = match tick % 4 {
+                            0 => "   ",
+                            1 => ".  ",
+                            2 => ".. ",
+                            _ => "...",
+                        };
+                        ui.label(
+                            RichText::new(dots)
+                                .font(egui::FontId::proportional(18.0))
+                                .color(Theme::ACCENT_BLUE),
+                        );
+                    },
+                );
+            });
+    }
+
     fn render_landing(&mut self, ctx: &egui::Context) {
         CentralPanel::default()
             .frame(Frame::none().fill(Theme::BG_APP))
