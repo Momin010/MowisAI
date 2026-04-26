@@ -15,6 +15,7 @@ pub mod mock_agent;
 pub mod simulate;
 pub mod health;
 pub mod complexity_classifier;
+pub mod provider_client;
 
 // Re-export main types
 pub use new_orchestrator::{NewOrchestrator, OrchestratorConfig, FinalOutput, OrchestratorEvent};

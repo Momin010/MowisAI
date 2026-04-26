@@ -4,6 +4,7 @@
 //! parses unified diffs, detects semantic conflicts, and uses Gemini to make intelligent
 //! merge decisions.
 
+use super::provider_client::{generate_text, LlmConfig};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -379,16 +380,16 @@ fn hunks_overlap_between_agents(agent_entries: &[(usize, &FileChange)]) -> bool 
 // ── Merge Reviewer Agent ─────────────────────────────────────────────────────
 
 /// LLM-powered merge reviewer. Auto-accepts conflict-free changes and uses
-/// Gemini to resolve any detected conflicts.
+/// an LLM to resolve any detected conflicts.
 pub struct MergeReviewerAgent {
-    project_id: String,
+    llm_config: LlmConfig,
     max_retries: usize,
 }
 
 impl MergeReviewerAgent {
-    pub fn new(project_id: String) -> Self {
+    pub fn new(llm_config: LlmConfig) -> Self {
         Self {
-            project_id,
+            llm_config,
             max_retries: 3,
         }
     }
@@ -482,7 +483,7 @@ impl MergeReviewerAgent {
 
         let prompt = self.build_conflict_prompt(&conflicts, &file_map, &contributions);
 
-        let llm_raw = self.call_gemini(&prompt).await?;
+        let llm_raw = self.call_llm(&prompt).await?;
         let conflict_decisions = parse_llm_decisions(&llm_raw, &conflicts);
 
         let mut conflicts_resolved = 0usize;
@@ -624,72 +625,37 @@ Output ONLY the JSON array, no other text."#,
         )
     }
 
-    /// Call Gemini with the conflict resolution prompt and return the raw response text.
-    async fn call_gemini(&self, prompt: &str) -> Result<String> {
-        let access_token = super::gcloud_access_token()?;
-        let url = super::vertex_generate_url(&self.project_id);
-
-        let request_body = json!({
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt}]
-                }
-            ],
-            "systemInstruction": {
-                "parts": [{
-                    "text": "You are a senior software engineer resolving merge conflicts. Respond ONLY with a valid JSON array."
-                }]
-            },
-            "generationConfig": super::vertex_generation_config_json(0.2)
-        });
-
-        let client = reqwest::Client::new();
+    /// Call the configured LLM with the conflict resolution prompt.
+    async fn call_llm(&self, prompt: &str) -> Result<String> {
+        let system_prompt = "You are a senior software engineer resolving merge conflicts. Respond ONLY with a valid JSON array.";
         let mut last_err: Option<anyhow::Error> = None;
 
         for attempt in 0..self.max_retries {
-            let response = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", access_token))
-                .header("Content-Type", "application/json")
-                .json(&request_body)
-                .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
-                .send()
-                .await
-                .context("Failed to send conflict review request to Gemini")?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                let err = anyhow!("Gemini API returned {}: {}", status, body);
-                if attempt < self.max_retries - 1 {
-                    log::info!("⚠️  MergeReviewer attempt {}/{} failed: {}", attempt + 1, self.max_retries, status);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2u64.pow(attempt as u32))).await;
-                    last_err = Some(err);
-                    continue;
+            match generate_text(&self.llm_config, system_prompt, prompt, true, 0.2).await {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    if attempt < self.max_retries - 1 {
+                        log::info!(
+                            "⚠️  MergeReviewer attempt {}/{} failed: {}",
+                            attempt + 1,
+                            self.max_retries,
+                            e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            2u64.pow(attempt as u32),
+                        ))
+                        .await;
+                        last_err = Some(e);
+                    } else {
+                        return Err(e);
+                    }
                 }
-                return Err(err);
             }
-
-            let response_json: serde_json::Value = response
-                .json()
-                .await
-                .context("Failed to parse Gemini response JSON")?;
-
-            let text = response_json
-                .get("candidates")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("content"))
-                .and_then(|c| c.get("parts"))
-                .and_then(|p| p.get(0))
-                .and_then(|p| p.get("text"))
-                .and_then(|t| t.as_str())
-                .ok_or_else(|| anyhow!("Unexpected Gemini response structure — missing candidates[0].content.parts[0].text"))?;
-
-            return Ok(text.to_string());
         }
 
-        Err(last_err.unwrap_or_else(|| anyhow!("Gemini call failed after {} attempts", self.max_retries)))
+        Err(last_err.unwrap_or_else(|| {
+            anyhow!("LLM call failed after {} attempts", self.max_retries)
+        }))
     }
 }
 
