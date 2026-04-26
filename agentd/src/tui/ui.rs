@@ -1,9 +1,9 @@
-use super::app::{App, MainView, MessageRole};
+﻿use super::app::{App, MainView, MessageRole};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -39,9 +39,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         MainView::Orchestration if app.orchestrating => draw_orchestration_dashboard(f, app, chunks[1]),
         _ => draw_chat(f, app, chunks[1]),
     }
-
     draw_input(f, app, chunks[2]);
     draw_status(f, app, chunks[3]);
+    // Save selector overlay — renders on top of everything else
+    if app.save_selector.is_some() {
+        draw_save_selector_overlay(f, app);
+    }
 }
 
 fn draw_title(f: &mut Frame, app: &App, area: Rect) {
@@ -469,4 +472,95 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(Color::DarkGray).fg(Color::Rgb(150, 150, 150)))
         .alignment(Alignment::Left);
     f.render_widget(widget, area);
+}
+pub fn draw_save_selector_overlay(f: &mut Frame, app: &App) {
+    let sel = match &app.save_selector {
+        Some(s) => s,
+        None => return,
+    };
+
+    let area = f.size();
+
+    // Center a 62x14 popup
+    let popup_width = if area.width > 66 { 62u16 } else { area.width.saturating_sub(4) };
+    let popup_height = if area.height > 18 { 14u16 } else { area.height.saturating_sub(4) };
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect { x, y, width: popup_width, height: popup_height };
+
+    // Clear background
+    f.render_widget(Clear, popup_area);
+
+    // Outer border box
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BRIGHT_GREEN))
+        .title(Span::styled(
+            " Save Generated Code ",
+            Style::default().fg(BRIGHT_GREEN).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(block, popup_area);
+
+    // Inner content area
+    let inner = Rect {
+        x: popup_area.x + 1,
+        y: popup_area.y + 1,
+        width: popup_area.width.saturating_sub(2),
+        height: popup_area.height.saturating_sub(2),
+    };
+
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    let options: [(&str, String); 3] = [
+        ("Save into current directory", format!("  -> {}", cwd)),
+        ("Save to a specific path", "  -> type the path below".to_string()),
+        ("Create new folder here", "  -> mowisai-output-<timestamp>/".to_string()),
+    ];
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled("  Select where to save:", Style::default().fg(DIM))));
+    lines.push(Line::from(""));
+
+    for (i, (label, hint)) in options.iter().enumerate() {
+        let is_selected = sel.selected == i;
+        let (bullet, label_style, hint_style) = if is_selected {
+            (
+                "> ",
+                Style::default().fg(BRIGHT_GREEN).add_modifier(Modifier::BOLD),
+                Style::default().fg(WHITE),
+            )
+        } else {
+            (
+                "  ",
+                Style::default().fg(DIM),
+                Style::default().fg(Color::Rgb(70, 70, 70)),
+            )
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(bullet, label_style),
+            Span::styled(format!("[{}] {}", i + 1, label), label_style),
+        ]));
+        lines.push(Line::from(Span::styled(format!("     {}", hint), hint_style)));
+
+        // Show text input for "specific path" option when typing
+        if i == 1 && is_selected && sel.typing_path {
+            let cursor_input = format!("     > {}\u{2588}", sel.custom_path_input);
+            lines.push(Line::from(Span::styled(
+                cursor_input,
+                Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
+            )));
+        }
+
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "  Up/Down: navigate  |  Enter: confirm  |  Esc: cancel",
+        Style::default().fg(DIM),
+    )));
+
+    f.render_widget(Paragraph::new(lines), inner);
 }

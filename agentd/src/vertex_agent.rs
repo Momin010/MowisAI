@@ -204,7 +204,7 @@ fn gcloud_access_token() -> Result<String> {
 }
 
 #[cfg(unix)]
-fn gemini_tool_declarations() -> Value {
+pub fn gemini_tool_declarations() -> Value {
     json!([
         {
             "name": "read_file",
@@ -1090,7 +1090,7 @@ fn gemini_tool_declarations() -> Value {
 }
 
 #[cfg(unix)]
-fn parse_ok_field(resp: &Value, key: &str) -> Result<String> {
+pub fn parse_ok_field(resp: &Value, key: &str) -> Result<String> {
     if resp.get("status").and_then(|s| s.as_str()) != Some("ok") {
         let err = resp
             .get("error")
@@ -1111,7 +1111,7 @@ fn parse_ok_field(resp: &Value, key: &str) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn socket_roundtrip(socket_path: &str, req: &Value) -> Result<Value> {
+pub fn socket_roundtrip(socket_path: &str, req: &Value) -> Result<Value> {
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(socket_path).context("UnixStream::connect")?;
@@ -1133,7 +1133,7 @@ fn socket_roundtrip(socket_path: &str, req: &Value) -> Result<Value> {
 }
 
 #[cfg(unix)]
-fn invoke_tool_via_socket(
+pub fn invoke_tool_via_socket(
     socket_path: &str,
     sandbox_id: &str,
     container_id: &str,

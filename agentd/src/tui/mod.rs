@@ -85,6 +85,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 Ok(TuiEvent::GeminiDone) => app.on_gemini_done(),
                 Ok(TuiEvent::GeminiError(err)) => app.on_gemini_error(err),
                 Ok(TuiEvent::OrchEvent(ev)) => app.on_orch_event(ev),
+                Ok(TuiEvent::OrchComplete { diff, summary }) => app.on_orch_complete(diff, summary),
                 Ok(TuiEvent::OrchDone) => app.on_orch_done(),
                 Ok(TuiEvent::LogEntry { level, message, timestamp }) => {
                     app.on_log_entry(level, message, timestamp);
