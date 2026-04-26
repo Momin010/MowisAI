@@ -401,7 +401,7 @@ fn render_diff_line(
         .inner_margin(egui::Margin::same(0.0))
         .show(ui, |ui| {
             ui.set_min_width(avail_width);
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Top), |ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                 // ── Gutter ────────────────────────────────────────────────────
                 ui.allocate_ui_with_layout(
                     Vec2::new(gutter_width, 18.0),

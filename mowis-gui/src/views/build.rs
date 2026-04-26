@@ -173,7 +173,7 @@ fn show_task_row(ui: &mut egui::Ui, task: &Task, time: f64) {
             ui.set_width(ui.available_width());
 
             // ── Status dot ────────────────────────────────────────────────────
-            let (dot_rect, _) = ui.allocate_space(Vec2::splat(12.0));
+            let (_, dot_rect) = ui.allocate_space(Vec2::splat(12.0));
             let dot_center = dot_rect.center();
 
             let base_color = status_color(&task.status);
@@ -228,7 +228,7 @@ fn show_task_row(ui: &mut egui::Ui, task: &Task, time: f64) {
                         text_size.y + padding.y * 2.0,
                     );
 
-                    let (badge_rect, _) = ui.allocate_space(badge_size);
+                    let (_, badge_rect) = ui.allocate_space(badge_size);
 
                     ui.painter().rect_filled(
                         badge_rect,
@@ -239,7 +239,6 @@ fn show_task_row(ui: &mut egui::Ui, task: &Task, time: f64) {
                         badge_rect,
                         Theme::ROUNDING_PILL,
                         Stroke::new(1.0, Theme::BORDER),
-                        egui::StrokeKind::Inside,
                     );
 
                     let text_pos = egui::pos2(
