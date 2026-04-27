@@ -1,8 +1,10 @@
-use crate::platform::{self, ConnectionTarget, DaemonPlatform, SetupProgress};
+use crate::platform::{self, connection, ConnectionInfo, SetupProgress, VmLauncher};
 use crate::types::{BackendEvent, FileDiff, FrontendCommand, Task, TaskStatus};
 use anyhow::Result;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch, Mutex};
 
 // ── Helper macro ──────────────────────────────────────────────────────────────
 
@@ -52,44 +54,123 @@ async fn run(
     event_tx: mpsc::Sender<BackendEvent>,
     command_rx: mpsc::Receiver<FrontendCommand>,
 ) {
-    let mut daemon = platform::create_platform();
+    let launcher: Arc<Mutex<Box<dyn VmLauncher>>> =
+        Arc::new(Mutex::new(platform::create_launcher()));
 
-    // Forward setup progress to the UI as DaemonSetup events.
+    // Forward SetupProgress → BackendEvent.
     let (setup_tx, mut setup_rx) = mpsc::channel::<SetupProgress>(32);
-    let ui_tx = event_tx.clone();
-    tokio::spawn(async move {
-        while let Some(p) = setup_rx.recv().await {
-            let _ = ui_tx.send(BackendEvent::SetupProgress(p)).await;
-        }
-    });
-
-    match daemon.ensure_running(setup_tx).await {
-        Ok(()) => {
-            let _ = event_tx.send(BackendEvent::DaemonStarted).await;
-        }
-        Err(e) => {
-            let _ = event_tx
-                .send(BackendEvent::DaemonFailed(e.to_string()))
-                .await;
-        }
+    {
+        let ui_tx = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(p) = setup_rx.recv().await {
+                let _ = ui_tx.send(BackendEvent::SetupProgress(p)).await;
+            }
+        });
     }
 
-    // Git diff watcher.
-    let watcher_tx = event_tx.clone();
-    let watcher_dir = project_dir.clone();
-    let target = daemon.connection_target();
-    tokio::spawn(async move {
-        run_git_watcher(watcher_dir, watcher_tx).await;
-    });
+    let conn_info = {
+        let mut l = launcher.lock().await;
+        l.start(setup_tx).await
+    };
 
-    run_command_handler(command_rx, event_tx, daemon, target).await;
+    match conn_info {
+        Ok(info) => {
+            let _ = event_tx.send(BackendEvent::DaemonStarted).await;
+
+            // Distribute ConnectionInfo via a watch channel so the health-check
+            // loop can update it after a restart.
+            let (info_tx, info_rx) = watch::channel(info);
+
+            // Spawn health-check task (every 10 s).
+            {
+                let launcher_hc = launcher.clone();
+                let info_tx_hc = info_tx.clone();
+                let event_tx_hc = event_tx.clone();
+                tokio::spawn(health_check_loop(launcher_hc, info_tx_hc, event_tx_hc));
+            }
+
+            // Spawn git diff watcher.
+            {
+                let watcher_tx = event_tx.clone();
+                let watcher_dir = project_dir.clone();
+                tokio::spawn(async move {
+                    run_git_watcher(watcher_dir, watcher_tx).await;
+                });
+            }
+
+            run_command_handler(command_rx, event_tx, info_rx).await;
+        }
+        Err(e) => {
+            let _ = event_tx.send(BackendEvent::DaemonFailed(e.to_string())).await;
+        }
+    }
+}
+
+// ── Health-check loop ─────────────────────────────────────────────────────────
+
+async fn health_check_loop(
+    launcher: Arc<Mutex<Box<dyn VmLauncher>>>,
+    info_tx: watch::Sender<ConnectionInfo>,
+    event_tx: mpsc::Sender<BackendEvent>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    interval.tick().await; // skip the immediate first tick
+
+    loop {
+        interval.tick().await;
+
+        let healthy = {
+            let l = launcher.lock().await;
+            l.health_check().await.unwrap_or(false)
+        };
+
+        if healthy {
+            continue;
+        }
+
+        log::warn!("Health check failed — attempting daemon restart");
+        let _ = event_tx
+            .send(BackendEvent::SetupProgress(SetupProgress::Warning(
+                "Connection lost — restarting daemon…".into(),
+            )))
+            .await;
+
+        let (setup_tx, mut setup_rx) = mpsc::channel::<SetupProgress>(32);
+        {
+            let ui_tx = event_tx.clone();
+            tokio::spawn(async move {
+                while let Some(p) = setup_rx.recv().await {
+                    let _ = ui_tx.send(BackendEvent::SetupProgress(p)).await;
+                }
+            });
+        }
+
+        let result = {
+            let mut l = launcher.lock().await;
+            l.start(setup_tx).await
+        };
+
+        match result {
+            Ok(new_info) => {
+                let _ = info_tx.send(new_info);
+                let _ = event_tx.send(BackendEvent::DaemonStarted).await;
+            }
+            Err(e) => {
+                log::error!("Daemon restart failed: {e}");
+                let _ = event_tx
+                    .send(BackendEvent::DaemonFailed(e.to_string()))
+                    .await;
+                return; // Irrecoverable — stop health-checking.
+            }
+        }
+    }
 }
 
 // ── Git diff watcher ─────────────────────────────────────────────────────────
 
 async fn run_git_watcher(project_dir: String, event_tx: mpsc::Sender<BackendEvent>) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-    interval.tick().await; // skip immediate first tick
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    interval.tick().await; // skip first tick
 
     loop {
         interval.tick().await;
@@ -146,23 +227,23 @@ async fn poll_git_diffs(
 async fn run_command_handler(
     mut command_rx: mpsc::Receiver<FrontendCommand>,
     event_tx: mpsc::Sender<BackendEvent>,
-    daemon: Box<dyn DaemonPlatform>,
-    target: ConnectionTarget,
+    info_rx: watch::Receiver<ConnectionInfo>,
 ) {
     while let Some(cmd) = command_rx.recv().await {
         match cmd {
             FrontendCommand::StartOrchestration { prompt } => {
                 let tx = event_tx.clone();
-                let t = target.clone();
+                let info = info_rx.borrow().clone();
                 tokio::spawn(async move {
-                    handle_start_orchestration(prompt, tx, t).await;
+                    handle_start_orchestration(prompt, tx, info).await;
                 });
             }
             FrontendCommand::StopOrchestration => {
+                let info = info_rx.borrow().clone();
                 let _ = send_socket_json(
                     serde_json::json!({ "type": "stop" }),
                     &event_tx,
-                    &target,
+                    &info,
                 )
                 .await;
             }
@@ -171,37 +252,38 @@ async fn run_command_handler(
             }
         }
     }
-    drop(daemon);
 }
 
 // ── Socket IO ─────────────────────────────────────────────────────────────────
 
-/// Open a stream to the daemon — UnixStream on Linux/macOS-native,
-/// TcpStream when the daemon runs inside a VM on macOS/Windows.
+/// Open a connection and perform JSON RPC, retrying up to 5 times with
+/// exponential backoff on transient connect failures.
 async fn send_socket_json(
     payload: serde_json::Value,
     event_tx: &mpsc::Sender<BackendEvent>,
-    target: &ConnectionTarget,
+    info: &ConnectionInfo,
 ) -> Result<()> {
-    match target {
-        #[cfg(unix)]
-        ConnectionTarget::UnixSocket(path) => {
-            let stream = tokio::net::UnixStream::connect(path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Cannot connect to {path}: {e}"))?;
-            do_socket_io(stream, payload, event_tx).await
-        }
-        ConnectionTarget::Tcp { port } => {
-            let stream = tokio::net::TcpStream::connect(("127.0.0.1", *port))
-                .await
-                .map_err(|e| anyhow::anyhow!("Cannot connect to 127.0.0.1:{port}: {e}"))?;
-            do_socket_io(stream, payload, event_tx).await
+    let mut delay = Duration::from_millis(200);
+
+    for attempt in 1u8..=5 {
+        match connection::open_connection(info).await {
+            Ok(stream) => return do_socket_io(stream, payload, event_tx).await,
+            Err(e) => {
+                if attempt == 5 {
+                    return Err(e);
+                }
+                log::warn!("Connect attempt {attempt}/5 failed: {e}; retrying in {delay:?}");
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
         }
     }
+
+    unreachable!()
 }
 
 /// Generic over stream type — works with UnixStream, TcpStream, or any
-/// type that implements AsyncRead + AsyncWrite.
+/// AsyncRead + AsyncWrite transport.
 async fn do_socket_io<S>(
     stream: S,
     payload: serde_json::Value,
@@ -269,12 +351,10 @@ fn socket_value_to_event(v: &serde_json::Value) -> Option<BackendEvent> {
             let status = parse_task_status(&v["status"]);
             Some(BackendEvent::TaskUpdated { id, status })
         }
-        "agent_chunk" => Some(BackendEvent::AgentChunk(
-            v["content"].as_str()?.to_owned(),
-        )),
-        "agent_message" => Some(BackendEvent::AgentMessage(
-            v["content"].as_str()?.to_owned(),
-        )),
+        "agent_chunk" => Some(BackendEvent::AgentChunk(v["content"].as_str()?.to_owned())),
+        "agent_message" => {
+            Some(BackendEvent::AgentMessage(v["content"].as_str()?.to_owned()))
+        }
         "complete" => Some(BackendEvent::OrchestrationComplete),
         "error" => Some(BackendEvent::OrchestrationFailed(
             v["message"].as_str().unwrap_or("unknown error").to_owned(),
@@ -297,7 +377,7 @@ fn parse_task_status(v: &serde_json::Value) -> TaskStatus {
 async fn handle_start_orchestration(
     prompt: String,
     event_tx: mpsc::Sender<BackendEvent>,
-    target: ConnectionTarget,
+    info: ConnectionInfo,
 ) {
     let payload = serde_json::json!({
         "type":       "orchestrate",
@@ -306,8 +386,8 @@ async fn handle_start_orchestration(
         "max_agents": 100,
     });
 
-    if let Err(e) = send_socket_json(payload, &event_tx, &target).await {
-        log::warn!("Could not deliver orchestrate command to socket: {e}");
+    if let Err(e) = send_socket_json(payload, &event_tx, &info).await {
+        log::warn!("Could not deliver orchestrate command to daemon: {e}");
     }
 
     simulate_task_stream(prompt, event_tx).await;
@@ -339,14 +419,14 @@ async fn simulate_task_stream(prompt: String, event_tx: mpsc::Sender<BackendEven
         if event_tx.send(BackendEvent::TaskAdded(task.clone())).await.is_err() {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
     }
 
     send_or_return!(
         event_tx,
         BackendEvent::TaskUpdated { id: "t1".into(), status: TaskStatus::Running }
     );
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     for chunk in &[
         "Understood. Analysing your request…\n",
@@ -355,29 +435,27 @@ async fn simulate_task_stream(prompt: String, event_tx: mpsc::Sender<BackendEven
         "I will keep you updated as each task completes.\n",
     ] {
         send_or_return!(event_tx, BackendEvent::AgentChunk(chunk.to_string()));
-        tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+        tokio::time::sleep(Duration::from_millis(180)).await;
     }
 
     send_or_return!(
         event_tx,
         BackendEvent::TaskUpdated { id: "t1".into(), status: TaskStatus::Complete }
     );
-
     send_or_return!(
         event_tx,
         BackendEvent::TaskUpdated { id: "t2".into(), status: TaskStatus::Running }
     );
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     send_or_return!(
         event_tx,
         BackendEvent::TaskUpdated { id: "t2".into(), status: TaskStatus::Complete }
     );
-
     send_or_return!(
         event_tx,
         BackendEvent::TaskUpdated { id: "t3".into(), status: TaskStatus::Running }
     );
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
     send_or_return!(
         event_tx,
         BackendEvent::TaskUpdated { id: "t3".into(), status: TaskStatus::Complete }

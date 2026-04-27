@@ -1,36 +1,39 @@
-use super::{ConnectionTarget, DaemonPlatform};
+use super::{ConnectionInfo, VmLauncher};
 use crate::types::SetupProgress;
 use anyhow::Result;
 use async_trait::async_trait;
+use std::path::PathBuf;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 const SOCKET_PATH: &str = "/tmp/agentd.sock";
 
-pub struct LinuxPlatform {
+pub struct LinuxDirectLauncher {
     child: Option<tokio::process::Child>,
+    conn_info: Option<ConnectionInfo>,
 }
 
-impl LinuxPlatform {
+impl LinuxDirectLauncher {
     pub fn new() -> Self {
-        Self { child: None }
+        Self { child: None, conn_info: None }
     }
 }
 
 #[async_trait]
-impl DaemonPlatform for LinuxPlatform {
-    async fn ensure_running(&mut self, tx: mpsc::Sender<SetupProgress>) -> Result<()> {
+impl VmLauncher for LinuxDirectLauncher {
+    async fn start(&mut self, tx: mpsc::Sender<SetupProgress>) -> Result<ConnectionInfo> {
         let _ = tx.send(SetupProgress::Checking).await;
 
-        if self.is_reachable().await {
+        if socket_reachable().await {
+            let info = ConnectionInfo::UnixSocket { path: PathBuf::from(SOCKET_PATH) };
+            self.conn_info = Some(info.clone());
             let _ = tx.send(SetupProgress::Ready).await;
-            return Ok(());
+            return Ok(info);
         }
 
         let _ = tx.send(SetupProgress::Starting).await;
 
-        let bin = which::which("agentd")
-            .unwrap_or_else(|_| std::path::PathBuf::from("./agentd"));
-
+        let bin = which::which("agentd").unwrap_or_else(|_| PathBuf::from("./agentd"));
         log::info!("Launching agentd from {:?}", bin);
 
         let child = tokio::process::Command::new(&bin)
@@ -42,31 +45,26 @@ impl DaemonPlatform for LinuxPlatform {
 
         self.child = Some(child);
 
-        // Wait up to 5 s for the socket to become connectable.
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Poll with exponential backoff until the socket appears (max 10 s).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut delay = Duration::from_millis(100);
         loop {
-            if self.is_reachable().await {
+            if socket_reachable().await {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow::anyhow!(
-                    "agentd did not create socket at {SOCKET_PATH} within 5 seconds"
+                    "agentd did not create socket at {SOCKET_PATH} within 10 s"
                 ));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(1));
         }
 
+        let info = ConnectionInfo::UnixSocket { path: PathBuf::from(SOCKET_PATH) };
+        self.conn_info = Some(info.clone());
         let _ = tx.send(SetupProgress::Ready).await;
-        Ok(())
-    }
-
-    fn connection_target(&self) -> ConnectionTarget {
-        ConnectionTarget::UnixSocket(SOCKET_PATH.to_owned())
-    }
-
-    async fn is_reachable(&self) -> bool {
-        tokio::net::UnixStream::connect(SOCKET_PATH).await.is_ok()
+        Ok(info)
     }
 
     async fn stop(&mut self) -> Result<()> {
@@ -76,4 +74,16 @@ impl DaemonPlatform for LinuxPlatform {
         }
         Ok(())
     }
+
+    async fn health_check(&self) -> Result<bool> {
+        Ok(socket_reachable().await)
+    }
+
+    fn connection_info(&self) -> Option<&ConnectionInfo> {
+        self.conn_info.as_ref()
+    }
+}
+
+async fn socket_reachable() -> bool {
+    tokio::net::UnixStream::connect(SOCKET_PATH).await.is_ok()
 }
