@@ -1,49 +1,286 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MowisAI Desktop</title>
-    <link rel="stylesheet" href="src/styles.css" />
-  </head>
-  <body>
-    <div id="app" class="mw-app">
-      <header class="mw-titlebar">
-        <div class="mw-traffic"><span></span><span></span><span></span></div>
-        <div class="mw-titlebar-center"><span>MowisAI</span><span class="sep">/</span><span id="screen-label">Session</span></div>
-        <div class="mw-titlebar-right"><span><i class="mw-status-dot"></i>CONNECTED</span></div>
-      </header>
-      <div class="mw-body">
-        <aside class="mw-sidebar">
-          <div class="mw-brand">MowisAI<span class="dot"></span></div>
-          <div class="mw-section-label">Workspace</div>
-          <div class="mw-nav-item active" data-screen="session">Session <span class="badge">⌘1</span></div>
-          <div class="mw-nav-item" data-screen="sandboxes">Sandboxes <span class="badge">⌘2</span></div>
-          <div class="mw-nav-item" data-screen="timeline">Timeline <span class="badge">⌘3</span></div>
-          <div class="mw-nav-item" data-screen="settings">Settings <span class="badge">⌘4</span></div>
-          <div class="mw-sidebar-spacer"></div>
-          <div class="mw-sidebar-foot">MowisAI Desktop<br/>Rust + Tauri UI</div>
-        </aside>
-        <main class="mw-main">
-          <section id="session" class="screen active">
-            <h1>Active Session</h1>
-            <p>Design system implementation of the Claude mockups in Tauri.</p>
-            <div class="mw-cards"><article class="mw-card">Planner initialized</article><article class="mw-card">5 tasks in progress</article><article class="mw-card">2 tests queued</article></div>
-          </section>
-          <section id="sandboxes" class="screen"><h1>Sandboxes</h1><p>Frontend · Backend · Verification</p></section>
-          <section id="timeline" class="screen"><h1>Timeline</h1><p>Milestones and agent events.</p></section>
-          <section id="settings" class="screen"><h1>Settings</h1><p>Theme, tools, and runtime settings.</p></section>
-        </main>
-        <aside class="mw-agents">
-          <div class="mw-agents-head">
-            <div class="title"><span>Agents</span><span>Live</span></div>
-            <div class="meta">Execution Grid</div>
-            <div class="count-row"><span class="count">8</span><span class="count-label">Active</span></div>
-          </div>
-          <div class="mw-agent-grid" id="agent-grid"></div>
-        </aside>
-      </div>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MowisAI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Tinos:ital,wght@0,400;0,700;1,400&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="src/styles.css" />
+</head>
+<body>
+
+<!-- ══════════════════ SPLASH ══════════════════ -->
+<div id="splash" class="splash">
+  <div class="splash-logo">Mowis<span>AI</span></div>
+  <div class="splash-loader"><div class="splash-track"><div class="splash-fill" id="splash-fill"></div></div></div>
+  <div class="splash-hint" id="splash-hint">Initializing…</div>
+</div>
+
+<!-- ══════════════════ APP ══════════════════ -->
+<div id="app" class="app hidden">
+
+  <!-- Titlebar -->
+  <div class="titlebar" id="titlebar">
+    <div class="tl-dots">
+      <span class="tl-red"></span>
+      <span class="tl-yellow"></span>
+      <span class="tl-green"></span>
     </div>
-    <script type="module" src="src/main.js"></script>
-  </body>
+    <div class="tl-center">
+      <span class="tl-brand">MowisAI</span>
+      <span class="tl-sep">/</span>
+      <span class="tl-page" id="tl-page">Home</span>
+    </div>
+    <div class="tl-right">
+      <span class="daemon-dot" id="daemon-dot" title="Daemon status"></span>
+      <span class="tl-version">v0.1.0</span>
+    </div>
+  </div>
+
+  <!-- Layout -->
+  <div class="layout">
+
+    <!-- ── Sidebar ── -->
+    <nav class="sidebar" id="sidebar">
+      <div class="sb-brand">
+        <span class="sb-brand-text">Mowis<span class="accent">AI</span></span>
+      </div>
+
+      <div class="sb-nav">
+        <a class="sb-item active" data-page="home" href="#">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 6L8 1L14 6V14H10V10H6V14H2V6Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+          <span>Home</span>
+        </a>
+        <a class="sb-item" data-page="sessions" href="#">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.4"/><path d="M5 6H11M5 9H9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          <span>Sessions</span>
+          <span class="sb-badge" id="sb-badge-sessions"></span>
+        </a>
+        <a class="sb-item" data-page="usage" href="#">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 12L5.5 7L8.5 9.5L11 5.5L14 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Usage</span>
+        </a>
+      </div>
+
+      <div class="sb-spacer"></div>
+
+      <div class="sb-nav sb-bottom">
+        <a class="sb-item" data-page="settings" href="#">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.4"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M2.93 2.93l1.41 1.41M11.66 11.66l1.41 1.41M2.93 13.07l1.41-1.41M11.66 4.34l1.41-1.41" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          <span>Settings</span>
+        </a>
+        <div class="sb-daemon-status" id="sb-daemon">
+          <span class="sb-daemon-dot" id="sb-daemon-dot"></span>
+          <span id="sb-daemon-label">daemon offline</span>
+        </div>
+      </div>
+    </nav>
+
+    <!-- ── Pages ── -->
+    <main class="main">
+
+      <!-- ══ HOME / CHAT ══ -->
+      <div id="page-home" class="page active">
+
+        <!-- Empty home — shown when no session -->
+        <div id="home-empty" class="home-empty">
+          <div class="home-hero">
+            <div class="home-title">What should the agents build?</div>
+            <div class="home-sub">MowisAI orchestrates hundreds of parallel AI agents in isolated sandboxes.</div>
+          </div>
+          <div class="home-compose" id="home-compose">
+            <textarea id="home-input" class="home-textarea" placeholder="Describe your task… e.g. build a REST API with OAuth2, rate limiting, and OpenAPI docs" rows="3"></textarea>
+            <div class="home-compose-row">
+              <select id="home-mode" class="mini-select">
+                <option value="auto">Auto</option>
+                <option value="simple">Simple</option>
+                <option value="standard">Standard</option>
+                <option value="full">Full</option>
+              </select>
+              <span class="home-hint">⏎ to send</span>
+              <button class="btn-send" id="btn-home-send">Run →</button>
+            </div>
+          </div>
+          <div class="home-suggestions">
+            <button class="suggestion" data-text="Implement a full authentication system with OAuth2, JWT, refresh tokens, and React UI">Auth system with OAuth2</button>
+            <button class="suggestion" data-text="Build a microservices architecture with Docker Compose, API gateway, and health checks">Microservices + Docker</button>
+            <button class="suggestion" data-text="Write comprehensive unit and integration tests with 90%+ coverage for the codebase">Full test coverage</button>
+            <button class="suggestion" data-text="Set up CI/CD pipeline with GitHub Actions, Docker, and automated deployment scripts">CI/CD pipeline</button>
+            <button class="suggestion" data-text="Refactor legacy monolith into clean layered architecture with domain separation">Refactor to clean arch</button>
+            <button class="suggestion" data-text="Implement GDPR-compliant data pipeline with encryption, audit logs, and consent management">GDPR data pipeline</button>
+          </div>
+        </div>
+
+        <!-- Active chat — shown during/after a session -->
+        <div id="home-chat" class="chat-wrap hidden">
+          <!-- Messages -->
+          <div class="chat-messages" id="chat-messages"></div>
+
+          <!-- Task progress panel (appears when tasks start) -->
+          <div class="task-panel" id="task-panel" style="display:none">
+            <div class="task-panel-head">
+              <span class="task-panel-title">Tasks</span>
+              <span class="task-panel-counts" id="task-counts">0 / 0</span>
+              <button class="task-panel-toggle" id="task-panel-toggle">▲</button>
+            </div>
+            <div class="task-panel-body" id="task-panel-body"></div>
+            <div class="task-progress-bar"><div class="task-progress-fill" id="task-progress-fill"></div></div>
+          </div>
+
+          <!-- Composer -->
+          <div class="chat-compose" id="chat-compose">
+            <div class="compose-inner">
+              <textarea id="chat-input" class="compose-textarea" placeholder="Follow up…" rows="1"></textarea>
+              <div class="compose-row">
+                <div class="compose-session-info" id="compose-session-info"></div>
+                <button class="btn-stop" id="btn-stop" style="display:none">Stop</button>
+                <button class="btn-send" id="btn-chat-send">Send</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ══ SESSIONS ══ -->
+      <div id="page-sessions" class="page">
+        <div class="page-head">
+          <h1>Sessions</h1>
+          <button class="btn-outline" id="btn-new-session">New session</button>
+        </div>
+        <div class="page-body">
+          <div id="sessions-empty" class="empty-state">
+            <div class="empty-icon">◻</div>
+            <div class="empty-text">No sessions yet</div>
+            <div class="empty-sub">Run your first session from the Home tab</div>
+          </div>
+          <div id="sessions-list" class="sessions-list" style="display:none"></div>
+        </div>
+      </div>
+
+      <!-- ══ USAGE ══ -->
+      <div id="page-usage" class="page">
+        <div class="page-head">
+          <h1>Usage</h1>
+        </div>
+        <div class="page-body">
+          <div class="usage-stats" id="usage-stats">
+            <div class="usage-stat">
+              <div class="us-value" id="us-sessions">0</div>
+              <div class="us-label">Total sessions</div>
+            </div>
+            <div class="usage-stat">
+              <div class="us-value" id="us-tasks">0</div>
+              <div class="us-label">Tasks executed</div>
+            </div>
+            <div class="usage-stat">
+              <div class="us-value" id="us-tokens">0</div>
+              <div class="us-label">Tokens used</div>
+            </div>
+            <div class="usage-stat">
+              <div class="us-value" id="us-tools">0</div>
+              <div class="us-label">Tool calls</div>
+            </div>
+          </div>
+          <div class="usage-section-label">Recent sessions</div>
+          <div id="usage-sessions-table" class="usage-table-wrap">
+            <div class="empty-state small">
+              <div class="empty-text">No history yet</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ SETTINGS ══ -->
+      <div id="page-settings" class="page">
+        <div class="page-head">
+          <h1>Settings</h1>
+          <button class="btn-primary" id="btn-save-settings">Save</button>
+        </div>
+        <div class="page-body">
+
+          <div class="settings-section">AI Provider</div>
+          <div class="form-row">
+            <label class="form-label">Provider<span class="form-hint">LLM backend for agents</span></label>
+            <div class="form-ctrl">
+              <select id="set-provider" class="form-select">
+                <option value="gemini">Google Gemini / Vertex AI</option>
+                <option value="anthropic">Anthropic Claude</option>
+                <option value="openai">OpenAI GPT</option>
+                <option value="grok">xAI Grok</option>
+                <option value="groq">Groq</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Model<span class="form-hint">Specific model variant</span></label>
+            <div class="form-ctrl"><input type="text" id="set-model" class="form-input" value="gemini-2.0-flash" /></div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">API Key<span class="form-hint">Stored locally, never transmitted</span></label>
+            <div class="form-ctrl"><input type="password" id="set-api-key" class="form-input" placeholder="sk-…" /></div>
+          </div>
+          <div class="form-row" id="row-gcp">
+            <label class="form-label">GCP Project<span class="form-hint">Required for Vertex AI</span></label>
+            <div class="form-ctrl"><input type="text" id="set-gcp" class="form-input" placeholder="my-project-123456" /></div>
+          </div>
+
+          <div class="settings-section">Runtime</div>
+          <div class="form-row">
+            <label class="form-label">Socket path<span class="form-hint">agentd Unix socket</span></label>
+            <div class="form-ctrl">
+              <input type="text" id="set-socket" class="form-input" value="/tmp/agentd.sock" />
+              <div class="form-actions">
+                <button class="btn-outline sm" id="btn-test-socket">Test connection</button>
+                <span class="socket-status" id="socket-status"></span>
+              </div>
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Mode<span class="form-hint">Orchestration complexity</span></label>
+            <div class="form-ctrl">
+              <select id="set-mode" class="form-select">
+                <option value="auto">Auto — classify complexity</option>
+                <option value="simple">Simple — 1 agent</option>
+                <option value="standard">Standard — ≤3 agents</option>
+                <option value="full">Full — 7-layer pipeline</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Max agents<span class="form-hint">Per session upper bound</span></label>
+            <div class="form-ctrl"><input type="number" id="set-max-agents" class="form-input sm" value="100" /></div>
+          </div>
+
+          <div class="settings-section">About</div>
+          <div class="about-block">
+            <div class="about-name">MowisAI Desktop</div>
+            <div class="about-meta" id="about-meta">—</div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div><!-- /.layout -->
+
+  <!-- Statusbar -->
+  <div class="statusbar">
+    <span id="sb-session-info">No session</span>
+    <span class="sb-sep">·</span>
+    <span id="sb-tasks">0 / 0 tasks</span>
+    <div class="sb-spacer"></div>
+    <span id="sb-provider">—</span>
+    <span class="sb-sep">·</span>
+    <span id="sb-daemon-status">daemon: offline</span>
+  </div>
+
+</div><!-- /#app -->
+
+<!-- Toast -->
+<div id="toasts" class="toasts"></div>
+
+<script type="module" src="src/main.js"></script>
+</body>
 </html>
