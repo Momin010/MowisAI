@@ -33,7 +33,7 @@ nix = "0.26"
 tempfile = "3.5"
 lazy_static = "1.4"
 clap = { version = "4.3", features = ["derive"] }
-fastrand = "1.9"
+fastrand = "2.4"
 which = "4"
 csv = "1.2"
 urlencoding = "2.1"

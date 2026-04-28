@@ -148,7 +148,7 @@ dependencies = [
  "dashmap",
  "dirs",
  "env_logger",
- "fastrand 1.9.0",
+ "fastrand 2.4.1",
  "glob",
  "lazy_static",
  "log",
