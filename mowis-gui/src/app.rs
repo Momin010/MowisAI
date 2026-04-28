@@ -1,7 +1,7 @@
 use crate::backend::Backend;
 use crate::theme::Theme;
 use crate::types::{BackendEvent, ChatMessage, FileDiff, FrontendCommand, Task, TaskStatus};
-use crate::views::{build::BuildView, chat::ChatView, diff::DiffView, landing::LandingView};
+use crate::views::{build::BuildView, chat::ChatView, diff::DiffView, landing::LandingView, onboarding::OnboardingView};
 use crate::widgets::{show_status_bar, StatusBarState};
 use egui::{CentralPanel, Frame, SidePanel, TopBottomPanel};
 use std::time::Instant;
@@ -10,6 +10,7 @@ use std::time::Instant;
 
 #[derive(Debug, PartialEq)]
 enum Screen {
+    Onboarding,
     Landing,
     Main,
 }
@@ -20,6 +21,7 @@ pub struct MowisApp {
     screen: Screen,
 
     // View states
+    onboarding: OnboardingView,
     landing: LandingView,
     chat: ChatView,
     build: BuildView,
@@ -36,6 +38,10 @@ pub struct MowisApp {
     // Status bar
     daemon_running: bool,
     started_at: Instant,
+    
+    // Onboarding state
+    first_launch: bool,
+    daemon_setup_complete: bool,
 }
 
 impl MowisApp {
@@ -47,9 +53,15 @@ impl MowisApp {
             .unwrap_or_else(|_| ".".into());
 
         let backend = Backend::spawn(project_dir);
+        
+        // Check if this is first launch (simple heuristic: no config file)
+        let first_launch = !dirs::config_dir()
+            .map(|d| d.join("mowisai").join("config.json").exists())
+            .unwrap_or(false);
 
         Self {
-            screen: Screen::Landing,
+            screen: if first_launch { Screen::Onboarding } else { Screen::Landing },
+            onboarding: OnboardingView::new(),
             landing: LandingView::new(),
             chat: ChatView::default(),
             build: BuildView::default(),
@@ -60,6 +72,8 @@ impl MowisApp {
             backend,
             daemon_running: false,
             started_at: Instant::now(),
+            first_launch,
+            daemon_setup_complete: false,
         }
     }
 
@@ -68,14 +82,45 @@ impl MowisApp {
     fn drain_backend_events(&mut self) {
         while let Ok(event) = self.backend.event_rx.try_recv() {
             match event {
+                BackendEvent::DaemonStarting => {
+                    self.messages.push(ChatMessage::system("Starting AI engine..."));
+                    // Don't change onboarding step - let user see welcome screen first
+                }
+                BackendEvent::DaemonProgress { message, percent } => {
+                    // Update the last system message if it exists
+                    if let Some(msg) = self.messages.last_mut() {
+                        if matches!(msg.role, crate::types::MessageRole::System) {
+                            msg.content = message.clone();
+                        } else {
+                            self.messages.push(ChatMessage::system(message.clone()));
+                        }
+                    } else {
+                        self.messages.push(ChatMessage::system(message.clone()));
+                    }
+                    
+                    // Only update progress if we're on the setup screen
+                    if self.onboarding.is_on_setup_screen() {
+                        let progress = percent.unwrap_or(50) as f32 / 100.0;
+                        self.onboarding.set_progress(progress, message);
+                    }
+                }
                 BackendEvent::DaemonStarted => {
                     self.daemon_running = true;
-                    self.messages.push(ChatMessage::system("Daemon connected."));
+                    self.daemon_setup_complete = true;
+                    if let Some(msg) = self.messages.last_mut() {
+                        if matches!(msg.role, crate::types::MessageRole::System) {
+                            msg.content = "AI engine ready.".to_string();
+                        }
+                    }
+                    // Don't auto-advance - let user control the flow
                 }
                 BackendEvent::DaemonFailed(e) => {
                     self.daemon_running = false;
+                    self.daemon_setup_complete = false;
                     self.messages
                         .push(ChatMessage::system(format!("Daemon error: {e}")));
+                    // Mark setup as failed so we can show error screen
+                    self.onboarding.set_failed();
                 }
                 BackendEvent::TaskAdded(task) => {
                     self.tasks.push(task);
@@ -172,6 +217,7 @@ impl eframe::App for MowisApp {
         self.drain_backend_events();
 
         match self.screen {
+            Screen::Onboarding => self.render_onboarding(ctx),
             Screen::Landing => self.render_landing(ctx),
             Screen::Main => self.render_main(ctx),
         }
@@ -181,6 +227,56 @@ impl eframe::App for MowisApp {
 // ── Screen renderers ──────────────────────────────────────────────────────────
 
 impl MowisApp {
+    fn render_onboarding(&mut self, ctx: &egui::Context) {
+        if let Some(action) = crate::views::onboarding::show(&mut self.onboarding, ctx, self.daemon_running, self.daemon_setup_complete) {
+            match action {
+                crate::views::onboarding::OnboardingAction::Continue => {
+                    // User clicked Next on welcome screen
+                    // Check if backend is ready
+                    if self.daemon_setup_complete {
+                        // Backend ready, go straight to landing
+                        self.screen = Screen::Landing;
+                        self.first_launch = false;
+                        
+                        // Create config file to mark as not first launch
+                        if let Some(config_dir) = dirs::config_dir() {
+                            let mowisai_dir = config_dir.join("mowisai");
+                            let _ = std::fs::create_dir_all(&mowisai_dir);
+                            let _ = std::fs::write(mowisai_dir.join("config.json"), "{}");
+                        }
+                    } else {
+                        // Backend not ready, show setup screen
+                        self.onboarding.set_step(crate::views::onboarding::OnboardingStep::SetupEngine);
+                    }
+                }
+                crate::views::onboarding::OnboardingAction::Skip => {
+                    // User skipped setup, go to landing anyway
+                    self.screen = Screen::Landing;
+                    self.first_launch = false;
+                    
+                    // Create config file to mark as not first launch
+                    if let Some(config_dir) = dirs::config_dir() {
+                        let mowisai_dir = config_dir.join("mowisai");
+                        let _ = std::fs::create_dir_all(&mowisai_dir);
+                        let _ = std::fs::write(mowisai_dir.join("config.json"), "{}");
+                    }
+                }
+                crate::views::onboarding::OnboardingAction::Complete => {
+                    // Setup complete, go to landing
+                    self.screen = Screen::Landing;
+                    self.first_launch = false;
+                    
+                    // Create config file to mark as not first launch
+                    if let Some(config_dir) = dirs::config_dir() {
+                        let mowisai_dir = config_dir.join("mowisai");
+                        let _ = std::fs::create_dir_all(&mowisai_dir);
+                        let _ = std::fs::write(mowisai_dir.join("config.json"), "{}");
+                    }
+                }
+            }
+        }
+    }
+
     fn render_landing(&mut self, ctx: &egui::Context) {
         CentralPanel::default()
             .frame(Frame::none().fill(Theme::BG_APP))

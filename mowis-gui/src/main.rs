@@ -1,5 +1,13 @@
+mod animation;
 mod app;
+mod auth;
 mod backend;
+mod connection;
+mod connections;
+mod launcher;
+mod launchers;
+mod platform;
+mod resources;
 mod theme;
 mod types;
 mod views;

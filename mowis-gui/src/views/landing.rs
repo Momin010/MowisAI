@@ -143,9 +143,9 @@ pub fn show(
 
                                     // Disable the button (and grey it) when prompt is empty.
                                     ui.add_enabled_ui(prompt_ready, |ui| {
-                                        // Style the button to look blue when active.
+                                        // Style the button to look turquoise when active.
                                         let (btn_fill, btn_text_color) = if prompt_ready {
-                                            (Theme::ACCENT_BLUE, Color32::from_rgb(18, 18, 18))
+                                            (Theme::ACCENT_TURQUOISE, Color32::from_rgb(10, 10, 10))
                                         } else {
                                             (Color32::from_rgb(40, 40, 40), Theme::TEXT_MUTED)
                                         };

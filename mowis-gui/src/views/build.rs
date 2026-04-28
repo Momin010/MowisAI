@@ -65,7 +65,7 @@ fn show_inner(view: &mut BuildView, ui: &mut egui::Ui, tasks: &[Task]) {
         // Left: "Build Progress" label
         ui.label(
             RichText::new("Build Progress")
-                .color(Theme::ACCENT_BLUE)
+                .color(Theme::ACCENT_TURQUOISE)
                 .font(Theme::font_label()),
         );
 
@@ -166,7 +166,7 @@ fn show_task_row(ui: &mut egui::Ui, task: &Task, time: f64) {
 
     // Row background on hover
     let row_id = egui::Id::new("task_row").with(&task.id);
-    let row_rect = ui.available_rect_before_wrap();
+    let _row_rect = ui.available_rect_before_wrap();
 
     ui.push_id(row_id, |ui| {
         ui.horizontal(|ui| {

@@ -1,5 +1,5 @@
 [workspace]
-members = ["agentd", "agentd-protocol", "runtime", "mowis-gui"]
+members = ["agentd", "agentd-protocol", "runtime", "app/src-tauri", "mowis-gui"]
 resolver = "2"
 
 [workspace.dependencies]

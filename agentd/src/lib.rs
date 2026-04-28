@@ -18,11 +18,13 @@ pub mod dependency_graph;
 pub mod hub_agent;
 pub mod image_manager;
 pub mod guest_backend;
+#[cfg(target_os = "linux")]
 pub mod vm_backend;
 pub mod memory;
 pub mod orchestration;
 pub mod persistence;
 pub mod protocol;
+#[cfg(target_os = "linux")]
 pub mod sandbox;
 pub mod security;
 pub mod socket_server;
@@ -63,6 +65,7 @@ use anyhow::Result;
 use std::fs;
 
 /// Check if socket server is responsive
+#[cfg(unix)]
 pub fn socket_is_responsive(socket_path: &str) -> bool {
     use std::os::unix::net::UnixStream;
 
@@ -77,6 +80,11 @@ pub fn socket_is_responsive(socket_path: &str) -> bool {
         }
         Err(_) => false,
     }
+}
+
+#[cfg(not(unix))]
+pub fn socket_is_responsive(_socket_path: &str) -> bool {
+    false
 }
 
 /// Get the PID of the socket server process (by checking for mowisai socket process)
@@ -236,14 +244,80 @@ pub use agent::{Agent, AgentConfig, AgentResult};
 pub use agent_loop::{AgentCoordinator, AgentLoop};
 pub use audit::{AuditEvent, AuditLogger, SecurityAuditor};
 pub use image_manager::ImageManager;
+#[cfg(target_os = "linux")]
 pub use vm_backend::{boot_vm, exec_in_vm, stop_vm, VmHandle};
 pub use memory::{AgentMemory, LongTermMemory, ShortTermMemory};
 pub use persistence::{Checkpointer, PersistenceManager, RecoveryJournal, WriteAheadLog};
 pub use protocol::*;
+#[cfg(target_os = "linux")]
 pub use sandbox::ResourceLimits;
+#[cfg(target_os = "linux")]
 pub use sandbox::Sandbox;
 pub use security::{SeccompFilter, SecurityContext, SecurityPolicy};
 pub use tools::{Tool, ToolContext, ToolDefinition};
+
+// Stub implementations for non-Linux platforms
+#[cfg(not(target_os = "linux"))]
+pub mod sandbox {
+    use anyhow::Result;
+    
+    #[derive(Debug, Clone)]
+    pub struct ResourceLimits {
+        pub ram_bytes: Option<u64>,
+        pub cpu_millis: Option<u64>,
+    }
+    
+    pub struct Sandbox;
+    
+    impl Sandbox {
+        pub fn new(_limits: ResourceLimits) -> Result<Self> {
+            anyhow::bail!("Sandbox is only supported on Linux")
+        }
+        
+        pub fn run_command(&self, _cmd: &str) -> Result<String> {
+            anyhow::bail!("Sandbox is only supported on Linux")
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub mod vm_backend {
+    use anyhow::Result;
+    use std::path::PathBuf;
+    
+    #[derive(Debug, Clone)]
+    pub enum VmBackend {
+        Qemu,
+        Firecracker,
+    }
+    
+    #[derive(Debug, Clone)]
+    pub struct VmHandle {
+        pub sandbox_id: String,
+        pub pid: u32,
+        pub backend: VmBackend,
+        pub ssh_port: u16,
+        pub ssh_key: PathBuf,
+        pub rootfs_path: PathBuf,
+    }
+    
+    pub fn boot_vm(_sandbox_id: String, _host_root: &std::path::Path, _image_hint: &str) -> Result<VmHandle> {
+        anyhow::bail!("VM backend is only supported on Linux")
+    }
+    
+    pub fn stop_vm(_handle: &VmHandle) -> Result<()> {
+        anyhow::bail!("VM backend is only supported on Linux")
+    }
+    
+    pub fn exec_in_vm(_handle: &VmHandle, _tool_name: &str, _input: serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("VM backend is only supported on Linux")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub use sandbox::{ResourceLimits, Sandbox};
+#[cfg(not(target_os = "linux"))]
+pub use vm_backend::{boot_vm, exec_in_vm, stop_vm, VmHandle};
 
 // C FFI helpers
 use std::ffi::{CStr, CString};
@@ -251,6 +325,7 @@ use std::os::raw::c_char;
 
 /// create a new sandbox and return a pointer (caller owns). ram and cpu are optional
 /// limits (0 means none).
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub extern "C" fn agent_sandbox_new(ram: u64, cpu: u64) -> *mut Sandbox {
     let limits = ResourceLimits {
@@ -263,7 +338,14 @@ pub extern "C" fn agent_sandbox_new(ram: u64, cpu: u64) -> *mut Sandbox {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn agent_sandbox_new(_ram: u64, _cpu: u64) -> *mut std::ffi::c_void {
+    std::ptr::null_mut()
+}
+
 /// run a command in sandbox; returns owned C string which must be freed by caller.
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub extern "C" fn agent_sandbox_run(sb: *mut Sandbox, cmd: *const c_char) -> *mut c_char {
     if sb.is_null() || cmd.is_null() {
@@ -281,6 +363,12 @@ pub extern "C" fn agent_sandbox_run(sb: *mut Sandbox, cmd: *const c_char) -> *mu
     std::ptr::null_mut()
 }
 
+#[cfg(not(target_os = "linux"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn agent_sandbox_run(_sb: *mut std::ffi::c_void, _cmd: *const c_char) -> *mut c_char {
+    std::ptr::null_mut()
+}
+
 /// free string returned by agent_sandbox_run
 #[unsafe(no_mangle)]
 pub extern "C" fn agent_string_free(s: *mut c_char) {
@@ -294,6 +382,7 @@ pub extern "C" fn agent_string_free(s: *mut c_char) {
 }
 
 /// free sandbox
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub extern "C" fn agent_sandbox_free(sb: *mut Sandbox) {
     if sb.is_null() {
@@ -302,6 +391,12 @@ pub extern "C" fn agent_sandbox_free(sb: *mut Sandbox) {
     unsafe {
         let _ = Box::from_raw(sb);
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn agent_sandbox_free(_sb: *mut std::ffi::c_void) {
+    // No-op on non-Linux platforms
 }
 
 // Extended C FFI for memory and agent loop

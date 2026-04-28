@@ -11,10 +11,14 @@ pub struct ResourceLimits {
 
 use anyhow::{Context, Result};
 use fastrand;
+#[cfg(target_os = "linux")]
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
+#[cfg(target_os = "linux")]
 use nix::sched;
+#[cfg(target_os = "linux")]
 use nix::sys::resource::{setrlimit, Resource};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -619,6 +623,7 @@ impl Sandbox {
     }
 
     /// create a new container from this sandbox with overlayfs isolation
+    #[cfg(target_os = "linux")]
     pub fn create_container(&mut self) -> anyhow::Result<u64> {
         // use the same structured ID scheme as sandboxes: monotonic counter + random bits
         const RANDOM_BITS: u64 = 16;
@@ -812,6 +817,11 @@ impl Sandbox {
         Ok(id)
     }
 
+    #[cfg(not(target_os = "linux"))]
+    pub fn create_container(&mut self) -> anyhow::Result<u64> {
+        anyhow::bail!("Container creation is only supported on Linux")
+    }
+
     /// get the root path for a container
     pub fn get_container_root(&self, container_id: u64) -> Option<PathBuf> {
         self.containers.get(&container_id).map(|c| c.root.clone())
@@ -884,6 +894,7 @@ impl Sandbox {
     }
 
     /// destroy a container and clean up its resources
+    #[cfg(target_os = "linux")]
     pub fn destroy_container(&mut self, container_id: u64) -> anyhow::Result<()> {
         use nix::mount::{umount2, MntFlags};
 
@@ -908,9 +919,14 @@ impl Sandbox {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
+    pub fn destroy_container(&mut self, _container_id: u64) -> anyhow::Result<()> {
+        anyhow::bail!("Container destruction is only supported on Linux")
+    }
+
     /// run a command inside the sandbox, returning stdout output or an error.
     /// this function uses `unshare` + `chroot` to isolate the process.
-
+    #[cfg(target_os = "linux")]
     pub fn run_command(&self, cmd: &str) -> Result<String> {
         let root_path = self.root.path().to_owned();
         let _sid = self.id; // copy id so closure doesn't borrow self
@@ -992,6 +1008,22 @@ impl Sandbox {
 
         let output = output_attempt
             .map_err(|e| anyhow::anyhow!("sandbox {} isolation failed: {}", self.id, e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(anyhow::anyhow!(
+                "command failed with exit code {:?}: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn run_command(&self, _cmd: &str) -> Result<String> {
+        anyhow::bail!("Sandbox command execution is only supported on Linux")
+    }
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);

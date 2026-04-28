@@ -363,3 +363,22 @@ pub struct ResourceEstimate {
     pub total_cpu_millis: u32,
     pub total_containers: usize,
 }
+
+// ============================================================================
+// SOCKET PROTOCOL TYPES (for mowis-gui communication)
+// ============================================================================
+
+/// Socket request from GUI to agentd
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketRequest {
+    pub id: String,
+    pub method: String,
+    pub params: serde_json::Value,
+}
+
+/// Socket response from agentd to GUI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketResponse {
+    pub id: String,
+    pub result: serde_json::Value,
+}

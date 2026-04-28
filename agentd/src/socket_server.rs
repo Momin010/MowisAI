@@ -4,7 +4,9 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -489,17 +491,24 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                         log::warn!("sandbox {} failed to create /workspace: {}", id, e);
                     } else {
                         // Bind mount the project directory (or scoped subdir) into /workspace
-                        if let Err(e) = nix::mount::mount(
-                            Some(&mount_source),
-                            &workspace_dir,
-                            Some("none"),
-                            nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_RDONLY,  // Read-only mount for safety
-                            None::<&str>,
-                        ) {
-                            log::warn!("sandbox {} failed to bind-mount project root: {}", id, e);
-                        } else {
-                            let scope_info = req.scope.as_ref().map(|s| format!(" (scope: {})", s)).unwrap_or_default();
-                            log::info!("[agentd] Mounted {} into sandbox {} /workspace{}", mount_source.display(), id, scope_info);
+                        #[cfg(target_os = "linux")]
+                        {
+                            if let Err(e) = nix::mount::mount(
+                                Some(&mount_source),
+                                &workspace_dir,
+                                Some("none"),
+                                nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_RDONLY,  // Read-only mount for safety
+                                None::<&str>,
+                            ) {
+                                log::warn!("sandbox {} failed to bind-mount project root: {}", id, e);
+                            } else {
+                                let scope_info = req.scope.as_ref().map(|s| format!(" (scope: {})", s)).unwrap_or_default();
+                                log::info!("[agentd] Mounted {} into sandbox {} /workspace{}", mount_source.display(), id, scope_info);
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            log::warn!("sandbox {} bind-mount not supported on this platform", id);
                         }
                     }
                 } else {

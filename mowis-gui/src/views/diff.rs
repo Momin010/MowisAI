@@ -101,7 +101,7 @@ fn render_file_tree(view: &mut DiffView, ui: &mut egui::Ui, diffs: &[FileDiff]) 
                     ui.label(
                         RichText::new("Changed Files")
                             .font(Theme::font_label())
-                            .color(Theme::ACCENT_BLUE)
+                            .color(Theme::ACCENT_TURQUOISE)
                             .strong(),
                     );
                 });

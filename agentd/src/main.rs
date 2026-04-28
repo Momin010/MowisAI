@@ -220,6 +220,7 @@ fn main() -> Result<()> {
 }
 
 /// Set up signal handlers for SIGINT and SIGTERM
+#[cfg(target_os = "linux")]
 fn setup_signal_handlers() {
     use signal_hook::consts::signal::*;
     use signal_hook::iterator::Signals;
@@ -242,6 +243,12 @@ fn setup_signal_handlers() {
             log::warn!("Failed to set up signal handlers: {}", e);
         }
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn setup_signal_handlers() {
+    // Signal handling not implemented for non-Linux platforms
+    log::info!("Signal handlers not available on this platform");
 }
 
 /// Check if shutdown was requested via signal

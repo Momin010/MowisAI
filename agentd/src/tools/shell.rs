@@ -161,6 +161,7 @@ impl Tool for KillProcessTool {
     fn name(&self) -> &'static str {
         "kill_process"
     }
+    #[cfg(target_os = "linux")]
     fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
         let pid_val = input["pid"]
             .as_u64()
@@ -172,6 +173,10 @@ impl Tool for KillProcessTool {
             Err(nix::Error::ESRCH) => Ok(json!({ "success": false, "error": "process not found" })),
             Err(e) => Err(anyhow::anyhow!("kill_process error: {}", e)),
         }
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn invoke(&self, _ctx: &ToolContext, _input: Value) -> anyhow::Result<Value> {
+        anyhow::bail!("kill_process is only supported on Linux")
     }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(KillProcessTool)

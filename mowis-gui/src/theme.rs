@@ -2,51 +2,57 @@ use egui::{Color32, FontId, Rounding, Stroke, Style, Visuals};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 //
-// Inspired by Cursor / VS Code dark theme.
+// Brand colors: Black, Cream White, Glass, Turquoise
 
 pub struct Theme;
 
 impl Theme {
-    // Backgrounds
-    pub const BG_APP: Color32 = Color32::from_rgb(18, 18, 18);
-    pub const BG_PANEL: Color32 = Color32::from_rgb(24, 24, 24);
-    pub const BG_SIDEBAR: Color32 = Color32::from_rgb(20, 20, 20);
-    pub const BG_INPUT: Color32 = Color32::from_rgb(30, 30, 30);
-    pub const BG_HOVER: Color32 = Color32::from_rgb(38, 38, 38);
-    pub const BG_SELECTED: Color32 = Color32::from_rgb(42, 42, 42);
+    // Backgrounds - Black & Glass
+    pub const BG_APP: Color32 = Color32::from_rgb(10, 10, 10);           // Pure black
+    pub const BG_PANEL: Color32 = Color32::from_rgb(15, 15, 15);         // Slightly lighter black
+    pub const BG_SIDEBAR: Color32 = Color32::from_rgb(12, 12, 12);       // Dark black
+    pub const BG_INPUT: Color32 = Color32::from_rgb(20, 20, 20);         // Input black
+    pub const BG_HOVER: Color32 = Color32::from_rgb(25, 25, 25);         // Hover state
+    pub const BG_SELECTED: Color32 = Color32::from_rgb(30, 30, 30);      // Selected state
+    
+    // Glass effect (semi-transparent)
+    pub const GLASS_LIGHT: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 10);
+    pub const GLASS_MEDIUM: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 20);
+    pub const GLASS_STRONG: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 30);
 
-    // Text
-    pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(220, 220, 220);
-    pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(140, 140, 140);
-    pub const TEXT_MUTED: Color32 = Color32::from_rgb(90, 90, 90);
-    pub const TEXT_ACCENT: Color32 = Color32::from_rgb(100, 181, 246);  // blue
+    // Text - Cream White
+    pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(250, 248, 240);   // Cream white
+    pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(200, 198, 190); // Muted cream
+    pub const TEXT_MUTED: Color32 = Color32::from_rgb(120, 118, 110);     // Very muted
+    pub const TEXT_ACCENT: Color32 = Color32::from_rgb(64, 224, 208);     // Turquoise
 
-    // Borders
-    pub const BORDER: Color32 = Color32::from_rgb(48, 48, 48);
-    pub const BORDER_FOCUS: Color32 = Color32::from_rgb(100, 181, 246);
+    // Borders - Subtle glass
+    pub const BORDER: Color32 = Color32::from_rgb(30, 30, 30);
+    pub const BORDER_FOCUS: Color32 = Color32::from_rgb(64, 224, 208);    // Turquoise
 
     // Diff colours
     pub const DIFF_ADDED_BG: Color32 = Color32::from_rgba_premultiplied(0, 60, 0, 180);
     pub const DIFF_ADDED_TEXT: Color32 = Color32::from_rgb(130, 210, 130);
     pub const DIFF_REMOVED_BG: Color32 = Color32::from_rgba_premultiplied(80, 0, 0, 180);
     pub const DIFF_REMOVED_TEXT: Color32 = Color32::from_rgb(220, 100, 100);
-    pub const DIFF_HEADER_TEXT: Color32 = Color32::from_rgb(120, 160, 220);
-    pub const DIFF_CONTEXT_TEXT: Color32 = Color32::from_rgb(170, 170, 170);
+    pub const DIFF_HEADER_TEXT: Color32 = Color32::from_rgb(64, 224, 208);  // Turquoise
+    pub const DIFF_CONTEXT_TEXT: Color32 = Color32::from_rgb(200, 198, 190);
 
-    // Accent / status
-    pub const ACCENT_BLUE: Color32 = Color32::from_rgb(100, 181, 246);
-    pub const STATUS_PENDING: Color32 = Color32::from_rgb(120, 120, 120);
-    pub const STATUS_RUNNING: Color32 = Color32::from_rgb(255, 190, 50);
+    // Accent / status - Turquoise
+    pub const ACCENT_TURQUOISE: Color32 = Color32::from_rgb(64, 224, 208);  // Primary turquoise
+    pub const ACCENT_TURQUOISE_DARK: Color32 = Color32::from_rgb(32, 178, 170); // Darker turquoise
+    pub const STATUS_PENDING: Color32 = Color32::from_rgb(120, 118, 110);
+    pub const STATUS_RUNNING: Color32 = Color32::from_rgb(64, 224, 208);    // Turquoise
     pub const STATUS_COMPLETE: Color32 = Color32::from_rgb(80, 200, 120);
     pub const STATUS_FAILED: Color32 = Color32::from_rgb(220, 80, 80);
 
     // Chat bubbles
-    pub const BUBBLE_USER_BG: Color32 = Color32::from_rgb(37, 99, 235);
-    pub const BUBBLE_USER_TEXT: Color32 = Color32::WHITE;
-    pub const BUBBLE_AGENT_BG: Color32 = Color32::from_rgb(34, 34, 34);
-    pub const BUBBLE_AGENT_TEXT: Color32 = Color32::from_rgb(220, 220, 220);
-    pub const BUBBLE_SYSTEM_BG: Color32 = Color32::from_rgb(28, 28, 28);
-    pub const BUBBLE_SYSTEM_TEXT: Color32 = Color32::from_rgb(140, 140, 140);
+    pub const BUBBLE_USER_BG: Color32 = Color32::from_rgb(64, 224, 208);    // Turquoise
+    pub const BUBBLE_USER_TEXT: Color32 = Color32::from_rgb(10, 10, 10);    // Black text on turquoise
+    pub const BUBBLE_AGENT_BG: Color32 = Color32::from_rgb(20, 20, 20);     // Dark glass
+    pub const BUBBLE_AGENT_TEXT: Color32 = Color32::from_rgb(250, 248, 240); // Cream
+    pub const BUBBLE_SYSTEM_BG: Color32 = Color32::from_rgb(15, 15, 15);
+    pub const BUBBLE_SYSTEM_TEXT: Color32 = Color32::from_rgb(120, 118, 110);
 
     // Rounding
     pub const ROUNDING_SM: Rounding = Rounding::same(4.0);
@@ -88,10 +94,10 @@ impl Theme {
         visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Self::TEXT_PRIMARY);
         visuals.widgets.hovered.bg_fill = Self::BG_HOVER;
         visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Self::TEXT_PRIMARY);
-        visuals.widgets.active.bg_fill = Self::ACCENT_BLUE;
-        visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-        visuals.selection.bg_fill = Color32::from_rgba_premultiplied(100, 181, 246, 60);
-        visuals.selection.stroke = Stroke::new(1.0, Self::ACCENT_BLUE);
+        visuals.widgets.active.bg_fill = Self::ACCENT_TURQUOISE;
+        visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::from_rgb(10, 10, 10));
+        visuals.selection.bg_fill = Color32::from_rgba_premultiplied(64, 224, 208, 60);
+        visuals.selection.stroke = Stroke::new(1.0, Self::ACCENT_TURQUOISE);
         visuals.window_rounding = Self::ROUNDING_MD;
 
         style.visuals = visuals;

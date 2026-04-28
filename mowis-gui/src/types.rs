@@ -120,6 +120,8 @@ impl FileDiff {
 
 #[derive(Debug)]
 pub enum BackendEvent {
+    DaemonStarting,
+    DaemonProgress { message: String, percent: Option<u8> },
     DaemonStarted,
     DaemonFailed(String),
     /// A new task appeared in the task graph.

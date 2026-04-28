@@ -1,0 +1,206 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-images:
+    name: Build Alpine Images
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install musl targets
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          rustup target add aarch64-unknown-linux-musl
+      
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools musl-dev qemu-utils
+      
+      - name: Build static binaries
+        run: |
+          chmod +x agentd/scripts/build-static-agentd.sh
+          ./agentd/scripts/build-static-agentd.sh
+      
+      - name: Build Alpine images
+        run: |
+          chmod +x agentd/scripts/build-alpine-image.sh
+          sudo ./agentd/scripts/build-alpine-image.sh
+      
+      - name: Upload images
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpine-images
+          path: target/images/*
+  
+  build-macos:
+    name: Build macOS App
+    runs-on: macos-latest
+    needs: build-images
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Download Alpine images
+        uses: actions/download-artifact@v4
+        with:
+          name: alpine-images
+          path: target/images
+      
+      - name: Build macOS app
+        run: |
+          chmod +x agentd/scripts/package-macos.sh
+          ./agentd/scripts/package-macos.sh
+      
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: target/macos/MowisAI.dmg
+  
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-latest
+    needs: build-images
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Download Alpine images
+        uses: actions/download-artifact@v4
+        with:
+          name: alpine-images
+          path: target/images
+      
+      - name: Build Windows binary
+        run: cargo build --release --bin mowisai
+      
+      - name: Install NSIS
+        run: choco install nsis -y
+      
+      - name: Build installer
+        run: makensis agentd/scripts/windows-installer.nsi
+      
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: target/windows/MowisAI-Setup.exe
+  
+  build-linux:
+    name: Build Linux Tarball
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build Linux binary
+        run: cargo build --release --bin mowisai
+      
+      - name: Create tarball
+        run: |
+          mkdir -p target/linux/MowisAI
+          cp target/release/mowisai target/linux/MowisAI/
+          cp README.md LICENSE CROSS_PLATFORM.md target/linux/MowisAI/
+          cd target/linux
+          tar -czf MowisAI-linux-x86_64.tar.gz MowisAI
+      
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-tarball
+          path: target/linux/MowisAI-linux-x86_64.tar.gz
+  
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-macos, build-windows, build-linux]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+      
+      - name: Create release notes
+        run: |
+          cat > release-notes.md <<EOF
+          # MowisAI ${{ github.ref_name }}
+          
+          ## Cross-Platform Support
+          
+          MowisAI now runs on Linux, macOS, and Windows!
+          
+          ### Supported Platforms
+          - **Linux** (x86_64, aarch64): Direct execution, no VM required
+          - **macOS** 10.15+ (Intel and Apple Silicon): Uses Virtualization.framework
+          - **Windows** 10 2004+ (x86_64): Uses WSL2
+          
+          ### Downloads
+          - **macOS**: MowisAI.dmg
+          - **Windows**: MowisAI-Setup.exe
+          - **Linux**: MowisAI-linux-x86_64.tar.gz
+          
+          ### Installation
+          See [CROSS_PLATFORM.md](CROSS_PLATFORM.md) for detailed installation and troubleshooting instructions.
+          
+          ### What's New
+          - Cross-platform support for Linux, macOS, and Windows
+          - Docker-Desktop-style architecture with lightweight VMs
+          - Snapshot-based fast boot on macOS (<5s after first launch)
+          - WSL2 integration on Windows
+          - QEMU fallback for all platforms
+          - Secure auth tokens for TCP connections
+          - Progress feedback during first-run setup
+          
+          ### Known Issues
+          - macOS first boot can take 15-20 seconds (subsequent boots <5s)
+          - Windows requires WSL2 (falls back to QEMU if unavailable)
+          - Named pipe bridge on Windows is experimental
+          
+          ### Upgrade Instructions
+          - **macOS**: Replace MowisAI.app in Applications folder
+          - **Windows**: Run new installer (will upgrade existing installation)
+          - **Linux**: Extract tarball and replace binary
+          
+          For full documentation, see [CROSS_PLATFORM.md](CROSS_PLATFORM.md).
+          EOF
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            macos-dmg/MowisAI.dmg
+            windows-installer/MowisAI-Setup.exe
+            linux-tarball/MowisAI-linux-x86_64.tar.gz
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,6 +1,6 @@
 use crate::theme::Theme;
 use crate::types::{ChatMessage, MessageRole};
-use egui::{Align, Frame, Key, Layout, RichText, ScrollArea, Stroke, TextEdit};
+use egui::{Align, Color32, Frame, Key, Layout, RichText, ScrollArea, Stroke, TextEdit};
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -89,10 +89,15 @@ pub fn show(
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         // Send button
                         let can_send = !view.input.trim().is_empty();
-                        let btn_label = RichText::new("Send").color(egui::Color32::WHITE);
+                        let btn_label = RichText::new("Send")
+                            .color(if can_send {
+                                Color32::from_rgb(10, 10, 10) // Black text on turquoise
+                            } else {
+                                Theme::TEXT_MUTED
+                            });
                         let send_btn = egui::Button::new(btn_label)
                             .fill(if can_send {
-                                Theme::BUBBLE_USER_BG
+                                Theme::ACCENT_TURQUOISE
                             } else {
                                 Theme::BG_INPUT
                             })
