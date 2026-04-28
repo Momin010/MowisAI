@@ -63,7 +63,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: integration-test-results
           path: target/release/deps/*.log
@@ -114,7 +114,7 @@ jobs:
 
       - name: Upload Node.js test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: node-test-results
           path: agentd/tests/node/*.log

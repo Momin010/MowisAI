@@ -162,7 +162,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} --workspace
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agentd-${{ matrix.target }}
           path: |
