@@ -1,0 +1,27 @@
+[package]
+name = "mowis-gui"
+version = "0.1.0"
+edition = "2024"
+authors = ["MowisAI <info@mowisai.com>"]
+description = "MowisAI — Desktop GUI application"
+license = "MIT"
+repository = "https://github.com/mowisai/agentd"
+
+[[bin]]
+name = "mowisai"
+path = "src/main.rs"
+
+[dependencies]
+agentd-protocol = { path = "../agentd-protocol" }
+eframe = { version = "0.28", features = ["default"] }
+egui = "0.28"
+egui_extras = { version = "0.28", features = ["default"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+which = "4"

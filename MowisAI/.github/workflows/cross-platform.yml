@@ -1,0 +1,87 @@
+name: Cross-Platform Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-matrix:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: Linux x86_64
+          # macOS
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: macOS x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: macOS ARM64
+          # Windows
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: Windows x86_64
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build for ${{ matrix.name }}
+        run: cargo build --release --target ${{ matrix.target }} --workspace
+
+      - name: Test binaries exist (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          ls -la target/${{ matrix.target }}/release/
+          test -f target/${{ matrix.target }}/release/agentd
+          test -f target/${{ matrix.target }}/release/runtime
+
+      - name: Test binaries exist (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          dir target\${{ matrix.target }}\release\
+          if (!(Test-Path "target\${{ matrix.target }}\release\agentd.exe")) { exit 1 }
+          if (!(Test-Path "target\${{ matrix.target }}\release\runtime.exe")) { exit 1 }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentd-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/agentd*
+            target/${{ matrix.target }}/release/runtime*
+          retention-days: 7

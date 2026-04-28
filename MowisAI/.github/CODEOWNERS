@@ -1,0 +1,24 @@
+# Code Owners for MowisAI agentd
+
+# Default owners for everything in the repo
+*                                   @mowisai/core-team
+
+# Orchestration layer
+/agentd/src/orchestration/          @mowisai/orchestration-team
+
+# Security and sandbox
+/agentd/src/sandbox.rs              @mowisai/security-team
+/agentd/src/security.rs             @mowisai/security-team
+
+# Agent implementations
+/agentd/src/*_agent.rs              @mowisai/agent-team
+
+# Tools
+/agentd/src/tools/                  @mowisai/tools-team
+
+# CI/CD and workflows
+/.github/                           @mowisai/devops-team
+
+# Documentation
+/README.md                          @mowisai/docs-team
+/CLAUDE.md                          @mowisai/docs-team

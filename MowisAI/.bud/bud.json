@@ -1,0 +1,5 @@
+{
+  "startupCommands": [
+    "cd /home/user/computer/MowisAI/mowis-desktop && npm install; npx vite --port 1420"
+  ]
+}
