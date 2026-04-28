@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MowisAI Desktop</title>
+    <link rel="stylesheet" href="src/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="mw-app">
+      <header class="mw-titlebar">
+        <div class="mw-traffic"><span></span><span></span><span></span></div>
+        <div class="mw-titlebar-center">
+          <span>MowisAI</span><span class="sep">/</span><span id="screen-label">Session</span><span class="sep">/</span><span id="session-label" style="font-style: italic;">feature/auth-refactor</span>
+        </div>
+        <div class="mw-titlebar-right"><span><i class="mw-status-dot"></i><span id="daemon-status">DAEMON</span></span><span id="build-version">v0.1.0</span></div>
+      </header>
+
+      <div class="mw-body">
+        <aside class="mw-sidebar">
+          <div class="mw-brand">Mowis<span style="font-style:italic">AI</span><span class="dot"></span></div>
+          <div class="mw-section-label">Workspace</div>
+          <div class="mw-nav-item" data-screen="welcome">Welcome <span class="badge">⌘0</span></div>
+          <div class="mw-nav-item" data-screen="home">Home <span class="badge">⌘1</span></div>
+          <div class="mw-nav-item active" data-screen="session">Active session <span class="badge">⌘2</span></div>
+          <div class="mw-nav-item" data-screen="agent">Agent detail <span class="badge">⌘3</span></div>
+          <div class="mw-nav-item" data-screen="sandboxes">Sandboxes <span class="badge">⌘4</span></div>
+          <div class="mw-nav-item" data-screen="timeline">Timeline <span class="badge">⌘5</span></div>
+          <div class="mw-nav-item" data-screen="settings">Settings <span class="badge">⌘6</span></div>
+          <div class="mw-sidebar-spacer"></div>
+          <div class="mw-sidebar-foot">you@mowis.ai<br/>Pro · 320h</div>
+        </aside>
+
+        <main class="mw-main" id="main-content"></main>
+
+        <aside class="mw-agents">
+          <div class="mw-agents-head">
+            <div class="title"><span style="font-style: italic;">Agents</span><span id="agent-ratio" style="font-family:var(--mono);font-size:10px;color:var(--tx-3)"></span></div>
+            <div class="meta">Fleet · live</div>
+            <div class="count-row"><span class="count" id="running-count">0</span><span class="count-label">Running now</span></div>
+          </div>
+          <div class="mw-agent-grid" id="agent-grid"></div>
+        </aside>
+      </div>
+
+      <div class="mw-statusbar" id="statusbar"></div>
+    </div>
+
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>
