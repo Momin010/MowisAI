@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MowisAI Desktop</title>
+    <link rel="stylesheet" href="src/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="mw-app">
+      <header class="mw-titlebar">
+        <div class="mw-traffic"><span></span><span></span><span></span></div>
+        <div class="mw-titlebar-center"><span>MowisAI</span><span class="sep">/</span><span id="screen-label">Session</span></div>
+        <div class="mw-titlebar-right"><span><i class="mw-status-dot"></i>CONNECTED</span></div>
+      </header>
+      <div class="mw-body">
+        <aside class="mw-sidebar">
+          <div class="mw-brand">MowisAI<span class="dot"></span></div>
+          <div class="mw-section-label">Workspace</div>
+          <div class="mw-nav-item active" data-screen="session">Session <span class="badge">⌘1</span></div>
+          <div class="mw-nav-item" data-screen="sandboxes">Sandboxes <span class="badge">⌘2</span></div>
+          <div class="mw-nav-item" data-screen="timeline">Timeline <span class="badge">⌘3</span></div>
+          <div class="mw-nav-item" data-screen="settings">Settings <span class="badge">⌘4</span></div>
+          <div class="mw-sidebar-spacer"></div>
+          <div class="mw-sidebar-foot">MowisAI Desktop<br/>Rust + Tauri UI</div>
+        </aside>
+        <main class="mw-main">
+          <section id="session" class="screen active">
+            <h1>Active Session</h1>
+            <p>Design system implementation of the Claude mockups in Tauri.</p>
+            <div class="mw-cards"><article class="mw-card">Planner initialized</article><article class="mw-card">5 tasks in progress</article><article class="mw-card">2 tests queued</article></div>
+          </section>
+          <section id="sandboxes" class="screen"><h1>Sandboxes</h1><p>Frontend · Backend · Verification</p></section>
+          <section id="timeline" class="screen"><h1>Timeline</h1><p>Milestones and agent events.</p></section>
+          <section id="settings" class="screen"><h1>Settings</h1><p>Theme, tools, and runtime settings.</p></section>
+        </main>
+        <aside class="mw-agents">
+          <div class="mw-agents-head">
+            <div class="title"><span>Agents</span><span>Live</span></div>
+            <div class="meta">Execution Grid</div>
+            <div class="count-row"><span class="count">8</span><span class="count-label">Active</span></div>
+          </div>
+          <div class="mw-agent-grid" id="agent-grid"></div>
+        </aside>
+      </div>
+    </div>
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>
