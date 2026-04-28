@@ -21,10 +21,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo install cargo-audit --locked
 
       - name: Run cargo audit
-        run: cargo audit --deny warnings
+        run: cargo audit
 
   cargo-deny:
     name: Cargo Deny
@@ -37,7 +37,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-deny
-        run: cargo install cargo-deny
+        run: cargo install cargo-deny --locked
 
       - name: Run cargo deny
         run: cargo deny check

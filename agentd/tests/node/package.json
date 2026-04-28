@@ -1,0 +1,14 @@
+{
+  "name": "agentd-node-tests",
+  "version": "1.0.0",
+  "description": "Node.js integration tests for agentd",
+  "main": "index.js",
+  "scripts": {
+    "test": "node index.js"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

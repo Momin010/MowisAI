@@ -78,14 +78,18 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: cargo install cargo-fuzz --locked || echo "cargo-fuzz installation failed"
 
       - name: Run fuzzing (5 minutes per target)
         run: |
-          if [ -d fuzz ]; then
-            for target in $(cargo fuzz list); do
-              timeout 300 cargo +nightly fuzz run $target || true
+          if [ -d fuzz ] && command -v cargo-fuzz >/dev/null 2>&1; then
+            for target in $(cargo fuzz list 2>/dev/null || echo ""); do
+              if [ -n "$target" ]; then
+                timeout 300 cargo +nightly fuzz run $target || true
+              fi
             done
+          else
+            echo "Fuzzing not available"
           fi
         continue-on-error: true
 

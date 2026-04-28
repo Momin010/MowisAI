@@ -7,6 +7,10 @@ description = "Runtime control plane for agentd"
 license = "MIT"
 repository = "https://github.com/mowisai/agentd"
 
+[[bin]]
+name = "runtime"
+path = "src/main.rs"
+
 [dependencies]
 agentd-protocol = { path = "../agentd-protocol" }
 serde = { workspace = true }
@@ -14,3 +18,4 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+env_logger = { workspace = true }

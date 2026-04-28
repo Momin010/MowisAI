@@ -47,7 +47,7 @@ jobs:
             
             OS-level AI agent execution engine for European regulated enterprise environments.
             
-            ### Features
+            ### 🚀 Features
             - 7-layer orchestration pipeline
             - Overlayfs-based sandboxing with 3-level CoW layers
             - Event-driven task scheduler
@@ -56,35 +56,125 @@ jobs:
             - Verification loop with test task graphs
             - GDPR and DORA compliance ready
             
-            ### Installation
+            ### 📦 Downloads
             
-            Download the appropriate binary for your system and make it executable:
+            Choose the appropriate binary for your system:
             
+            #### Linux
+            - **x86_64 (glibc)**: `agentd-${{ steps.get_version.outputs.version }}-linux-x86_64.tar.gz`
+            - **x86_64 (musl)**: `agentd-${{ steps.get_version.outputs.version }}-linux-x86_64-musl.tar.gz`
+            - **ARM64 (glibc)**: `agentd-${{ steps.get_version.outputs.version }}-linux-arm64.tar.gz`
+            - **ARM64 (musl)**: `agentd-${{ steps.get_version.outputs.version }}-linux-arm64-musl.tar.gz`
+            
+            #### macOS
+            - **Intel (x86_64)**: `agentd-${{ steps.get_version.outputs.version }}-macos-x86_64.tar.gz`
+            - **Apple Silicon (ARM64)**: `agentd-${{ steps.get_version.outputs.version }}-macos-arm64.tar.gz`
+            
+            #### Windows
+            - **x86_64**: `agentd-${{ steps.get_version.outputs.version }}-windows-x86_64.zip`
+            - **ARM64**: `agentd-${{ steps.get_version.outputs.version }}-windows-arm64.zip`
+            
+            ### 🔧 Installation
+            
+            #### Linux/macOS
             ```bash
-            chmod +x agentd
-            sudo mv agentd /usr/local/bin/
+            # Download and extract
+            tar -xzf agentd-${{ steps.get_version.outputs.version }}-<your-platform>.tar.gz
+            
+            # Make executable and install
+            chmod +x agentd runtime
+            sudo mv agentd runtime /usr/local/bin/
+            
+            # Verify installation
+            agentd --version
             ```
             
-            ### Prerequisites
-            - Linux (overlayfs and cgroups required)
-            - Root access for overlayfs mount
-            - gcloud CLI authenticated to GCP project
+            #### Windows
+            ```powershell
+            # Extract the ZIP file
+            # Add the extracted folder to your PATH
+            # Or run directly from the extracted location
             
-            See the [README](https://github.com/${{ github.repository }}/blob/main/README.md) for full documentation.
+            # Verify installation
+            .\agentd.exe --version
+            ```
+            
+            ### ⚠️ Prerequisites
+            
+            #### Linux (Required for full functionality)
+            - overlayfs and cgroups support
+            - Root access for sandbox operations
+            - gcloud CLI for Vertex AI integration
+            
+            #### macOS/Windows (Limited functionality)
+            - Basic agent execution without sandboxing
+            - No overlayfs support (containers run in process isolation)
+            
+            ### 🔐 Checksums
+            
+            Verify your download integrity using the provided `.sha256` files:
+            
+            ```bash
+            # Linux/macOS
+            sha256sum -c agentd-${{ steps.get_version.outputs.version }}-<platform>.tar.gz.sha256
+            
+            # Windows (PowerShell)
+            Get-FileHash agentd-${{ steps.get_version.outputs.version }}-<platform>.zip
+            ```
+            
+            ### 📚 Documentation
+            
+            See the [README](https://github.com/${{ github.repository }}/blob/main/README.md) for:
+            - Complete setup instructions
+            - Usage examples
+            - Architecture overview
+            - Performance tuning
+            
+            ### 🐛 Issues
+            
+            Report bugs and request features at: https://github.com/${{ github.repository }}/issues
           draft: false
           prerelease: false
 
   build-release:
     name: Build Release
     needs: create-release
-    runs-on: ubuntu-latest
     strategy:
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
+        include:
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: linux-x86_64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: linux-x86_64-musl
+          # Linux ARM64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: linux-arm64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: linux-arm64-musl
+          # macOS x86_64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: macos-x86_64
+          # macOS ARM64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: macos-arm64
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: windows-x86_64
+            ext: .exe
+          # Windows ARM64
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            name: windows-arm64
+            ext: .exe
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -95,9 +185,15 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+          if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            sudo apt-get install -y musl-tools
+          fi
+          if [[ "${{ matrix.target }}" == "aarch64"* ]]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -114,42 +210,91 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --workspace
 
-      - name: Strip binary
+      - name: Prepare binaries (Unix)
+        if: matrix.os != 'windows-latest'
         run: |
-          if [[ "${{ matrix.target }}" == *"musl"* ]]; then
-            strip target/${{ matrix.target }}/release/agentd || true
-            strip target/${{ matrix.target }}/release/runtime || true
+          mkdir -p release-files
+          cp target/${{ matrix.target }}/release/agentd release-files/
+          cp target/${{ matrix.target }}/release/runtime release-files/
+          # Strip binaries on Linux
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" && "${{ matrix.target }}" == *"musl"* ]]; then
+            strip release-files/agentd || true
+            strip release-files/runtime || true
           fi
 
-      - name: Create archive
+      - name: Prepare binaries (Windows)
+        if: matrix.os == 'windows-latest'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz agentd runtime
-          cd -
-          mv target/${{ matrix.target }}/release/agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz .
+          mkdir release-files
+          cp target/${{ matrix.target }}/release/agentd.exe release-files/
+          cp target/${{ matrix.target }}/release/runtime.exe release-files/
 
-      - name: Generate checksums
+      - name: Create archive (Unix)
+        if: matrix.os != 'windows-latest'
         run: |
-          sha256sum agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz > agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+          cd release-files
+          tar czf ../agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.tar.gz *
+          cd ..
 
-      - name: Upload Release Asset
+      - name: Create archive (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd release-files
+          7z a ../agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.zip *
+          cd ..
+
+      - name: Generate checksums (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          sha256sum agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.tar.gz > agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.tar.gz.sha256
+
+      - name: Generate checksums (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          Get-FileHash -Algorithm SHA256 agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.zip | Format-List Hash | Out-String | ForEach-Object { $_.Split(':', 2)[1].Trim().ToLower() + "  agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.zip" } | Out-File -Encoding ASCII agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.zip.sha256
+
+      - name: Upload Release Asset (Unix)
+        if: matrix.os != 'windows-latest'
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz
-          asset_name: agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz
+          asset_path: ./agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.tar.gz
+          asset_name: agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.tar.gz
           asset_content_type: application/gzip
 
-      - name: Upload Checksum
+      - name: Upload Release Asset (Windows)
+        if: matrix.os == 'windows-latest'
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
-          asset_name: agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+          asset_path: ./agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.zip
+          asset_name: agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.zip
+          asset_content_type: application/zip
+
+      - name: Upload Checksum (Unix)
+        if: matrix.os != 'windows-latest'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.tar.gz.sha256
+          asset_name: agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.tar.gz.sha256
+          asset_content_type: text/plain
+
+      - name: Upload Checksum (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.zip.sha256
+          asset_name: agentd-${{ needs.create-release.outputs.version }}-${{ matrix.name }}.zip.sha256
           asset_content_type: text/plain
 
   publish-crate:

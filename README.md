@@ -53,11 +53,20 @@ Final output: clean tested merged codebase.
 
 ## Prerequisites
 
-- Linux (overlayfs and cgroups required — will not work on macOS or Windows)
+### Linux (Full Functionality)
+- Linux (overlayfs and cgroups required — **primary supported platform**)
 - Root access (overlayfs mount requires root)
 - Rust stable toolchain (rustup install stable)
 - gcloud CLI authenticated to GCP project company-internal-tools-490516
 - Vertex AI Gemini 2.5 Pro enabled on the project
+
+### macOS/Windows (Limited Functionality)
+- Basic agent execution without sandboxing
+- No overlayfs support (agents run in process isolation)
+- Reduced security guarantees
+- Some tools may not work as expected
+
+**Note**: While agentd builds and runs on macOS and Windows, the full sandboxing and security features require Linux with overlayfs and cgroups support. For production use, Linux is strongly recommended.
 
 Install gcloud and authenticate:
 
@@ -66,7 +75,55 @@ Install gcloud and authenticate:
 
 ---
 
-## Build
+## Installation
+
+### Download Pre-built Binaries
+
+Download the latest release for your platform from the [Releases page](https://github.com/mowisai/agentd/releases).
+
+#### Linux
+```bash
+# Download for your architecture
+curl -L -o agentd.tar.gz https://github.com/mowisai/agentd/releases/latest/download/agentd-v0.2.0-linux-x86_64.tar.gz
+
+# Extract and install
+tar -xzf agentd.tar.gz
+chmod +x agentd runtime
+sudo mv agentd runtime /usr/local/bin/
+
+# Verify installation
+agentd --version
+```
+
+#### macOS
+```bash
+# Intel Macs
+curl -L -o agentd.tar.gz https://github.com/mowisai/agentd/releases/latest/download/agentd-v0.2.0-macos-x86_64.tar.gz
+
+# Apple Silicon Macs
+curl -L -o agentd.tar.gz https://github.com/mowisai/agentd/releases/latest/download/agentd-v0.2.0-macos-arm64.tar.gz
+
+# Extract and install
+tar -xzf agentd.tar.gz
+chmod +x agentd runtime
+sudo mv agentd runtime /usr/local/bin/
+
+# Verify installation
+agentd --version
+```
+
+#### Windows
+```powershell
+# Download and extract manually from releases page, or use PowerShell:
+Invoke-WebRequest -Uri "https://github.com/mowisai/agentd/releases/latest/download/agentd-v0.2.0-windows-x86_64.zip" -OutFile "agentd.zip"
+Expand-Archive -Path "agentd.zip" -DestinationPath "agentd"
+
+# Add to PATH or run directly
+cd agentd
+.\agentd.exe --version
+```
+
+### Build from Source
 
     cargo build --release
 
