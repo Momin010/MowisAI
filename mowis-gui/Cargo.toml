@@ -15,7 +15,7 @@ path = "src/main.rs"
 agentd-protocol = { path = "../agentd-protocol" }
 eframe = { version = "0.28", features = ["default"] }
 egui = "0.28"
-egui_extras = { version = "0.28", features = ["default"] }
+egui_extras = { version = "0.34", features = ["default"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
