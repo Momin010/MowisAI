@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 authors = ["MowisAI <info@mowisai.com>"]
 description = "MowisAI — Desktop GUI application"
+license = "MIT"
+repository = "https://github.com/mowisai/agentd"
 
 [[bin]]
 name = "mowisai"

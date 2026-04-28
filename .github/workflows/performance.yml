@@ -1,0 +1,147 @@
+name: Performance Gate
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run performance tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  BUDGET_MS: 420000  # 7 minutes
+
+jobs:
+  perf-gate:
+    name: Performance Gate (2000 tasks, 420s budget)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --workspace
+
+      - name: Increase file descriptor limit
+        run: ulimit -n 65536
+
+      - name: Create test directory
+        run: mkdir -p /tmp/perf-test-project
+
+      - name: Run performance gate
+        run: |
+          # Start socket server in background
+          sudo ./target/release/agentd socket --path /tmp/agentd.sock &
+          SOCKET_PID=$!
+          
+          # Wait for socket to be ready
+          sleep 2
+          
+          # Run simulation
+          ./target/release/agentd simulate \
+            --socket /tmp/agentd.sock \
+            --project-root /tmp/perf-test-project \
+            --max-agents 1000 \
+            --tasks 2000 \
+            --verify > perf_output.txt 2>&1
+          
+          # Kill socket server
+          sudo kill $SOCKET_PID || true
+          
+          # Parse results
+          cat perf_output.txt
+          
+          TOTAL_MS=$(grep "SIMULATE_TOTAL_MS=" perf_output.txt | cut -d= -f2)
+          COMPLETED=$(grep "SIMULATE_COMPLETED=" perf_output.txt | cut -d= -f2)
+          FAILED=$(grep "SIMULATE_FAILED=" perf_output.txt | cut -d= -f2)
+          
+          echo "Total time: ${TOTAL_MS}ms"
+          echo "Completed: ${COMPLETED}"
+          echo "Failed: ${FAILED}"
+          
+          # Check for resource exhaustion errors
+          if grep -q "EPIPE\|EMFILE" perf_output.txt; then
+            echo "❌ FAIL: Resource exhaustion detected (EPIPE or EMFILE)"
+            exit 1
+          fi
+          
+          # Check budget
+          if [ "$TOTAL_MS" -gt "$BUDGET_MS" ]; then
+            echo "❌ FAIL: Performance budget exceeded (${TOTAL_MS}ms > ${BUDGET_MS}ms)"
+            exit 1
+          fi
+          
+          # Check completion
+          if [ "$COMPLETED" -ne 2000 ]; then
+            echo "❌ FAIL: Not all tasks completed (${COMPLETED}/2000)"
+            exit 1
+          fi
+          
+          if [ "$FAILED" -ne 0 ]; then
+            echo "❌ FAIL: Some tasks failed (${FAILED})"
+            exit 1
+          fi
+          
+          echo "✅ PASS: Performance gate passed (${TOTAL_MS}ms < ${BUDGET_MS}ms)"
+
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results
+          path: perf_output.txt
+
+  benchmark:
+    name: Benchmark Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run benchmarks
+        run: cargo bench --workspace
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: target/criterion

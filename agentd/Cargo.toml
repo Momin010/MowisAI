@@ -4,6 +4,11 @@ version = "0.2.0+1"
 edition = "2024"
 authors = ["MowisAI <info@mowisai.com>"]
 description = "MowisAI — AI agent orchestration engine"
+license = "MIT"
+repository = "https://github.com/mowisai/agentd"
+homepage = "https://mowisai.com"
+keywords = ["ai", "agent", "orchestration", "sandbox", "automation"]
+categories = ["development-tools", "command-line-utilities"]
 
 [[bin]]
 name = "agentd"

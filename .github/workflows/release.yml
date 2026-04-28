@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v0.2.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          release_name: MowisAI agentd ${{ steps.get_version.outputs.version }}
+          body: |
+            ## MowisAI agentd ${{ steps.get_version.outputs.version }}
+            
+            OS-level AI agent execution engine for European regulated enterprise environments.
+            
+            ### Features
+            - 7-layer orchestration pipeline
+            - Overlayfs-based sandboxing with 3-level CoW layers
+            - Event-driven task scheduler
+            - Checkpoint-based agent execution with automatic recovery
+            - Parallel tree-pattern merge
+            - Verification loop with test task graphs
+            - GDPR and DORA compliance ready
+            
+            ### Installation
+            
+            Download the appropriate binary for your system and make it executable:
+            
+            ```bash
+            chmod +x agentd
+            sudo mv agentd /usr/local/bin/
+            ```
+            
+            ### Prerequisites
+            - Linux (overlayfs and cgroups required)
+            - Root access for overlayfs mount
+            - gcloud CLI authenticated to GCP project
+            
+            See the [README](https://github.com/${{ github.repository }}/blob/main/README.md) for full documentation.
+          draft: false
+          prerelease: false
+
+  build-release:
+    name: Build Release
+    needs: create-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --workspace
+
+      - name: Strip binary
+        run: |
+          if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            strip target/${{ matrix.target }}/release/agentd || true
+            strip target/${{ matrix.target }}/release/runtime || true
+          fi
+
+      - name: Create archive
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz agentd runtime
+          cd -
+          mv target/${{ matrix.target }}/release/agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz .
+
+      - name: Generate checksums
+        run: |
+          sha256sum agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz > agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz
+          asset_name: agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Checksum
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+          asset_name: agentd-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+          asset_content_type: text/plain
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish agentd-protocol
+        run: cargo publish --package agentd-protocol --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+      - name: Wait for crates.io
+        run: sleep 30
+
+      - name: Publish runtime
+        run: cargo publish --package runtime --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+      - name: Wait for crates.io
+        run: sleep 30
+
+      - name: Publish agentd
+        run: cargo publish --package agentd --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

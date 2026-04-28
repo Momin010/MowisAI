@@ -198,3 +198,11 @@ Run a specific test:
 - All tools execute within container context via chroot.
 - 67 tests must always pass.
 - No unwrap() in production code paths.
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+Copyright (c) 2026 MowisAI
