@@ -14,12 +14,14 @@ workflows:
           source $HOME/.cargo/env
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
-          
+
           # 2. Install Node Deps
           cd mowis-desktop
           npm install
-          
-          # 3. Run Build using the correct v2 universal flag
-          npx tauri build --ci --bundles dmg --universal
+
+          # 3. Build both targets
+          npx tauri build --ci --bundles dmg --target aarch64-apple-darwin
+          npx tauri build --ci --bundles dmg --target x86_64-apple-darwin
     artifacts:
-      - mowis-desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+      - mowis-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+      - mowis-desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
