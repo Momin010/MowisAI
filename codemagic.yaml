@@ -5,12 +5,13 @@ workflows:
     max_build_duration: 120
     environment:
       node: latest
-      vars:
-        # Manually force the Cargo path into the system PATH
-        PATH: "$PATH:$HOME/.cargo/bin"
     scripts:
-      - name: Setup Rust Targets
+      - name: Install Rust via Homebrew
         script: |
+          # Brew is the most reliable path on Mac VMs
+          brew install rustup
+          rustup-init -y --no-modify-path
+          source $HOME/.cargo/env
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
       
@@ -21,6 +22,8 @@ workflows:
           
       - name: Build Tauri Universal
         script: |
+          # We must source the env in every step that uses Rust
+          source $HOME/.cargo/env
           cd mowis-desktop
           npx tauri build --ci --bundles dmg --target universal
     artifacts:
