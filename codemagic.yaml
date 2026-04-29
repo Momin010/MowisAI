@@ -8,19 +8,38 @@ workflows:
     scripts:
       - name: Build Universal App
         script: |
-          # 1. Setup Rust
           brew install rustup
           rustup-init -y --no-modify-path
           source $HOME/.cargo/env
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
 
-          # 2. Install Node Deps
           cd mowis-desktop
           npm install
 
-          # 4. Build both targets
           npx tauri build --ci --bundles dmg --target aarch64-apple-darwin
           npx tauri build --ci --bundles dmg --target x86_64-apple-darwin
     artifacts:
       - "**/*.dmg"
+
+  tauri-windows:
+    name: Mowis Desktop Windows (Tauri v2)
+    instance_type: windows_x2
+    max_build_duration: 120
+    environment:
+      node: latest
+    scripts:
+      - name: Build Windows App
+        script: |
+          Invoke-WebRequest -Uri "https://win.rustup.rs" -OutFile "rustup-init.exe"
+          .\rustup-init.exe -y --no-modify-path
+          $env:PATH += ";$env:USERPROFILE\.cargo\bin"
+          rustup target add x86_64-pc-windows-msvc
+
+          cd mowis-desktop
+          npm install
+
+          npx tauri build --ci --bundles nsis
+    artifacts:
+      - "**/*.exe"
+      - "**/*.msi"
