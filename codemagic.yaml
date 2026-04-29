@@ -1,0 +1,28 @@
+workflows:
+  tauri-macos-universal:
+    name: Mowis Desktop Universal (Tauri v2)
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      node: latest
+      rust: stable
+    scripts:
+      - name: Install Rust targets
+        script: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+      
+      - name: Install Dependencies
+        script: |
+          cd mowis-desktop
+          npm install
+          
+      - name: Build Tauri Universal
+        script: |
+          cd mowis-desktop
+          # This triggers 'npm run build' for the frontend automatically
+          # and bundles the app for both Intel and Apple Silicon
+          npx tauri build --ci --bundles dmg --target universal
+    artifacts:
+      # Wildcard ensures we grab the DMG from the v2 build folder
+      - mowis-desktop/src-tauri/target/**/bundle/dmg/*.dmg
