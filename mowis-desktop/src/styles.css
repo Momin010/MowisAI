@@ -743,3 +743,42 @@ a { text-decoration: none; color: inherit; }
   .sb-item span, .sb-brand-text, .sb-daemon-status span:last-child { display: none; }
   .sb-item { justify-content: center; }
 }
+
+/* ── Window control dots (interactive when decorations: false) ─────────────── */
+.tl-dots span { cursor: pointer; transition: opacity 0.15s; }
+.tl-dots span:hover { opacity: 0.75; }
+
+/* ── Offline / setup guidance banner ──────────────────────────────────────── */
+.offline-banner {
+  background: rgba(240,80,80,0.07);
+  border: 1px solid rgba(240,80,80,0.22);
+  border-radius: var(--r2);
+  padding: 18px 22px;
+  margin-bottom: 24px;
+}
+.offline-banner-title {
+  font-family: var(--sans);
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--tx);
+  margin-bottom: 8px;
+}
+.offline-banner-body {
+  font-size: 12.5px;
+  color: var(--tx-2);
+  line-height: 1.7;
+  margin-bottom: 10px;
+}
+.offline-banner-body code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: rgba(255,255,255,0.07);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--blue);
+}
+.offline-banner-footer {
+  font-size: 11.5px;
+  color: var(--tx-3);
+  font-style: italic;
+}
