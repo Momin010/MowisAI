@@ -744,6 +744,61 @@ a { text-decoration: none; color: inherit; }
   .sb-item { justify-content: center; }
 }
 
+/* ── Welcome Screen ──────────────────────────────────────────────────────── */
+.welcome {
+  position: fixed; inset: 0; z-index: 9000;
+  background: #000;
+  display: flex; flex-direction: column;
+}
+.welcome-tl {
+  height: 36px; flex-shrink: 0;
+  display: flex; align-items: center;
+  padding: 0 14px;
+  -webkit-app-region: drag;
+}
+.welcome-body {
+  flex: 1;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 52px;
+}
+.welcome-word {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 36px;
+  color: var(--tx);
+  filter: blur(14px);
+  transition: filter 3.2s cubic-bezier(.2,.7,.2,1);
+  letter-spacing: -0.02em;
+  user-select: none;
+}
+.welcome-word.clear { filter: blur(1.4px); }
+.welcome-continue {
+  opacity: 0;
+  transition: opacity 1.2s ease;
+  pointer-events: none;
+}
+.welcome-continue.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.welcome-btn {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--tx-3);
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  padding: 8px 28px;
+  letter-spacing: 0.06em;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.welcome-btn:hover {
+  color: var(--tx);
+  border-color: rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.04);
+}
+
 /* ── Window control dots (interactive when decorations: false) ─────────────── */
 .tl-dots span { cursor: pointer; transition: opacity 0.15s; }
 .tl-dots span:hover { opacity: 0.75; }

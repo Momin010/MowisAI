@@ -307,11 +307,14 @@ async function init() {
     setText('tl-version', `v${info.version}`);
   } catch {}
 
+  // Welcome screen on first launch
+  await maybeShowWelcome();
+
   // Check daemon — show guidance banner if offline
   await checkDaemonWithGuidance();
 
-  // Setup event listeners
-  await setupListeners();
+  // Setup event listeners — wrapped so a listener failure doesn't kill navigation
+  try { await setupListeners(); } catch (e) { console.error('Listener setup failed:', e); }
 
   // Setup UI handlers
   setupHandlers();
@@ -326,6 +329,61 @@ async function init() {
     if ((e.metaKey || e.ctrlKey) && e.key === '3') { e.preventDefault(); navigate('usage'); }
     if ((e.metaKey || e.ctrlKey) && e.key === ',') { e.preventDefault(); navigate('settings'); }
   });
+}
+
+// ── Welcome screen (first launch) ─────────────────────────────────────────────
+
+async function maybeShowWelcome() {
+  if (localStorage.getItem('mowis_welcomed')) return;
+
+  const welcome   = $('welcome');
+  const word      = $('welcome-word');
+  const cont      = $('welcome-continue');
+  const btn       = $('btn-welcome-continue');
+  if (!welcome) return;
+
+  welcome.classList.remove('hidden');
+
+  // Wire window dots on welcome screen too
+  if (_invoke) {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const win = getCurrentWindow();
+      welcome.querySelector('.tl-red')?.addEventListener('click',    (e) => { e.stopPropagation(); win.close(); });
+      welcome.querySelector('.tl-yellow')?.addEventListener('click', (e) => { e.stopPropagation(); win.minimize(); });
+      welcome.querySelector('.tl-green')?.addEventListener('click',  (e) => { e.stopPropagation(); win.toggleMaximize(); });
+    } catch {}
+  }
+
+  // Trigger blur-to-clear animation after a short pause
+  await delay(200);
+  word?.classList.add('clear');
+
+  // Show continue button after blur settles
+  await delay(2200);
+  cont?.classList.add('visible');
+
+  // Wait for continue click
+  await new Promise(resolve => {
+    btn?.addEventListener('click', resolve, { once: true });
+    // Also let Enter key proceed
+    document.addEventListener('keydown', function handler(e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        document.removeEventListener('keydown', handler);
+        resolve();
+      }
+    });
+  });
+
+  // Fade out
+  welcome.style.opacity  = '0';
+  welcome.style.transition = 'opacity 0.55s ease';
+  await delay(560);
+  welcome.classList.add('hidden');
+  welcome.style.opacity  = '';
+  welcome.style.transition = '';
+
+  localStorage.setItem('mowis_welcomed', '1');
 }
 
 // ── Daemon check ──────────────────────────────────────────────────────────────
