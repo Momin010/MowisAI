@@ -241,18 +241,51 @@ function navigate(page) {
   if (page === 'settings') loadSettings();
 }
 
+// ── Window controls (decorations: false) ─────────────────────────────────────
+
+async function setupWindowControls() {
+  if (!_invoke) return; // browser: no window API
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    const win = getCurrentWindow();
+    $('tl-red')?.addEventListener('click', (e) => { e.stopPropagation(); win.close(); });
+    $('tl-yellow')?.addEventListener('click', (e) => { e.stopPropagation(); win.minimize(); });
+    $('tl-green')?.addEventListener('click', (e) => { e.stopPropagation(); win.toggleMaximize(); });
+  } catch { /* old Tauri build or browser */ }
+}
+
 // ── Splash ────────────────────────────────────────────────────────────────────
 
 async function runSplash() {
   const fill = $('splash-fill');
   const hint = $('splash-hint');
-  const steps = [[20,'Loading…'],[45,'Checking daemon…'],[70,'Loading config…'],[100,'Ready']];
-  for (const [pct, msg] of steps) {
-    if (fill) fill.style.width = pct + '%';
-    if (hint) hint.textContent = msg;
-    await delay(180);
-  }
-  await delay(150);
+
+  if (fill) fill.style.width = '5%';
+  if (hint) hint.textContent = 'Starting…';
+
+  // Forward real setup-progress events from BackendBridge while booting.
+  let unlisten = null;
+  let resolved = false;
+  const backendReady = new Promise(resolve => {
+    listen('setup_progress', (e) => {
+      const p = e.payload;
+      if (!p) return;
+      if (fill) fill.style.width = Math.max(5, p.pct) + '%';
+      if (hint) hint.textContent = p.message;
+      if ((p.stage === 'ready' || p.stage === 'error') && !resolved) {
+        resolved = true;
+        resolve(p);
+      }
+    }).then(u => { unlisten = u; });
+  });
+
+  // Show the splash for at least 1 s; give the backend up to 4 s before
+  // showing the app regardless (it keeps starting in the background).
+  await Promise.race([backendReady, delay(4000)]);
+  if (unlisten) unlisten();
+
+  if (fill) fill.style.width = '100%';
+  await delay(200);
   $('splash')?.classList.add('hidden');
   $('app')?.classList.remove('hidden');
 }
@@ -261,6 +294,7 @@ async function runSplash() {
 
 async function init() {
   await loadTauri();
+  setupWindowControls();   // non-blocking, sets up dot handlers
   await runSplash();
 
   // Load config
@@ -273,8 +307,8 @@ async function init() {
     setText('tl-version', `v${info.version}`);
   } catch {}
 
-  // Check daemon
-  checkDaemon();
+  // Check daemon — show guidance banner if offline
+  await checkDaemonWithGuidance();
 
   // Setup event listeners
   await setupListeners();
@@ -300,8 +334,62 @@ async function checkDaemon() {
   try {
     const on = await invoke('check_daemon');
     setDaemonStatus(on);
+    if (on) removeOfflineBanner();
   } catch { setDaemonStatus(false); }
   setTimeout(checkDaemon, 8000);
+}
+
+async function checkDaemonWithGuidance() {
+  let connected = false;
+  let os = 'unknown';
+  let launcher = '';
+  try {
+    const cs = await invoke('get_connection_state');
+    connected = cs.connected;
+    launcher = cs.launcher || '';
+  } catch {
+    try { connected = await invoke('check_daemon'); } catch {}
+  }
+  try {
+    const info = await invoke('get_system_info');
+    os = info.os;
+  } catch {}
+
+  setDaemonStatus(connected);
+
+  if (!connected) {
+    showOfflineBanner(os, launcher);
+  }
+
+  // Start polling loop
+  setTimeout(checkDaemon, 8000);
+}
+
+const OFFLINE_GUIDANCE = {
+  windows: `MowisAI needs a Linux engine to run. It will automatically install one via WSL2.\n\nIf setup is taking a while: open PowerShell as Administrator and run <code>wsl --install</code>, then restart the app.`,
+  macos: `MowisAI needs QEMU to run the Linux engine.\n\nInstall it with: <code>brew install qemu</code>\n\nThen restart the app.`,
+  linux: `The agentd daemon is not running.\n\nStart it with: <code>sudo agentd socket --path /tmp/agentd.sock</code>`,
+  unknown: `The agent engine is not connected. Check the Settings tab to verify your socket path.`,
+};
+
+function showOfflineBanner(os, launcher) {
+  if ($('offline-banner')) return; // already shown
+  const guidance = OFFLINE_GUIDANCE[os] || OFFLINE_GUIDANCE.unknown;
+  const banner = document.createElement('div');
+  banner.id = 'offline-banner';
+  banner.className = 'offline-banner';
+  banner.innerHTML = `
+    <div class="offline-banner-title">⚙ Engine not connected</div>
+    <div class="offline-banner-body">${guidance.replace(/\n/g, '<br>')}</div>
+    <div class="offline-banner-footer">
+      The app is fully usable — sessions will run in simulation mode until the engine is available.
+    </div>`;
+  const homeEmpty = $('home-empty');
+  if (homeEmpty) homeEmpty.prepend(banner);
+}
+
+function removeOfflineBanner() {
+  $('offline-banner')?.remove();
 }
 
 function setDaemonStatus(on) {
