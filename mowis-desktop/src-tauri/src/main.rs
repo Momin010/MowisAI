@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -355,10 +356,19 @@ async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app: &ta
 // Socket helpers (ported from mowis-gui/backend.rs)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Unix socket helpers (daemon is Linux-only) ────────────────────────────────
+
+#[cfg(unix)]
 async fn socket_connectable() -> bool {
     tokio::net::UnixStream::connect(SOCKET_PATH).await.is_ok()
 }
 
+#[cfg(not(unix))]
+async fn socket_connectable() -> bool {
+    false // agentd daemon requires Linux; no socket on Windows/macOS native
+}
+
+#[cfg(unix)]
 async fn send_socket_json(
     payload: serde_json::Value,
     event_tx: &mpsc::Sender<BridgeEvent>,
@@ -377,6 +387,18 @@ async fn send_socket_json(
     Ok(())
 }
 
+#[cfg(not(unix))]
+async fn send_socket_json(
+    _payload: serde_json::Value,
+    _event_tx: &mpsc::Sender<BridgeEvent>,
+) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "The agentd daemon requires Linux. \
+         On Windows, run the daemon inside WSL2 and connect via a forwarded socket."
+    ))
+}
+
+#[cfg(unix)]
 async fn read_socket_responses(
     reader: tokio::io::BufReader<tokio::net::UnixStream>,
     event_tx: &mpsc::Sender<BridgeEvent>,
