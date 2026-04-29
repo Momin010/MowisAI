@@ -6,25 +6,20 @@ workflows:
     environment:
       node: latest
     scripts:
-      - name: Install Rust via Homebrew
+      - name: Build Universal App
         script: |
-          # Brew is the most reliable path on Mac VMs
+          # 1. Setup Rust
           brew install rustup
           rustup-init -y --no-modify-path
           source $HOME/.cargo/env
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
-      
-      - name: Install Dependencies
-        script: |
+          
+          # 2. Install Node Deps
           cd mowis-desktop
           npm install
           
-      - name: Build Tauri Universal
-        script: |
-          # We must source the env in every step that uses Rust
-          source $HOME/.cargo/env
-          cd mowis-desktop
+          # 3. Run Build
           npx tauri build --ci --bundles dmg --target universal
     artifacts:
       - mowis-desktop/src-tauri/target/**/bundle/dmg/*.dmg
