@@ -19,9 +19,6 @@ workflows:
           cd mowis-desktop
           npm install
 
-          # 3. Generate icons
-          npx tauri icon src-tauri/icons/icon.png
-
           # 4. Build both targets
           npx tauri build --ci --bundles dmg --target aarch64-apple-darwin
           npx tauri build --ci --bundles dmg --target x86_64-apple-darwin
