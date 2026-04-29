@@ -20,4 +20,3 @@ which = "6"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
-[workspace]
