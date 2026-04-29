@@ -19,7 +19,7 @@ workflows:
           cd mowis-desktop
           npm install
           
-          # 3. Run Build
-          npx tauri build --ci --bundles dmg --target universal
+          # 3. Run Build using the correct v2 universal flag
+          npx tauri build --ci --bundles dmg --universal
     artifacts:
-      - mowis-desktop/src-tauri/target/**/bundle/dmg/*.dmg
+      - mowis-desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
