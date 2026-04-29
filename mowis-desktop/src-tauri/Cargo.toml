@@ -15,6 +15,12 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 log = "0.4"
 which = "6"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+dirs = "5"
+async-trait = "0.1"
+tokio-util = { version = "0.7", features = ["codec"] }
 
 [features]
 default = ["custom-protocol"]

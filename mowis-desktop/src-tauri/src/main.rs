@@ -1,13 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod platform;
+mod backend;
+
 use anyhow::Result;
+use backend::BackendBridge;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
-#[cfg(unix)]
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
@@ -98,6 +100,7 @@ pub struct UsageRecord {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct AppState {
+    pub bridge: Arc<BackendBridge>,
     pub config: Mutex<Config>,
     pub current_session_id: Mutex<Option<String>>,
     pub messages: Mutex<Vec<ChatMessage>>,
@@ -113,8 +116,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(bridge: Arc<BackendBridge>) -> Self {
         AppState {
+            bridge,
             config: Mutex::new(Config::default()),
             current_session_id: Mutex::new(None),
             messages: Mutex::new(Vec::new()),
@@ -158,8 +162,6 @@ pub enum BridgeEvent {
     SimulationTick { tasks_done: usize, active_agents: usize, tokens_delta: u64 },
 }
 
-const SOCKET_PATH: &str = "/tmp/agentd.sock";
-
 fn start_bridge(
     app: tauri::AppHandle,
     state: Arc<AppState>,
@@ -167,39 +169,83 @@ fn start_bridge(
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<BridgeCommand>(64);
     let (evt_tx, mut evt_rx) = mpsc::channel::<BridgeEvent>(256);
 
-    // Background I/O thread
+    let bridge = Arc::clone(&state.bridge);
+
+    // ── 1. Start the platform harness (WSL2 / QEMU / native socket) ──────────
+    {
+        let bridge_clone = Arc::clone(&bridge);
+        let evt_tx_clone = evt_tx.clone();
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn(async move {
+            // Forward setup-progress events to the frontend while booting.
+            let bridge_prog = Arc::clone(&bridge_clone);
+            tauri::async_runtime::spawn(async move {
+                let mut rx = bridge_prog.progress_rx.lock().await;
+                while let Some(prog) = rx.recv().await {
+                    let _ = app_clone.emit("setup_progress", &prog);
+                }
+            });
+
+            match bridge_clone.start().await {
+                Ok(()) => {
+                    let _ = evt_tx_clone.send(BridgeEvent::DaemonConnected).await;
+                }
+                Err(e) => {
+                    log::error!("Backend harness failed to start: {e}");
+                    let _ = evt_tx_clone.send(BridgeEvent::DaemonDisconnected).await;
+                }
+            }
+        });
+    }
+
+    // ── 2. Watch bridge connection-state changes (health-loop reconnects) ─────
+    {
+        let mut state_rx = bridge.state_rx.clone();
+        let evt_tx_clone = evt_tx.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                if state_rx.changed().await.is_err() { break; }
+                let connected = state_rx.borrow().connected;
+                let evt = if connected {
+                    BridgeEvent::DaemonConnected
+                } else {
+                    BridgeEvent::DaemonDisconnected
+                };
+                if evt_tx_clone.send(evt).await.is_err() { break; }
+            }
+        });
+    }
+
+    // ── 3. Command handler (background thread with its own tokio runtime) ─────
     let evt_tx_clone = evt_tx.clone();
+    let bridge_for_cmds = Arc::clone(&bridge);
     std::thread::Builder::new()
         .name("mowisai-bridge".into())
         .spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("tokio rt");
             rt.block_on(async move {
-                // Try connecting to daemon on start
-                if socket_connectable().await {
-                    let _ = evt_tx_clone.send(BridgeEvent::DaemonConnected).await;
-                }
-
                 while let Some(cmd) = cmd_rx.recv().await {
                     let tx = evt_tx_clone.clone();
+                    let b = Arc::clone(&bridge_for_cmds);
                     match cmd {
                         BridgeCommand::CheckSocket => {
-                            if socket_connectable().await {
-                                let _ = tx.send(BridgeEvent::DaemonConnected).await;
+                            let evt = if b.is_connected() {
+                                BridgeEvent::DaemonConnected
                             } else {
-                                let _ = tx.send(BridgeEvent::DaemonDisconnected).await;
-                            }
+                                BridgeEvent::DaemonDisconnected
+                            };
+                            let _ = tx.send(evt).await;
                         }
 
                         BridgeCommand::StopOrchestration => {
-                            let _ = send_socket_json(
-                                serde_json::json!({ "type": "stop" }),
-                                &tx,
-                            ).await;
+                            if b.is_connected() {
+                                let _ = b.send(serde_json::json!({ "type": "stop" })).await;
+                            }
                         }
 
                         BridgeCommand::StartOrchestration { session_id, prompt, max_agents, mode } => {
                             tokio::spawn(async move {
-                                run_orchestration(session_id, prompt, max_agents, mode, tx).await;
+                                run_orchestration(session_id, prompt, max_agents, mode, b, tx).await;
                             });
                         }
                     }
@@ -208,7 +254,7 @@ fn start_bridge(
         })
         .expect("spawn bridge thread");
 
-    // Event consumer — runs on Tauri's async executor, pumps events to frontend
+    // ── 4. Event consumer — Tauri executor → frontend ─────────────────────────
     let state_clone = Arc::clone(&state);
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -353,67 +399,8 @@ async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app: &ta
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Socket helpers (ported from mowis-gui/backend.rs)
+// Socket event mapping
 // ─────────────────────────────────────────────────────────────────────────────
-
-// ── Unix socket helpers (daemon is Linux-only) ────────────────────────────────
-
-#[cfg(unix)]
-async fn socket_connectable() -> bool {
-    tokio::net::UnixStream::connect(SOCKET_PATH).await.is_ok()
-}
-
-#[cfg(not(unix))]
-async fn socket_connectable() -> bool {
-    false // agentd daemon requires Linux; no socket on Windows/macOS native
-}
-
-#[cfg(unix)]
-async fn send_socket_json(
-    payload: serde_json::Value,
-    event_tx: &mpsc::Sender<BridgeEvent>,
-) -> Result<()> {
-    let mut stream = tokio::net::UnixStream::connect(SOCKET_PATH)
-        .await
-        .map_err(|e| anyhow::anyhow!("Cannot connect to {SOCKET_PATH}: {e}"))?;
-
-    let mut msg = serde_json::to_string(&payload)?;
-    msg.push('\n');
-    stream.write_all(msg.as_bytes()).await
-        .map_err(|e| anyhow::anyhow!("Socket write: {e}"))?;
-
-    let reader = tokio::io::BufReader::new(stream);
-    read_socket_responses(reader, event_tx).await?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-async fn send_socket_json(
-    _payload: serde_json::Value,
-    _event_tx: &mpsc::Sender<BridgeEvent>,
-) -> Result<()> {
-    Err(anyhow::anyhow!(
-        "The agentd daemon requires Linux. \
-         On Windows, run the daemon inside WSL2 and connect via a forwarded socket."
-    ))
-}
-
-#[cfg(unix)]
-async fn read_socket_responses(
-    reader: tokio::io::BufReader<tokio::net::UnixStream>,
-    event_tx: &mpsc::Sender<BridgeEvent>,
-) -> Result<()> {
-    let mut lines = reader.lines();
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() { continue; }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-            if let Some(evt) = socket_value_to_bridge_event(&v) {
-                if event_tx.send(evt).await.is_err() { break; }
-            }
-        }
-    }
-    Ok(())
-}
 
 fn socket_value_to_bridge_event(v: &serde_json::Value) -> Option<BridgeEvent> {
     let t = v.get("type")?.as_str()?;
@@ -458,6 +445,7 @@ async fn run_orchestration(
     prompt: String,
     max_agents: u32,
     mode: String,
+    bridge: Arc<BackendBridge>,
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
     // 1. Emit plan card
@@ -471,18 +459,44 @@ async fn run_orchestration(
         mode: mode.clone(),
     }).await;
 
-    // 2. Try real socket
-    let payload = serde_json::json!({
-        "type":       "orchestrate",
-        "prompt":     prompt.clone(),
-        "project":    ".",
-        "max_agents": max_agents,
-        "mode":       mode,
-    });
-    if let Err(e) = send_socket_json(payload, &event_tx).await {
-        log::warn!("Socket orchestration failed ({e}), running simulation");
-        simulate_session(session_id, prompt, task_count, agent_count, sb_names, event_tx).await;
+    // 2. Try real bridge connection (WSL2 / QEMU / native socket)
+    if bridge.is_connected() {
+        let payload = serde_json::json!({
+            "type":       "orchestrate",
+            "prompt":     prompt.clone(),
+            "project":    ".",
+            "max_agents": max_agents,
+            "mode":       mode,
+        });
+        match bridge.send(payload).await {
+            Ok(()) => {
+                // Stream JSON events until the daemon closes the connection.
+                loop {
+                    match bridge.recv_next().await {
+                        Ok(Some(v)) => {
+                            if let Some(evt) = socket_value_to_bridge_event(&v) {
+                                if event_tx.send(evt).await.is_err() { return; }
+                            }
+                        }
+                        Ok(None) => return, // clean EOF — daemon finished
+                        Err(e) => {
+                            log::warn!("Bridge recv error: {e}");
+                            break;
+                        }
+                    }
+                }
+                return;
+            }
+            Err(e) => {
+                log::warn!("Bridge send failed ({e}), running simulation");
+            }
+        }
+    } else {
+        log::info!("Daemon not yet connected — running simulation");
     }
+
+    // 3. Fallback: simulation keeps the UI fully functional without a daemon
+    simulate_session(session_id, prompt, task_count, agent_count, sb_names, event_tx).await;
 }
 
 /// Simulation — keeps UI fully functional without a running daemon
@@ -700,6 +714,16 @@ async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn get_connection_state(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let cs = state.bridge.state_rx.borrow().clone();
+    Ok(serde_json::json!({
+        "connected": cs.connected,
+        "launcher":  cs.launcher,
+        "addr":      cs.addr,
+    }))
+}
+
+#[tauri::command]
 async fn get_system_info() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "os":      std::env::consts::OS,
@@ -733,7 +757,8 @@ async fn get_stats(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value,
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let state = Arc::new(AppState::new());
+    let bridge = BackendBridge::new();
+    let state = Arc::new(AppState::new(bridge));
     let state_for_setup = Arc::clone(&state);
 
     tauri::Builder::default()
@@ -756,6 +781,7 @@ fn main() {
             stop_session,
             get_system_info,
             get_stats,
+            get_connection_state,
         ])
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");
