@@ -332,16 +332,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          working-directory: mowis-desktop
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc,x86_64-apple-darwin,aarch64-apple-darwin
+        working-directory: mowis-desktop
 
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+        working-directory: mowis-desktop
 
       - name: Install dependencies
         working-directory: mowis-desktop
@@ -352,17 +356,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: "mowis-desktop"
+          working-directory: mowis-desktop
           args: "--package mowis-desktop"
 
       - name: Upload Desktop Assets
         run: |
-          for file in mowis-desktop/src-tauri/target/release/bundle/*/*/*; do
+          for file in src-tauri/target/release/bundle/*/*/*; do
             if [[ -f "$file" ]]; then
               asset_name=$(basename "$file")
               echo "Uploading $asset_name"
               gh release upload ${{ needs.create-release.outputs.version }} "$file" --clobber
             fi
           done
+        working-directory: mowis-desktop
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
