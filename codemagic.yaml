@@ -23,5 +23,4 @@ workflows:
           npx tauri build --ci --bundles dmg --target aarch64-apple-darwin
           npx tauri build --ci --bundles dmg --target x86_64-apple-darwin
     artifacts:
-      - mowis-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-      - mowis-desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+      - "**/*.dmg"
