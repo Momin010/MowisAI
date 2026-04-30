@@ -17,7 +17,9 @@ jobs:
       - name: Install Rust musl target
         run: rustup target add x86_64-unknown-linux-musl
 
-      - name: Install musl-tools
+      - name: Install musl linker
+        # musl-tools provides musl-gcc needed to link the static binary.
+        # No OpenSSL headers required — reqwest uses rustls (pure Rust TLS).
         run: sudo apt-get install -y musl-tools
 
       - name: Build agentd (static Linux binary)
