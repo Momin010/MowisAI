@@ -60,6 +60,10 @@ pub trait VmLauncher: Send + Sync {
     async fn health_check(&self) -> Result<bool>;
     /// Human-readable name for logging.
     fn name(&self) -> &str;
+    /// Return diagnostic logs from the Linux environment (best-effort).
+    async fn read_logs(&self) -> String {
+        format!("Log collection is not available on this platform ({}).", std::env::consts::OS)
+    }
 }
 
 // ── Factory — pick the right launcher for the current OS ─────────────────────

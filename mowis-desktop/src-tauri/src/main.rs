@@ -1414,6 +1414,11 @@ async fn get_connection_state(state: State<'_, Arc<AppState>>) -> Result<serde_j
 }
 
 #[tauri::command]
+async fn get_engine_logs(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    Ok(state.bridge.read_logs().await)
+}
+
+#[tauri::command]
 async fn get_system_info() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "os":      std::env::consts::OS,
@@ -1501,6 +1506,7 @@ fn main() {
             get_system_info,
             get_stats,
             get_connection_state,
+            get_engine_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");

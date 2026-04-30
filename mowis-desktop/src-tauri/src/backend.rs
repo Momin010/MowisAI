@@ -81,7 +81,15 @@ impl BackendBridge {
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         self.emit_progress("detecting", "Detecting runtime environment…", 5).await;
 
-        let info = self.connect_with_retry(5).await?;
+        let info = match self.connect_with_retry(5).await {
+            Ok(info) => info,
+            Err(e) => {
+                // Surface the full error chain to the frontend so the user can read it.
+                let msg = format!("{:#}", e);
+                self.emit_progress("error", &msg, 0).await;
+                return Err(e);
+            }
+        };
 
         self.emit_progress("ready", "Connected to agentd", 100).await;
 
@@ -125,14 +133,21 @@ impl BackendBridge {
                         }
                         Err(e) => {
                             log::warn!("Connection attempt {attempt} failed: {e}");
+                            self.emit_progress(
+                                "installing",
+                                &format!("Connecting… attempt {attempt}/{max_attempts}: {e}"),
+                                (attempt * 10).min(60) as u8,
+                            ).await;
                         }
                     }
                 }
                 Err(e) => {
-                    log::warn!("Launcher start attempt {attempt} failed: {e}");
+                    // Use {:#} to include the full anyhow error chain with context.
+                    let full = format!("{:#}", e);
+                    log::warn!("Launcher start attempt {attempt} failed: {full}");
                     self.emit_progress(
                         "installing",
-                        &format!("Setting up environment… ({e})"),
+                        &format!("Setup attempt {attempt}/{max_attempts}: {full}"),
                         (attempt * 10).min(60) as u8,
                     ).await;
                 }
@@ -239,5 +254,10 @@ impl BackendBridge {
 
     pub fn is_connected(&self) -> bool {
         self.state_rx.borrow().connected
+    }
+
+    /// Retrieve diagnostic logs from the Linux environment.
+    pub async fn read_logs(&self) -> String {
+        self.launcher.read_logs().await
     }
 }

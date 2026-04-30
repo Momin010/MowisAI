@@ -34,10 +34,22 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::sleep;
 
+// Suppress the brief console window that appears when spawning wsl.exe from a GUI process.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 const WSL_DISTRO: &str = "Alpine";
 const AGENT_TCP_PORT: u16 = 9722;
 const AGENT_TCP_ADDR: &str = "127.0.0.1:9722";
 const AGENTD_BIN: &str = "agentd-linux-x86_64";
+
+/// Create a `wsl.exe` Command with the console window suppressed on Windows.
+fn wsl_cmd() -> Command {
+    let mut cmd = Command::new("wsl.exe");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
 
 fn qemu_image_path() -> PathBuf {
     dirs::data_local_dir()
@@ -127,7 +139,7 @@ impl WindowsLauncher {
             let cached = self.wsl2_available.lock().unwrap();
             if let Some(v) = *cached { return v; }
         }
-        let ok = Command::new("wsl.exe")
+        let ok = wsl_cmd()
             .args(["--list"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -142,7 +154,7 @@ impl WindowsLauncher {
     // ── Alpine distro install ─────────────────────────────────────────────────
 
     async fn ensure_alpine_distro(&self) -> Result<()> {
-        let list = Command::new("wsl.exe")
+        let list = wsl_cmd()
             .args(["--list", "--quiet"])
             .output()
             .await
@@ -159,18 +171,23 @@ impl WindowsLauncher {
         }
 
         log::info!("Installing Alpine Linux via WSL2 (may show a UAC prompt)…");
-        let status = Command::new("wsl.exe")
+        let out = wsl_cmd()
             .args(["--install", "--distribution", WSL_DISTRO, "--no-launch"])
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
             .await
             .context("wsl --install Alpine")?;
 
-        if !status.success() {
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let detail = if stderr.is_empty() { stdout } else { stderr };
             anyhow::bail!(
-                "Failed to install Alpine Linux via WSL2 (exit {}). \
-                 Open PowerShell as Administrator, run: wsl --install \
-                 then restart MowisAI.",
-                status
+                "Failed to install Alpine Linux via WSL2 (exit {}).\n\
+                 Output: {}\n\
+                 Fix: open PowerShell as Administrator and run: wsl --install --distribution Alpine",
+                out.status, detail
             );
         }
 
@@ -182,17 +199,29 @@ impl WindowsLauncher {
     // ── Copy agentd + socat into Alpine ──────────────────────────────────────
 
     async fn ensure_agentd_in_alpine(&self, token: &str) -> Result<()> {
-        // Install socat — always run, it's idempotent and fast.
-        let _ = Command::new("wsl.exe")
+        // Install socat — always run, idempotent and fast. Capture output for diagnostics.
+        let apk_out = wsl_cmd()
             .args(["-d", WSL_DISTRO, "--", "apk", "add", "--no-cache", "socat"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
             .await;
 
+        if let Ok(ref out) = apk_out {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let detail = if stderr.is_empty() { stdout } else { stderr };
+                log::warn!("apk add socat failed (exit {}): {}", out.status, detail);
+                // Non-fatal: agentd may already work without socat if it was previously installed.
+            }
+        }
+
         // Check if agentd is already in Alpine.
-        let already = Command::new("wsl.exe")
+        let already = wsl_cmd()
             .args(["-d", WSL_DISTRO, "--", "test", "-x", "/usr/local/bin/agentd"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .await
             .map(|s| s.success())
@@ -202,9 +231,9 @@ impl WindowsLauncher {
             // Find the binary bundled by the NSIS installer next to our exe.
             let agentd_win = find_bundled_agentd().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "The agentd engine binary was not found next to the application. \
-                     Please reinstall MowisAI to restore bundled components. \
-                     Expected: {}", AGENTD_BIN
+                    "The agentd engine binary ({}) was not found next to the application.\n\
+                     Please reinstall MowisAI to restore bundled components.",
+                    AGENTD_BIN
                 )
             })?;
 
@@ -218,18 +247,23 @@ impl WindowsLauncher {
                 "cp '{}' /usr/local/bin/agentd && chmod +x /usr/local/bin/agentd",
                 wsl_src.replace('\'', "\\'")
             );
-            let status = Command::new("wsl.exe")
+            let copy_out = wsl_cmd()
                 .args(["-d", WSL_DISTRO, "--", "sh", "-c", &copy_cmd])
-                .status()
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
                 .await
                 .context("copying agentd binary into Alpine")?;
 
-            if !status.success() {
+            if !copy_out.status.success() {
+                let stderr = String::from_utf8_lossy(&copy_out.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&copy_out.stdout).trim().to_string();
+                let detail = if stderr.is_empty() { stdout } else { stderr };
                 anyhow::bail!(
-                    "Failed to copy agentd into Alpine WSL2. \
-                     Source path: {} (WSL path: {})",
-                    agentd_win.display(),
-                    wsl_src
+                    "Failed to copy agentd into Alpine WSL2 (exit {}).\n\
+                     Source: {} → WSL: {}\n\
+                     Error: {}",
+                    copy_out.status, agentd_win.display(), wsl_src, detail
                 );
             }
             log::info!("agentd installed in Alpine successfully");
@@ -242,13 +276,18 @@ impl WindowsLauncher {
              chmod 600 /root/.mowisai/token",
             token.replace('\'', "\\'")
         );
-        Command::new("wsl.exe")
+        let tok_out = wsl_cmd()
             .args(["-d", WSL_DISTRO, "--", "sh", "-c", &token_cmd])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
             .await
             .context("writing auth token into Alpine")?;
+
+        if !tok_out.status.success() {
+            let stderr = String::from_utf8_lossy(&tok_out.stderr).trim().to_string();
+            log::warn!("Writing auth token failed (exit {}): {}", tok_out.status, stderr);
+        }
 
         Ok(())
     }
@@ -260,7 +299,7 @@ impl WindowsLauncher {
 
         // Kill any stale processes from a previous session (best-effort).
         for proc in &["agentd", "socat"] {
-            let _ = Command::new("wsl.exe")
+            let _ = wsl_cmd()
                 .args(["-d", WSL_DISTRO, "--", "pkill", "-f", proc])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -269,39 +308,84 @@ impl WindowsLauncher {
         }
         sleep(Duration::from_millis(600)).await;
 
-        // Start agentd in the background.
-        Command::new("wsl.exe")
+        // Start agentd in the background. The nohup shell command itself exits
+        // immediately after forking; errors will appear in /var/log/agentd.log.
+        let agentd_out = wsl_cmd()
             .args([
                 "-d", WSL_DISTRO, "--", "sh", "-c",
                 "nohup /usr/local/bin/agentd socket --path /tmp/agentd.sock \
                  </dev/null >>/var/log/agentd.log 2>&1 &",
             ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
             .await
             .context("starting agentd inside Alpine")?;
+
+        if !agentd_out.status.success() {
+            let stderr = String::from_utf8_lossy(&agentd_out.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&agentd_out.stdout).trim().to_string();
+            let detail = if stderr.is_empty() { stdout } else { stderr };
+            anyhow::bail!(
+                "Failed to start agentd inside Alpine (exit {}).\nOutput: {}",
+                agentd_out.status, detail
+            );
+        }
 
         // Give agentd time to create and bind its socket.
         sleep(Duration::from_secs(2)).await;
 
         // Bridge the Unix socket out to a TCP port Windows can reach.
-        // WSL2 automatically makes Linux localhost ports accessible on Windows.
         let socat_cmd = format!(
             "nohup socat TCP-LISTEN:{port},reuseaddr,fork \
              UNIX-CONNECT:/tmp/agentd.sock \
              </dev/null >>/var/log/socat.log 2>&1 &",
             port = AGENT_TCP_PORT
         );
-        Command::new("wsl.exe")
+        let socat_out = wsl_cmd()
             .args(["-d", WSL_DISTRO, "--", "sh", "-c", &socat_cmd])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
             .await
             .context("starting socat TCP relay inside Alpine")?;
 
+        if !socat_out.status.success() {
+            let stderr = String::from_utf8_lossy(&socat_out.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&socat_out.stdout).trim().to_string();
+            let detail = if stderr.is_empty() { stdout } else { stderr };
+            anyhow::bail!(
+                "Failed to start socat TCP relay inside Alpine (exit {}).\nOutput: {}",
+                socat_out.status, detail
+            );
+        }
+
         Ok(())
+    }
+
+    /// Read the agentd and socat log files from Alpine for diagnostics.
+    pub async fn read_alpine_logs(&self) -> String {
+        let agentd_log = wsl_cmd()
+            .args(["-d", WSL_DISTRO, "--", "sh", "-c",
+                "cat /var/log/agentd.log 2>/dev/null || echo '(agentd.log not found)'"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "(could not read agentd.log)".into());
+
+        let socat_log = wsl_cmd()
+            .args(["-d", WSL_DISTRO, "--", "sh", "-c",
+                "cat /var/log/socat.log 2>/dev/null || echo '(socat.log not found)'"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "(could not read socat.log)".into());
+
+        format!("=== /var/log/agentd.log ===\n{agentd_log}\n\n=== /var/log/socat.log ===\n{socat_log}")
     }
 
     // ── Wait for bridge ───────────────────────────────────────────────────────
@@ -310,11 +394,10 @@ impl WindowsLauncher {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             if std::time::Instant::now() > deadline {
+                let logs = self.read_alpine_logs().await;
                 anyhow::bail!(
-                    "Timed out waiting for agentd TCP bridge on {}. \
-                     To inspect: open WSL2 Alpine and run: \
-                     cat /var/log/agentd.log",
-                    AGENT_TCP_ADDR
+                    "Timed out waiting for agentd TCP bridge on {}.\n\n{}",
+                    AGENT_TCP_ADDR, logs
                 );
             }
             if is_tcp_reachable(AGENT_TCP_ADDR).await {
@@ -382,7 +465,7 @@ impl VmLauncher for WindowsLauncher {
 
     async fn stop(&self) -> Result<()> {
         for proc in &["agentd", "socat"] {
-            let _ = Command::new("wsl.exe")
+            let _ = wsl_cmd()
                 .args(["-d", WSL_DISTRO, "--", "pkill", "-f", proc])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -398,5 +481,9 @@ impl VmLauncher for WindowsLauncher {
             return Ok(is_tcp_reachable(AGENT_TCP_ADDR).await);
         }
         Ok(is_tcp_reachable(self.qemu_fallback.agent_tcp()).await)
+    }
+
+    async fn read_logs(&self) -> String {
+        self.read_alpine_logs().await
     }
 }
