@@ -1076,13 +1076,31 @@ async fn collect_git_repository_info(
     let remote_url = optional_git_command(&["config", "--get", "remote.origin.url"], &root).await;
 
     Ok(GitRepositoryInfo {
-        path: root.display().to_string(),
+        path: path_to_string(&root),
         name,
         branch,
         remote_url,
         source: source.to_string(),
         repo_url,
     })
+}
+
+fn strip_extended_path_prefix(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        PathBuf::from(s[4..].to_string())
+    } else {
+        path
+    }
+}
+
+fn path_to_string(path: &Path) -> String {
+    let s = path.display().to_string();
+    if s.starts_with(r"\\?\") {
+        s[4..].to_string()
+    } else {
+        s
+    }
 }
 
 fn parse_github_repo_url(raw: &str) -> Result<(String, String), String> {
@@ -1141,7 +1159,8 @@ async fn clone_github_repo(
 ) -> Result<GitRepositoryInfo, String> {
     let (_owner, repo_name) = parse_github_repo_url(&repo_url)?;
     let parent = fs::canonicalize(PathBuf::from(&destination_parent))
-        .map_err(|err| format!("read destination folder {}: {err}", destination_parent))?;
+        .map_err(|err| format!("Destination folder not found: {err}"))?;
+    let parent = strip_extended_path_prefix(parent);
     if !parent.is_dir() {
         return Err(format!("{} is not a folder", parent.display()));
     }
@@ -1151,7 +1170,9 @@ async fn clone_github_repo(
         return Err(format!("{} already exists and is not empty", target.display()));
     }
 
-    let git = which::which("git").map_err(|_| "git was not found on PATH".to_string())?;
+    let git = which::which("git").map_err(|_| {
+        "Git is not installed. Download it from https://git-scm.com/downloads".to_string()
+    })?;
     let output = Command::new(git)
         .arg("clone")
         .arg(repo_url.trim())
