@@ -24,10 +24,6 @@ jobs:
 
       - name: Build agentd (static Linux binary)
         working-directory: agentd
-        env:
-          # Tell the musl target to use musl-gcc as the C linker
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Upload agentd binary
