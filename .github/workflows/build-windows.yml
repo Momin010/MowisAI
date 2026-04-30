@@ -81,5 +81,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mowis-windows-installer
-          # Path is relative to GITHUB_WORKSPACE (repo root), not working-directory
-          path: mowis-desktop/src-tauri/target/release/bundle/nsis/*.exe
+          # Workspace Cargo.toml → tauri also outputs to workspace target/ at repo root
+          path: target/release/bundle/nsis/*.exe
