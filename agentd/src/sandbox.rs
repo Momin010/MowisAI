@@ -680,7 +680,12 @@ impl Sandbox {
                 MsFlags::empty(),
                 Some(opts.as_str()),
             ) {
-                return Err(anyhow::anyhow!("overlay mount failed for container: {}", e));
+                // overlayfs not available (e.g. running inside a container without
+                // CAP_SYS_ADMIN for nested overlay) — fall back to copying the
+                // sandbox rootfs so the container still has a usable filesystem.
+                log::warn!("overlay mount failed for container {} ({}); falling back to rootfs copy", id, e);
+                copy_dir_recursive(self.root.path(), &root)
+                    .context("copy sandbox rootfs into container root")?;
             }
         } else {
             // no image: simple tmpfs mount (nonfatal if it fails)
