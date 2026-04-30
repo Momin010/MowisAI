@@ -367,6 +367,7 @@ const State = {
   config: null,
   selectedRepo: null,
   cloneDestination: null,
+  setupError: null,
   stats: { tasks_total: 0, tasks_done: 0, tasks_running: 0, tokens_total: 0, tool_calls: 0 },
 };
 
@@ -560,12 +561,14 @@ async function runSplash() {
   // Forward real setup-progress events from BackendBridge while booting.
   let unlisten = null;
   let resolved = false;
+  let lastErrorMessage = null;
   const backendReady = new Promise(resolve => {
     listen('setup_progress', (e) => {
       const p = e.payload;
       if (!p) return;
       if (fill) fill.style.width = Math.max(5, p.pct) + '%';
       if (hint) hint.textContent = p.message;
+      if (p.stage === 'error') lastErrorMessage = p.message;
       if ((p.stage === 'ready' || p.stage === 'error') && !resolved) {
         resolved = true;
         resolve(p);
@@ -573,10 +576,14 @@ async function runSplash() {
     }).then(u => { unlisten = u; });
   });
 
-  // Show the splash for at least 1 s; give the backend up to 4 s before
-  // showing the app regardless (it keeps starting in the background).
-  await Promise.race([backendReady, delay(4000)]);
+  // Give the backend up to 60 s (WSL install can take a while).
+  // The splash stays until ready or error; we never hide it silently on timeout
+  // so the user always sees the last status message.
+  await Promise.race([backendReady, delay(60000)]);
   if (unlisten) unlisten();
+
+  // Store any setup error so the offline banner can surface it.
+  if (lastErrorMessage) State.setupError = lastErrorMessage;
 
   if (fill) fill.style.width = '100%';
   await delay(200);
@@ -721,17 +728,49 @@ const OFFLINE_GUIDANCE = {
 function showOfflineBanner(os, launcher) {
   if ($('offline-banner')) return; // already shown
   const guidance = OFFLINE_GUIDANCE[os] || OFFLINE_GUIDANCE.unknown;
+  const errorBlock = State.setupError
+    ? `<div class="offline-banner-error"><strong>Setup error:</strong><br><code>${escapeHtml(State.setupError)}</code></div>`
+    : '';
+  const logsBtn = `<button class="offline-banner-logs-btn" id="btn-show-engine-logs">Show engine logs</button>`;
   const banner = document.createElement('div');
   banner.id = 'offline-banner';
   banner.className = 'offline-banner';
   banner.innerHTML = `
     <div class="offline-banner-title">⚙ Engine not connected</div>
     <div class="offline-banner-body">${guidance.replace(/\n/g, '<br>')}</div>
+    ${errorBlock}
     <div class="offline-banner-footer">
       The app is fully usable — sessions will run in simulation mode until the engine is available.
-    </div>`;
+      ${logsBtn}
+    </div>
+    <pre class="offline-banner-logs hidden" id="offline-banner-logs"></pre>`;
   const homeEmpty = $('home-empty');
   if (homeEmpty) homeEmpty.prepend(banner);
+
+  $('btn-show-engine-logs')?.addEventListener('click', async () => {
+    const pre = $('offline-banner-logs');
+    if (!pre) return;
+    if (!pre.classList.contains('hidden')) {
+      pre.classList.add('hidden');
+      return;
+    }
+    pre.textContent = 'Loading logs…';
+    pre.classList.remove('hidden');
+    try {
+      const logs = await invoke('get_engine_logs');
+      pre.textContent = logs || '(no logs available)';
+    } catch (e) {
+      pre.textContent = `Error fetching logs: ${e}`;
+    }
+  });
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function removeOfflineBanner() {
