@@ -1400,6 +1400,13 @@ function showRepoModal() {
   modal.classList.remove('hidden');
   modal.setAttribute('aria-hidden', 'false');
   setRepoStatus('');
+  if (!State.selectedRepo) {
+    $('repo-selected')?.classList.add('hidden');
+    const urlInput = $('repo-url');
+    if (urlInput) urlInput.value = '';
+    setText('repo-destination-label', 'No folder selected');
+    State.cloneDestination = null;
+  }
   $('repo-url')?.focus();
 }
 
@@ -1429,11 +1436,19 @@ function stageSelectedRepo(info) {
 }
 
 function renderRepoChip() {
-  const chip = $('repo-chip');
-  if (!chip) return;
+  const btn = $('btn-repo-open');
+  if (!btn) return;
   const repo = State.selectedRepo;
-  chip.classList.toggle('hidden', !repo);
-  setText('repo-chip-name', repo ? `${repo.name || 'repository'} - ${repo.source || 'git'}` : 'repository');
+  const span = btn.querySelector('span');
+  if (repo) {
+    btn.classList.add('has-repo');
+    btn.title = repo.name || 'repository';
+    if (span) span.textContent = repo.name || 'repository';
+  } else {
+    btn.classList.remove('has-repo');
+    btn.title = 'Add GitHub repository';
+    if (span) span.textContent = 'Add GitHub repository';
+  }
 }
 
 async function handlePickLocalRepo() {
@@ -1518,8 +1533,14 @@ function setupHandlers() {
   $('repo-pick-destination')?.addEventListener('click', handlePickCloneDestination);
   $('repo-clone')?.addEventListener('click', handleCloneGitHubRepo);
   $('repo-use')?.addEventListener('click', useSelectedRepo);
-  $('repo-chip-clear')?.addEventListener('click', () => {
+  $('repo-remove')?.addEventListener('click', () => {
     State.selectedRepo = null;
+    State.cloneDestination = null;
+    $('repo-selected')?.classList.add('hidden');
+    const urlInput = $('repo-url');
+    if (urlInput) urlInput.value = '';
+    setText('repo-destination-label', 'No folder selected');
+    setRepoStatus('');
     renderRepoChip();
   });
   document.querySelectorAll('.repo-tab').forEach(tab => {
