@@ -70,9 +70,9 @@ jobs:
       - name: Rename agentd binary to expected name
         shell: pwsh
         run: |
-          $src = "src-tauri/resources/agentd"
-          $dst = "src-tauri/resources/agentd-linux-x86_64"
-          if (Test-Path $src) { Rename-Item $src $dst }
+          $src = "src-tauri\resources\agentd"
+          $dst = "src-tauri\resources\agentd-linux-x86_64"
+          if (Test-Path $src) { Move-Item $src $dst }
 
       - name: Build Tauri NSIS installer
         run: npx tauri build --ci --bundles nsis
