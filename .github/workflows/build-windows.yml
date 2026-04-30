@@ -23,14 +23,18 @@ jobs:
         run: sudo apt-get install -y musl-tools
 
       - name: Build agentd (static Linux binary)
-        working-directory: agentd
-        run: cargo build --release --target x86_64-unknown-linux-musl
+        # Run from workspace root so cargo uses the workspace target/ dir.
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --target x86_64-unknown-linux-musl -p agentd
 
       - name: Upload agentd binary
         uses: actions/upload-artifact@v4
         with:
           name: agentd-linux-x86_64
-          path: agentd/target/x86_64-unknown-linux-musl/release/agentd
+          # Workspace root Cargo.toml → target/ is at the repo root, not agentd/target/
+          path: target/x86_64-unknown-linux-musl/release/agentd
           retention-days: 1
 
   # ── Job 2: build the Tauri Windows installer ──────────────────────────────────
