@@ -465,12 +465,13 @@ impl App {
 
                 let system_prompt = "You are MowisAI, an AI coding assistant. Answer the user's question helpfully and concisely.";
 
-                match crate::orchestration::provider_client::generate_text(
+                match crate::orchestration::provider_client::generate_text_with_limit(
                     &llm_config,
                     system_prompt,
                     &message,
                     false,
                     0.7,
+                    2048,
                 )
                 .await
                 {
