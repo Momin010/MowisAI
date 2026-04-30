@@ -119,9 +119,21 @@
                 <option value="standard">Standard</option>
                 <option value="full">Full</option>
               </select>
+              <button class="btn-repo" id="btn-repo-open" title="Add GitHub repository" aria-label="Add GitHub repository">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M2.5 4.5C2.5 3.4 3.4 2.5 4.5 2.5H11.5C12.6 2.5 13.5 3.4 13.5 4.5V11.5C13.5 12.6 12.6 13.5 11.5 13.5H4.5C3.4 13.5 2.5 12.6 2.5 11.5V4.5Z" stroke="currentColor" stroke-width="1.3"/>
+                  <path d="M5 10.8V7.2C5 6.4 5.7 5.7 6.5 5.7H9.5C10.3 5.7 11 6.4 11 7.2V10.8M6.2 5.7V4.6M9.8 5.7V4.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                </svg>
+                <span>Add GitHub repository</span>
+              </button>
               <span class="home-hint">⏎ to send</span>
               <button class="btn-send" id="btn-home-send">Run →</button>
             </div>
+          </div>
+          <div class="repo-chip hidden" id="repo-chip">
+            <span class="repo-chip-dot"></span>
+            <span id="repo-chip-name">repository</span>
+            <button id="repo-chip-clear" aria-label="Remove repository">x</button>
           </div>
           <div class="home-suggestions">
             <button class="suggestion" data-text="Implement a full authentication system with OAuth2, JWT, refresh tokens, and React UI">Auth system with OAuth2</button>
@@ -316,6 +328,61 @@
   </div>
 
 </div><!-- /#app -->
+
+<!-- Repository picker -->
+<div id="repo-modal" class="repo-modal hidden" aria-hidden="true">
+  <div class="repo-backdrop" id="repo-backdrop"></div>
+  <div class="repo-dialog" role="dialog" aria-modal="true" aria-labelledby="repo-dialog-title">
+    <div class="repo-dialog-head">
+      <div>
+        <div class="repo-kicker">Repository</div>
+        <div class="repo-title" id="repo-dialog-title">Add GitHub repository</div>
+      </div>
+      <button class="repo-icon-btn" id="repo-close" aria-label="Close repository picker">x</button>
+    </div>
+
+    <div class="repo-tabs">
+      <button class="repo-tab active" data-repo-tab="local">Local</button>
+      <button class="repo-tab" data-repo-tab="github">GitHub</button>
+    </div>
+
+    <div class="repo-panel active" id="repo-panel-local">
+      <button class="repo-action" id="repo-pick-local">
+        <span class="repo-action-icon">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 5.5H13.5V12.5C13.5 13.05 13.05 13.5 12.5 13.5H3.5C2.95 13.5 2.5 13.05 2.5 12.5V5.5Z" stroke="currentColor" stroke-width="1.3"/><path d="M2.5 5.5V4C2.5 3.45 2.95 3 3.5 3H6.3L7.6 4.3H12.5C13.05 4.3 13.5 4.75 13.5 5.3V5.5" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        </span>
+        <span>
+          <strong>Point to repository</strong>
+          <small>Select a folder with a valid .git directory</small>
+        </span>
+      </button>
+    </div>
+
+    <div class="repo-panel" id="repo-panel-github">
+      <label class="repo-field">
+        <span>Repository URL</span>
+        <input id="repo-url" type="url" placeholder="https://github.com/owner/repo" autocomplete="off" spellcheck="false" />
+      </label>
+      <button class="repo-action" id="repo-pick-destination">
+        <span class="repo-action-icon">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2.5V10.5M8 10.5L5 7.5M8 10.5L11 7.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 12.5H13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </span>
+        <span>
+          <strong>Choose destination</strong>
+          <small id="repo-destination-label">No folder selected</small>
+        </span>
+      </button>
+      <button class="repo-primary" id="repo-clone">Clone repository</button>
+    </div>
+
+    <div class="repo-selected hidden" id="repo-selected">
+      <div class="repo-selected-name" id="repo-selected-name">repository</div>
+      <div class="repo-selected-path" id="repo-selected-path"></div>
+      <button class="repo-primary" id="repo-use">Use repository</button>
+    </div>
+    <div class="repo-status" id="repo-status"></div>
+  </div>
+</div>
 
 <!-- Toast -->
 <div id="toasts" class="toasts"></div>

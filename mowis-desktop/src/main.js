@@ -7,13 +7,16 @@
 
 let _invoke = null;
 let _listen = null;
+let _openDialog = null;
 
 async function loadTauri() {
   try {
     const { invoke } = await import('@tauri-apps/api/core');
     const { listen }  = await import('@tauri-apps/api/event');
+    const { open } = await import('@tauri-apps/plugin-dialog');
     _invoke = invoke;
     _listen = listen;
+    _openDialog = open;
     return true;
   } catch { return false; }
 }
@@ -85,10 +88,33 @@ function mockInvoke(cmd, args) {
     case 'check_daemon':        return Promise.resolve(false);
     case 'get_system_info':     return Promise.resolve({ os: 'web', arch: 'x64', version: '0.1.0' });
     case 'get_stats':           return Promise.resolve(mockStats());
+    case 'validate_git_repository': return Promise.resolve(mockGitInfo(args.path, 'local', null));
+    case 'clone_github_repo':    return Promise.resolve(mockCloneGitHubRepo(args.repoUrl || args.repo_url, args.destinationParent || args.destination_parent));
     case 'start_session':       return mockStartSession(args);
     case 'stop_session':        return mockStopSession();
     default: return Promise.reject(`Unknown command: ${cmd}`);
   }
+}
+
+function mockGitInfo(path, source = 'local', repoUrl = null) {
+  const clean = String(path || '').replace(/[\\\/]+$/, '');
+  const name = clean.split(/[\\\/]/).pop() || 'repository';
+  return {
+    path: clean || `/mock/${name}`,
+    name,
+    branch: 'main',
+    remote_url: repoUrl,
+    source,
+    repo_url: repoUrl,
+  };
+}
+
+async function mockCloneGitHubRepo(repoUrl, destinationParent) {
+  const parsed = parseGitHubRepoName(repoUrl);
+  if (!parsed) throw new Error('Use a GitHub URL like https://github.com/owner/repo');
+  const base = String(destinationParent || '/mock/repos').replace(/[\\\/]+$/, '');
+  await delay(600);
+  return mockGitInfo(`${base}/${parsed.repo}`, 'github', repoUrl);
 }
 
 function mockStats() {
@@ -339,6 +365,8 @@ const State = {
   isStreaming: false,
   daemonConnected: false,
   config: null,
+  selectedRepo: null,
+  cloneDestination: null,
   stats: { tasks_total: 0, tasks_done: 0, tasks_running: 0, tokens_total: 0, tool_calls: 0 },
 };
 
@@ -789,7 +817,7 @@ async function setupListeners() {
 
 // ── Session start ─────────────────────────────────────────────────────────────
 
-async function startSession(prompt, mode) {
+async function startSession(prompt, mode, repo = State.selectedRepo) {
   if (!prompt.trim()) { toast('Enter a task description', 'error'); return; }
 
   // Reset chat
@@ -811,12 +839,25 @@ async function startSession(prompt, mode) {
 
   // Show user message immediately
   appendChatMessage({ kind: 'user', content: prompt, ts: nowTs() });
+  if (repo?.path) {
+    appendChatMessage({
+      kind: 'system',
+      content: `Repository attached: ${repo.name || 'repository'} (${repo.path})`,
+      ts: nowTs(),
+    });
+  }
 
   // Clear task panel
   updateTaskPanelVisibility();
 
   try {
-    const id = await invoke('start_session', { prompt, mode: mode || 'auto' });
+    const id = await invoke('start_session', {
+      prompt,
+      mode: mode || 'auto',
+      projectPath: repo?.path || null,
+      repoUrl: repo?.repo_url || repo?.remote_url || null,
+      repoSource: repo?.source || null,
+    });
     State.sessionId = id;
     setText('compose-session-info', `session ${id.slice(0,12)}`);
     setText('chat-session-title', prompt.slice(0, 120));
@@ -1317,6 +1358,149 @@ function syncCustomSelect(selectOrId) {
   });
 }
 
+function parseGitHubRepoName(repoUrl) {
+  const raw = String(repoUrl || '').trim();
+  const path = raw.startsWith('https://github.com/')
+    ? raw.slice('https://github.com/'.length)
+    : raw.startsWith('git@github.com:')
+      ? raw.slice('git@github.com:'.length)
+      : '';
+  if (!path) return null;
+  const clean = path.split(/[?#]/)[0].replace(/^\/+|\/+$/g, '').replace(/\.git$/, '');
+  const parts = clean.split('/');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  return { owner: parts[0], repo: parts[1] };
+}
+
+async function pickDirectory() {
+  if (!_openDialog) {
+    return 'C:/MowisAI/mock-repositories';
+  }
+  const picked = await _openDialog({ directory: true, multiple: false });
+  return Array.isArray(picked) ? picked[0] : picked;
+}
+
+function setRepoStatus(message, type = 'info') {
+  const status = $('repo-status');
+  if (!status) return;
+  status.textContent = message || '';
+  status.className = `repo-status ${type}`;
+}
+
+function setRepoBusy(isBusy) {
+  ['repo-pick-local', 'repo-pick-destination', 'repo-clone', 'repo-use'].forEach(id => {
+    const el = $(id);
+    if (el) el.disabled = !!isBusy;
+  });
+}
+
+function showRepoModal() {
+  const modal = $('repo-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  setRepoStatus('');
+  $('repo-url')?.focus();
+}
+
+function hideRepoModal() {
+  const modal = $('repo-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function setRepoTab(tab) {
+  document.querySelectorAll('.repo-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.repoTab === tab);
+  });
+  document.querySelectorAll('.repo-panel').forEach(panel => {
+    panel.classList.toggle('active', panel.id === `repo-panel-${tab}`);
+  });
+  setRepoStatus('');
+}
+
+function stageSelectedRepo(info) {
+  State.selectedRepo = info;
+  $('repo-selected')?.classList.remove('hidden');
+  setText('repo-selected-name', info?.name || 'repository');
+  setText('repo-selected-path', info?.path || '');
+  renderRepoChip();
+}
+
+function renderRepoChip() {
+  const chip = $('repo-chip');
+  if (!chip) return;
+  const repo = State.selectedRepo;
+  chip.classList.toggle('hidden', !repo);
+  setText('repo-chip-name', repo ? `${repo.name || 'repository'} - ${repo.source || 'git'}` : 'repository');
+}
+
+async function handlePickLocalRepo() {
+  try {
+    const path = await pickDirectory();
+    if (!path) return;
+    setRepoBusy(true);
+    setRepoStatus('Checking repository...');
+    const info = await invoke('validate_git_repository', { path });
+    stageSelectedRepo(info);
+    setRepoStatus('Repository ready', 'success');
+  } catch (err) {
+    setRepoStatus(String(err), 'error');
+  } finally {
+    setRepoBusy(false);
+  }
+}
+
+async function handlePickCloneDestination() {
+  try {
+    const path = await pickDirectory();
+    if (!path) return;
+    State.cloneDestination = path;
+    setText('repo-destination-label', path);
+    setRepoStatus('');
+  } catch (err) {
+    setRepoStatus(String(err), 'error');
+  }
+}
+
+async function handleCloneGitHubRepo() {
+  const repoUrl = $('repo-url')?.value.trim();
+  if (!parseGitHubRepoName(repoUrl)) {
+    setRepoStatus('Paste a GitHub URL like https://github.com/owner/repo', 'error');
+    return;
+  }
+  if (!State.cloneDestination) {
+    setRepoStatus('Choose a destination folder', 'error');
+    return;
+  }
+
+  try {
+    setRepoBusy(true);
+    setRepoStatus('Cloning repository...');
+    const info = await invoke('clone_github_repo', {
+      repoUrl,
+      destinationParent: State.cloneDestination,
+    });
+    stageSelectedRepo(info);
+    setRepoStatus('Repository cloned', 'success');
+  } catch (err) {
+    setRepoStatus(String(err), 'error');
+  } finally {
+    setRepoBusy(false);
+  }
+}
+
+function useSelectedRepo() {
+  if (!State.selectedRepo) {
+    setRepoStatus('Select or clone a repository first', 'error');
+    return;
+  }
+  renderRepoChip();
+  hideRepoModal();
+  toast('Repository attached', 'success');
+}
+
 function setupHandlers() {
   const taskClose = $('task-panel-toggle');
   if (taskClose) taskClose.textContent = 'x';
@@ -1327,6 +1511,23 @@ function setupHandlers() {
   });
   $('btn-sidebar-toggle')?.addEventListener('click', () => setSidebarCollapsed(!State.sidebarCollapsed));
   $('btn-chat-home')?.addEventListener('click', () => navigate('home'));
+  $('btn-repo-open')?.addEventListener('click', showRepoModal);
+  $('repo-close')?.addEventListener('click', hideRepoModal);
+  $('repo-backdrop')?.addEventListener('click', hideRepoModal);
+  $('repo-pick-local')?.addEventListener('click', handlePickLocalRepo);
+  $('repo-pick-destination')?.addEventListener('click', handlePickCloneDestination);
+  $('repo-clone')?.addEventListener('click', handleCloneGitHubRepo);
+  $('repo-use')?.addEventListener('click', useSelectedRepo);
+  $('repo-chip-clear')?.addEventListener('click', () => {
+    State.selectedRepo = null;
+    renderRepoChip();
+  });
+  document.querySelectorAll('.repo-tab').forEach(tab => {
+    tab.addEventListener('click', () => setRepoTab(tab.dataset.repoTab));
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('repo-modal')?.classList.contains('hidden')) hideRepoModal();
+  });
 
   // Home send
   $('btn-home-send')?.addEventListener('click', () => {

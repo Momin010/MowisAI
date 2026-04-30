@@ -9,9 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
@@ -110,6 +112,23 @@ pub struct UsageRecord {
     pub tool_calls: u64,
     pub duration_secs: u64,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRepositoryInfo {
+    pub path: String,
+    pub name: String,
+    pub branch: Option<String>,
+    pub remote_url: Option<String>,
+    pub source: String,
+    pub repo_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepositoryContext {
+    pub project_path: String,
+    pub repo_source: String,
+    pub repo_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,7 +460,13 @@ fn record_usage_for_current(state: &AppState, status: &str) -> Result<(), String
 
 #[derive(Debug)]
 pub enum BridgeCommand {
-    StartOrchestration { session_id: String, prompt: String, max_agents: u32, mode: String },
+    StartOrchestration {
+        session_id: String,
+        prompt: String,
+        max_agents: u32,
+        mode: String,
+        repo_context: Option<RepositoryContext>,
+    },
     StopOrchestration,
     CheckSocket,
 }
@@ -541,9 +566,9 @@ fn start_bridge(
                             }
                         }
 
-                        BridgeCommand::StartOrchestration { session_id, prompt, max_agents, mode } => {
+                        BridgeCommand::StartOrchestration { session_id, prompt, max_agents, mode, repo_context } => {
                             tokio::spawn(async move {
-                                run_orchestration(session_id, prompt, max_agents, mode, b, tx).await;
+                                run_orchestration(session_id, prompt, max_agents, mode, repo_context, b, tx).await;
                             });
                         }
                     }
@@ -776,11 +801,16 @@ fn json_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
 // Orchestration runner (real socket → fallback simulation)
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn git_agent_policy() -> &'static str {
+    "Git/GitHub workflow policy: before changing files, create or switch to a new non-main branch. Never edit directly on main or master. Run git status before edits and before final output. Review git diff, staged diffs, and branch status before committing or pushing. Do not push unless the final diff matches the requested task. Keep all coordination orchestrator-mediated; agents must not coordinate directly with other agents."
+}
+
 async fn run_orchestration(
     session_id: String,
     prompt: String,
     max_agents: u32,
     mode: String,
+    repo_context: Option<RepositoryContext>,
     bridge: Arc<BackendBridge>,
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
@@ -797,10 +827,19 @@ async fn run_orchestration(
 
     // 2. Try real bridge connection (WSL2 / QEMU / native socket)
     if bridge.is_connected() {
+        let project = repo_context
+            .as_ref()
+            .map(|ctx| ctx.project_path.clone())
+            .unwrap_or_else(|| ".".to_string());
+        let repo_source = repo_context.as_ref().map(|ctx| ctx.repo_source.clone());
+        let repo_url = repo_context.as_ref().and_then(|ctx| ctx.repo_url.clone());
         let payload = serde_json::json!({
             "type":       "orchestrate",
             "prompt":     prompt.clone(),
-            "project":    ".",
+            "project":    project,
+            "repo_source": repo_source,
+            "repo_url":    repo_url,
+            "git_policy":  git_agent_policy(),
             "max_agents": max_agents,
             "mode":       mode,
         });
@@ -972,6 +1011,172 @@ fn simulated_task_views(sandbox: &str) -> Vec<String> {
 // Tauri Commands
 // ─────────────────────────────────────────────────────────────────────────────
 
+async fn run_git_command(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
+    let git = which::which("git").map_err(|_| "git was not found on PATH".to_string())?;
+    let mut cmd = Command::new(git);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|err| format!("run git {}: {err}", args.join(" ")))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        Err(if detail.is_empty() {
+            format!("git {} failed", args.join(" "))
+        } else {
+            detail
+        })
+    }
+}
+
+async fn optional_git_command(args: &[&str], cwd: &Path) -> Option<String> {
+    match run_git_command(args, Some(cwd)).await {
+        Ok(value) if !value.is_empty() => Some(value),
+        _ => None,
+    }
+}
+
+async fn collect_git_repository_info(
+    path: PathBuf,
+    source: &str,
+    repo_url: Option<String>,
+) -> Result<GitRepositoryInfo, String> {
+    let canonical = fs::canonicalize(&path)
+        .map_err(|err| format!("read repository path {}: {err}", path.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!("{} is not a folder", canonical.display()));
+    }
+
+    let inside = run_git_command(&["rev-parse", "--is-inside-work-tree"], Some(&canonical)).await?;
+    if inside.trim() != "true" {
+        return Err(format!("{} is not a Git repository", canonical.display()));
+    }
+
+    let top_level = run_git_command(&["rev-parse", "--show-toplevel"], Some(&canonical)).await?;
+    let root = fs::canonicalize(top_level.trim())
+        .map_err(|err| format!("resolve repository root {}: {err}", top_level.trim()))?;
+    let name = root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "repository".to_string());
+    let branch = optional_git_command(&["rev-parse", "--abbrev-ref", "HEAD"], &root).await;
+    let remote_url = optional_git_command(&["config", "--get", "remote.origin.url"], &root).await;
+
+    Ok(GitRepositoryInfo {
+        path: root.display().to_string(),
+        name,
+        branch,
+        remote_url,
+        source: source.to_string(),
+        repo_url,
+    })
+}
+
+fn parse_github_repo_url(raw: &str) -> Result<(String, String), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Paste a GitHub repository URL".to_string());
+    }
+
+    let path = if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else {
+        return Err("Use a GitHub HTTPS or SSH repository URL".to_string());
+    };
+
+    let without_fragment = path.split(['#', '?']).next().unwrap_or(path);
+    let trimmed_path = without_fragment.trim_matches('/');
+    let clean = trimmed_path.strip_suffix(".git").unwrap_or(trimmed_path);
+    let parts: Vec<&str> = clean.split('/').collect();
+    if parts.len() != 2 || !is_valid_github_segment(parts[0]) || !is_valid_github_segment(parts[1]) {
+        return Err("Use a repository URL like https://github.com/owner/repo".to_string());
+    }
+
+    Ok((parts[0].to_string(), parts[1].to_string()))
+}
+
+fn is_valid_github_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+}
+
+fn is_non_empty_dir(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if !path.is_dir() {
+        return Err(format!("{} already exists and is not a folder", path.display()));
+    }
+    let mut entries = fs::read_dir(path)
+        .map_err(|err| format!("read destination {}: {err}", path.display()))?;
+    Ok(entries.next().is_some())
+}
+
+#[tauri::command]
+async fn validate_git_repository(path: String) -> Result<GitRepositoryInfo, String> {
+    collect_git_repository_info(PathBuf::from(path), "local", None).await
+}
+
+#[tauri::command]
+async fn clone_github_repo(
+    repo_url: String,
+    destination_parent: String,
+) -> Result<GitRepositoryInfo, String> {
+    let (_owner, repo_name) = parse_github_repo_url(&repo_url)?;
+    let parent = fs::canonicalize(PathBuf::from(&destination_parent))
+        .map_err(|err| format!("read destination folder {}: {err}", destination_parent))?;
+    if !parent.is_dir() {
+        return Err(format!("{} is not a folder", parent.display()));
+    }
+
+    let target = parent.join(&repo_name);
+    if is_non_empty_dir(&target)? {
+        return Err(format!("{} already exists and is not empty", target.display()));
+    }
+
+    let git = which::which("git").map_err(|_| "git was not found on PATH".to_string())?;
+    let output = Command::new(git)
+        .arg("clone")
+        .arg(repo_url.trim())
+        .arg(&target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|err| format!("run git clone: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(if detail.is_empty() {
+            "git clone failed".to_string()
+        } else {
+            detail
+        });
+    }
+
+    collect_git_repository_info(target, "github", Some(repo_url.trim().to_string())).await
+}
+
 #[tauri::command]
 async fn get_messages(state: State<'_, Arc<AppState>>) -> Result<Vec<ChatMessage>, String> {
     Ok(state.messages.lock().unwrap().clone())
@@ -1027,10 +1232,20 @@ async fn start_session(
     state: State<'_, Arc<AppState>>,
     prompt: String,
     mode: Option<String>,
+    project_path: Option<String>,
+    repo_url: Option<String>,
+    repo_source: Option<String>,
 ) -> Result<String, String> {
     let session_id = Uuid::new_v4().to_string();
     let cfg = state.config.lock().unwrap().clone();
     let resolved_mode = mode.unwrap_or_else(|| cfg.mode.clone());
+    let repo_context = project_path
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| RepositoryContext {
+            project_path: path,
+            repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
+            repo_url,
+        });
     let started_at = now();
 
     // Reset state
@@ -1076,6 +1291,7 @@ async fn start_session(
             prompt,
             max_agents: cfg.max_agents,
             mode: resolved_mode,
+            repo_context,
         }).await;
     }
 
@@ -1238,6 +1454,7 @@ fn main() {
 
     tauri::Builder::default()
         .manage(state)
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let cmd_tx = start_bridge(app.handle().clone(), Arc::clone(&state_for_setup));
             *state_for_setup.cmd_tx.lock().unwrap() = Some(cmd_tx);
@@ -1250,6 +1467,8 @@ fn main() {
             get_usage_history,
             get_config,
             save_config,
+            validate_git_repository,
+            clone_github_repo,
             get_daemon_status,
             check_daemon,
             start_session,
