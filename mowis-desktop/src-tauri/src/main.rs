@@ -1152,7 +1152,16 @@ async fn window_control(app: tauri::AppHandle, action: String) -> Result<(), Str
     match action.as_str() {
         "close" => window.close().map_err(|err| format!("close window: {err}")),
         "minimize" => window.minimize().map_err(|err| format!("minimize window: {err}")),
-        "toggle_maximize" => window.toggle_maximize().map_err(|err| format!("toggle maximize: {err}")),
+        "toggle_maximize" => {
+            let is_maximized = window
+                .is_maximized()
+                .map_err(|err| format!("read maximize state: {err}"))?;
+            if is_maximized {
+                window.unmaximize().map_err(|err| format!("unmaximize window: {err}"))
+            } else {
+                window.maximize().map_err(|err| format!("maximize window: {err}"))
+            }
+        }
         other => Err(format!("unknown window action: {other}")),
     }
 }
