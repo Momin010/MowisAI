@@ -1,11 +1,40 @@
-name: Build Mowis Desktop (Windows)
+name: Build MowisAI Desktop (Windows)
 
 on:
   workflow_dispatch:
+  push:
+    tags: ['v*']
 
 jobs:
+  # ── Job 1: compile agentd for Linux x86_64 (musl static binary) ─────────────
+  # Runs on Ubuntu so we can use the musl toolchain without cross-compilation
+  # complexity on the Windows runner.
+  build-agentd-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust musl target
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get install -y musl-tools
+
+      - name: Build agentd (static Linux binary)
+        working-directory: agentd
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Upload agentd binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentd-linux-x86_64
+          path: agentd/target/x86_64-unknown-linux-musl/release/agentd
+          retention-days: 1
+
+  # ── Job 2: build the Tauri Windows installer ──────────────────────────────────
   build-windows:
     runs-on: windows-latest
+    needs: build-agentd-linux
     defaults:
       run:
         working-directory: mowis-desktop
@@ -18,19 +47,33 @@ jobs:
         with:
           node-version: 20
 
-      - name: Setup Rust
+      - name: Setup Rust (MSVC target)
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
 
       - name: Install Node deps
         run: npm install
 
-      - name: Build
+      # Download the Linux agentd binary and place it in the Tauri resources
+      # directory so tauri.conf.json can bundle it into the NSIS installer.
+      - name: Download agentd Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: agentd-linux-x86_64
+          path: mowis-desktop/src-tauri/resources
+
+      - name: Rename agentd binary to expected name
+        shell: pwsh
+        run: |
+          $src = "src-tauri/resources/agentd"
+          $dst = "src-tauri/resources/agentd-linux-x86_64"
+          if (Test-Path $src) { Rename-Item $src $dst }
+
+      - name: Build Tauri NSIS installer
         run: npx tauri build --ci --bundles nsis
 
-      - name: Upload artifact
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: mowis-windows-installer
-          path: target/release/bundle/nsis/*.exe
+          # Path is relative to GITHUB_WORKSPACE (repo root), not working-directory
+          path: mowis-desktop/src-tauri/target/release/bundle/nsis/*.exe
