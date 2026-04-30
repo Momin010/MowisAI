@@ -1,4 +1,5 @@
 use crate::config::MowisConfig;
+use crate::intent::{classify_intent, UserIntent};
 use crate::orchestration::ComplexityMode;
 use crate::tui::event::{OrchActivityEvent, TuiEvent};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -405,19 +406,84 @@ impl App {
     fn handle_user_input(&mut self, text: String) {
         self.messages.push(ChatMessage { role: MessageRole::User, content: text.clone() });
 
-        let mode_label = match &self.mode_override {
-            Some(ComplexityMode::Simple) => " [simple mode]",
-            Some(ComplexityMode::Standard) => " [standard mode]",
-            Some(ComplexityMode::Full) => " [full mode]",
-            None => "",
+        match classify_intent(&text) {
+            UserIntent::Build => {
+                let mode_label = match &self.mode_override {
+                    Some(ComplexityMode::Simple) => " [simple mode]",
+                    Some(ComplexityMode::Standard) => " [standard mode]",
+                    Some(ComplexityMode::Full) => " [full mode]",
+                    None => "",
+                };
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("Build request detected{} -- launching orchestration...", mode_label),
+                });
+                self.start_orchestration(text);
+            }
+            UserIntent::Chat => {
+                self.start_chat(text);
+            }
+        }
+    }
+
+    fn start_chat(&mut self, message: String) {
+        self.is_loading = true;
+
+        let tx = match &self.event_tx {
+            Some(t) => t.clone(),
+            None => {
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "Cannot send chat: no event channel.".to_string(),
+                });
+                self.is_loading = false;
+                return;
+            }
         };
 
-        self.messages.push(ChatMessage {
-            role: MessageRole::System,
-            content: format!("Build request detected{} -- launching orchestration...", mode_label),
-        });
+        let config = self.config.clone();
 
-        self.start_orchestration(text);
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                    let _ = tx.send(TuiEvent::GeminiDone);
+                    return;
+                }
+            };
+
+            rt.block_on(async move {
+                let llm_config = match crate::orchestration::provider_client::LlmConfig::from_config(&config) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                        let _ = tx.send(TuiEvent::GeminiDone);
+                        return;
+                    }
+                };
+
+                let system_prompt = "You are MowisAI, an AI coding assistant. Answer the user's question helpfully and concisely.";
+
+                match crate::orchestration::provider_client::generate_text(
+                    &llm_config,
+                    system_prompt,
+                    &message,
+                    false,
+                    0.7,
+                )
+                .await
+                {
+                    Ok(response) => {
+                        let _ = tx.send(TuiEvent::GeminiChunk(response));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                    }
+                }
+                let _ = tx.send(TuiEvent::GeminiDone);
+            });
+        });
     }
 
     fn start_orchestration(&mut self, prompt: String) {
