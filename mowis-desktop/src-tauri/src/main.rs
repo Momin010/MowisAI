@@ -7,9 +7,11 @@ use anyhow::Result;
 use backend::BackendBridge;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
@@ -27,14 +29,29 @@ pub enum TaskStatus {
     Failed,
 }
 
+impl Default for TaskStatus {
+    fn default() -> Self {
+        TaskStatus::Pending
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
     pub description: String,
     pub sandbox: Option<String>,
+    #[serde(default)]
     pub status: TaskStatus,
+    #[serde(default)]
     pub started_at: Option<u64>,
+    #[serde(default)]
     pub completed_at: Option<u64>,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub views: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +112,59 @@ pub struct UsageRecord {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub summary: SessionSummary,
+    pub messages: Vec<ChatMessage>,
+    pub tasks: Vec<Task>,
+    pub tokens_total: u64,
+    pub tool_calls_total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDetail {
+    pub summary: SessionSummary,
+    pub messages: Vec<ChatMessage>,
+    pub tasks: Vec<Task>,
+    pub tokens_total: u64,
+    pub tool_calls_total: u64,
+}
+
+impl From<SessionRecord> for SessionDetail {
+    fn from(record: SessionRecord) -> Self {
+        SessionDetail {
+            summary: record.summary,
+            messages: record.messages,
+            tasks: record.tasks,
+            tokens_total: record.tokens_total,
+            tool_calls_total: record.tool_calls_total,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedState {
+    pub version: u32,
+    pub config: Config,
+    pub current_session_id: Option<String>,
+    pub sessions: HashMap<String, SessionRecord>,
+    pub session_history: Vec<SessionSummary>,
+    pub usage_history: Vec<UsageRecord>,
+}
+
+impl Default for PersistedState {
+    fn default() -> Self {
+        PersistedState {
+            version: 1,
+            config: Config::default(),
+            current_session_id: None,
+            sessions: HashMap::new(),
+            session_history: Vec::new(),
+            usage_history: Vec::new(),
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // App State
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,11 +175,13 @@ pub struct AppState {
     pub current_session_id: Mutex<Option<String>>,
     pub messages: Mutex<Vec<ChatMessage>>,
     pub tasks: Mutex<HashMap<String, Task>>,
+    pub sessions: Mutex<HashMap<String, SessionRecord>>,
     pub session_history: Mutex<Vec<SessionSummary>>,
     pub usage_history: Mutex<Vec<UsageRecord>>,
     pub daemon_connected: Mutex<bool>,
     pub tokens_total: Mutex<u64>,
     pub tool_calls_total: Mutex<u64>,
+    pub storage_path: PathBuf,
 
     // Channel to send commands to the background bridge
     pub cmd_tx: Mutex<Option<mpsc::Sender<BridgeCommand>>>,
@@ -117,24 +189,250 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(bridge: Arc<BackendBridge>) -> Self {
+        let storage_path = default_storage_path();
+        let persisted = load_persisted_state(&storage_path);
+        let current_session_id = persisted.current_session_id.clone();
+        let current_record = current_session_id
+            .as_ref()
+            .and_then(|id| persisted.sessions.get(id))
+            .cloned();
+        let current_tasks = current_record
+            .as_ref()
+            .map(|record| {
+                record
+                    .tasks
+                    .iter()
+                    .cloned()
+                    .map(|task| (task.id.clone(), task))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         AppState {
             bridge,
-            config: Mutex::new(Config::default()),
-            current_session_id: Mutex::new(None),
-            messages: Mutex::new(Vec::new()),
-            tasks: Mutex::new(HashMap::new()),
-            session_history: Mutex::new(Vec::new()),
-            usage_history: Mutex::new(Vec::new()),
+            config: Mutex::new(persisted.config),
+            current_session_id: Mutex::new(current_session_id),
+            messages: Mutex::new(current_record.as_ref().map(|record| record.messages.clone()).unwrap_or_default()),
+            tasks: Mutex::new(current_tasks),
+            sessions: Mutex::new(persisted.sessions),
+            session_history: Mutex::new(persisted.session_history),
+            usage_history: Mutex::new(persisted.usage_history),
             daemon_connected: Mutex::new(false),
-            tokens_total: Mutex::new(0),
-            tool_calls_total: Mutex::new(0),
+            tokens_total: Mutex::new(current_record.as_ref().map(|record| record.tokens_total).unwrap_or_default()),
+            tool_calls_total: Mutex::new(current_record.as_ref().map(|record| record.tool_calls_total).unwrap_or_default()),
+            storage_path,
             cmd_tx: Mutex::new(None),
         }
     }
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => 0,
+    }
+}
+
+fn default_storage_path() -> PathBuf {
+    let base = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("MowisAI").join("desktop-state.json")
+}
+
+fn load_persisted_state(path: &Path) -> PersistedState {
+    match fs::read_to_string(path) {
+        Ok(raw) => match serde_json::from_str::<PersistedState>(&raw) {
+            Ok(state) => state,
+            Err(err) => {
+                log::warn!("Failed to parse persisted desktop state at {}: {err}", path.display());
+                PersistedState::default()
+            }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => PersistedState::default(),
+        Err(err) => {
+            log::warn!("Failed to read persisted desktop state at {}: {err}", path.display());
+            PersistedState::default()
+        }
+    }
+}
+
+fn write_persisted_state(path: &Path, state: &PersistedState) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("create state directory {}: {err}", parent.display()))?;
+    }
+
+    let encoded = serde_json::to_string_pretty(state)
+        .map_err(|err| format!("encode desktop state: {err}"))?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, encoded)
+        .map_err(|err| format!("write temporary state file {}: {err}", tmp_path.display()))?;
+    if let Err(rename_err) = fs::rename(&tmp_path, path) {
+        if path.exists() {
+            fs::remove_file(path)
+                .map_err(|err| format!("remove old state file {} after rename failed ({rename_err}): {err}", path.display()))?;
+            fs::rename(&tmp_path, path)
+                .map_err(|err| format!("replace state file {}: {err}", path.display()))?;
+        } else {
+            return Err(format!("replace state file {}: {rename_err}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn lock_err(name: &str) -> String {
+    format!("state lock poisoned: {name}")
+}
+
+fn save_state(state: &AppState) -> Result<(), String> {
+    let persisted = PersistedState {
+        version: 1,
+        config: state.config.lock().map_err(|_| lock_err("config"))?.clone(),
+        current_session_id: state
+            .current_session_id
+            .lock()
+            .map_err(|_| lock_err("current_session_id"))?
+            .clone(),
+        sessions: state.sessions.lock().map_err(|_| lock_err("sessions"))?.clone(),
+        session_history: state
+            .session_history
+            .lock()
+            .map_err(|_| lock_err("session_history"))?
+            .clone(),
+        usage_history: state
+            .usage_history
+            .lock()
+            .map_err(|_| lock_err("usage_history"))?
+            .clone(),
+    };
+    write_persisted_state(&state.storage_path, &persisted)
+}
+
+fn task_counts(tasks: &HashMap<String, Task>) -> (usize, usize) {
+    let done = tasks.values().filter(|task| task.status == TaskStatus::Complete).count();
+    (tasks.len(), done)
+}
+
+fn prompt_from_messages(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .find_map(|message| {
+            if let ChatMessage::User { content, .. } = message {
+                Some(content.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn upsert_history(history: &mut Vec<SessionSummary>, summary: SessionSummary) {
+    if let Some(existing) = history.iter_mut().find(|item| item.id == summary.id) {
+        *existing = summary;
+    } else {
+        history.push(summary);
+    }
+}
+
+fn sync_current_session(state: &AppState, status: Option<&str>, completed_at: Option<Option<u64>>) -> Result<(), String> {
+    let session_id = state
+        .current_session_id
+        .lock()
+        .map_err(|_| lock_err("current_session_id"))?
+        .clone();
+    let Some(session_id) = session_id else {
+        return save_state(state);
+    };
+
+    let messages = state.messages.lock().map_err(|_| lock_err("messages"))?.clone();
+    let tasks_map = state.tasks.lock().map_err(|_| lock_err("tasks"))?.clone();
+    let tasks: Vec<Task> = tasks_map.values().cloned().collect();
+    let (task_count, tasks_done) = task_counts(&tasks_map);
+    let tokens_total = *state.tokens_total.lock().map_err(|_| lock_err("tokens_total"))?;
+    let tool_calls_total = *state.tool_calls_total.lock().map_err(|_| lock_err("tool_calls_total"))?;
+    let prompt = prompt_from_messages(&messages);
+
+    let summary = {
+        let mut sessions = state.sessions.lock().map_err(|_| lock_err("sessions"))?;
+        let record = sessions.entry(session_id.clone()).or_insert_with(|| SessionRecord {
+            summary: SessionSummary {
+                id: session_id.clone(),
+                prompt: prompt.chars().take(80).collect(),
+                status: "running".into(),
+                started_at: now(),
+                completed_at: None,
+                task_count,
+                tasks_done,
+            },
+            messages: Vec::new(),
+            tasks: Vec::new(),
+            tokens_total: 0,
+            tool_calls_total: 0,
+        });
+
+        record.messages = messages;
+        record.tasks = tasks;
+        record.tokens_total = tokens_total;
+        record.tool_calls_total = tool_calls_total;
+        record.summary.prompt = prompt.chars().take(80).collect();
+        record.summary.task_count = task_count;
+        record.summary.tasks_done = tasks_done;
+        if let Some(next_status) = status {
+            record.summary.status = next_status.to_owned();
+        }
+        if let Some(next_completed_at) = completed_at {
+            record.summary.completed_at = next_completed_at;
+        }
+        record.summary.clone()
+    };
+
+    {
+        let mut history = state.session_history.lock().map_err(|_| lock_err("session_history"))?;
+        upsert_history(&mut history, summary);
+        history.sort_by_key(|item| item.started_at);
+    }
+
+    save_state(state)
+}
+
+fn record_usage_for_current(state: &AppState, status: &str) -> Result<(), String> {
+    let session_id = state
+        .current_session_id
+        .lock()
+        .map_err(|_| lock_err("current_session_id"))?
+        .clone();
+    let Some(session_id) = session_id else {
+        return Ok(());
+    };
+
+    let sessions = state.sessions.lock().map_err(|_| lock_err("sessions"))?;
+    let Some(record) = sessions.get(&session_id).cloned() else {
+        return Ok(());
+    };
+    drop(sessions);
+
+    let duration_secs = now().saturating_sub(record.summary.started_at);
+    let usage = UsageRecord {
+        session_id: session_id.clone(),
+        prompt_short: record.summary.prompt.clone(),
+        ts: record.summary.completed_at.unwrap_or_else(now),
+        task_count: record.summary.task_count,
+        tokens: record.tokens_total,
+        tool_calls: record.tool_calls_total,
+        duration_secs,
+        status: status.to_owned(),
+    };
+
+    let mut history = state.usage_history.lock().map_err(|_| lock_err("usage_history"))?;
+    if let Some(existing) = history.iter_mut().find(|item| item.session_id == session_id) {
+        *existing = usage;
+    } else {
+        history.push(usage);
+    }
+    history.sort_by_key(|item| item.ts);
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -285,11 +583,17 @@ async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app: &ta
                 ts: now(),
             };
             state.messages.lock().unwrap().push(msg.clone());
+            if let Err(err) = sync_current_session(state, Some("running"), None) {
+                log::warn!("Failed to persist plan message: {err}");
+            }
             let _ = app.emit("chat_message", &msg);
         }
 
         BridgeEvent::TaskAdded(task) => {
             state.tasks.lock().unwrap().insert(task.id.clone(), task.clone());
+            if let Err(err) = sync_current_session(state, Some("running"), None) {
+                log::warn!("Failed to persist added task: {err}");
+            }
             let _ = app.emit("task_added", &task);
         }
 
@@ -302,6 +606,9 @@ async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app: &ta
                     _ => {}
                 }
             }
+            if let Err(err) = sync_current_session(state, Some("running"), None) {
+                log::warn!("Failed to persist task update: {err}");
+            }
             let _ = app.emit("task_updated", serde_json::json!({ "id": id, "status": status }));
         }
 
@@ -312,12 +619,20 @@ async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app: &ta
                     if *streaming {
                         content.push_str(&chunk);
                         let _ = app.emit("agent_chunk", serde_json::json!({ "chunk": chunk }));
+                        drop(msgs);
+                        if let Err(err) = sync_current_session(state, Some("running"), None) {
+                            log::warn!("Failed to persist agent chunk: {err}");
+                        }
                         return;
                     }
                 }
             }
             // No streaming message yet — open one
             msgs.push(ChatMessage::Agent { content: chunk.clone(), streaming: true, ts: now() });
+            drop(msgs);
+            if let Err(err) = sync_current_session(state, Some("running"), None) {
+                log::warn!("Failed to persist agent chunk: {err}");
+            }
             let _ = app.emit("agent_chunk", serde_json::json!({ "chunk": chunk }));
         }
 
@@ -331,6 +646,10 @@ async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app: &ta
             }
             let msg = ChatMessage::Agent { content: content.clone(), streaming: false, ts: now() };
             msgs.push(msg.clone());
+            drop(msgs);
+            if let Err(err) = sync_current_session(state, Some("running"), None) {
+                log::warn!("Failed to persist agent message: {err}");
+            }
             let _ = app.emit("chat_message", &msg);
         }
 
@@ -351,44 +670,36 @@ async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app: &ta
                     t.completed_at = Some(now());
                 }
             }
-            let sys = ChatMessage::System { content: "✓ Session complete.".into(), ts: now() };
+            let sys = ChatMessage::System { content: "Session complete.".into(), ts: now() };
             state.messages.lock().unwrap().push(sys.clone());
-            let _ = app.emit("session_complete", serde_json::json!({}));
-            let _ = app.emit("chat_message", &sys);
-
-            // Add to history
-            if let Some(id) = state.current_session_id.lock().unwrap().clone() {
-                let tasks = state.tasks.lock().unwrap();
-                let done = tasks.values().filter(|t| t.status == TaskStatus::Complete).count();
-                let total = tasks.len();
-                // Rebuild summary from first user message
-                let msgs = state.messages.lock().unwrap();
-                let prompt = msgs.iter().find_map(|m| {
-                    if let ChatMessage::User { content, .. } = m { Some(content.clone()) } else { None }
-                }).unwrap_or_default();
-                drop(msgs); drop(tasks);
-
-                state.session_history.lock().unwrap().push(SessionSummary {
-                    id: id.clone(),
-                    prompt: prompt.chars().take(80).collect(),
-                    status: "done".into(),
-                    started_at: now(),
-                    completed_at: Some(now()),
-                    task_count: total,
-                    tasks_done: done,
-                });
+            if let Err(err) = sync_current_session(state, Some("done"), Some(Some(now()))) {
+                log::warn!("Failed to persist completed session: {err}");
             }
+            if let Err(err) = record_usage_for_current(state, "done").and_then(|_| save_state(state)) {
+                log::warn!("Failed to persist completed usage: {err}");
+            }
+            let _ = app.emit("chat_message", &sys);
+            let _ = app.emit("session_complete", serde_json::json!({}));
         }
 
         BridgeEvent::OrchestrationFailed(err) => {
             let msg = ChatMessage::Error { content: err.clone(), ts: now() };
             state.messages.lock().unwrap().push(msg.clone());
+            if let Err(err) = sync_current_session(state, Some("error"), Some(Some(now()))) {
+                log::warn!("Failed to persist failed session: {err}");
+            }
+            if let Err(err) = record_usage_for_current(state, "error").and_then(|_| save_state(state)) {
+                log::warn!("Failed to persist failed usage: {err}");
+            }
             let _ = app.emit("chat_message", &msg);
         }
 
         BridgeEvent::SimulationTick { tasks_done, active_agents, tokens_delta } => {
             *state.tokens_total.lock().unwrap() += tokens_delta;
             *state.tool_calls_total.lock().unwrap() += 1;
+            if let Err(err) = sync_current_session(state, Some("running"), None) {
+                log::warn!("Failed to persist usage tick: {err}");
+            }
             let _ = app.emit("stats_tick", serde_json::json!({
                 "tasks_done": tasks_done,
                 "active_agents": active_agents,
@@ -410,7 +721,20 @@ fn socket_value_to_bridge_event(v: &serde_json::Value) -> Option<BridgeEvent> {
             let description = v["description"].as_str().unwrap_or("").to_owned();
             let sandbox     = v["sandbox"].as_str().map(ToOwned::to_owned);
             let status      = parse_task_status(&v["status"]);
-            Some(BridgeEvent::TaskAdded(Task { id, description, sandbox, status, started_at: None, completed_at: None }))
+            let files       = json_string_array(v.get("files"));
+            let views       = json_string_array(v.get("views"));
+            let summary     = v["summary"].as_str().map(ToOwned::to_owned);
+            Some(BridgeEvent::TaskAdded(Task {
+                id,
+                description,
+                sandbox,
+                status,
+                started_at: None,
+                completed_at: None,
+                files,
+                summary,
+                views,
+            }))
         }
         "task_updated" => {
             let id     = v["id"].as_str()?.to_owned();
@@ -434,6 +758,18 @@ fn parse_task_status(v: &serde_json::Value) -> TaskStatus {
         "failed"   => TaskStatus::Failed,
         _          => TaskStatus::Pending,
     }
+}
+
+fn json_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -551,7 +887,17 @@ async fn simulate_session(
         let id = format!("t{:04}", i);
         let sb = sb_names[i % sb_names.len()].clone();
         let desc = sample_tasks[i % sample_tasks.len()].to_string();
-        let task = Task { id: id.clone(), description: desc, sandbox: Some(sb), status: TaskStatus::Pending, started_at: None, completed_at: None };
+        let task = Task {
+            id: id.clone(),
+            description: desc.clone(),
+            sandbox: Some(sb.clone()),
+            status: TaskStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            files: simulated_task_files(&sb, i),
+            summary: Some(format!("Implemented {desc} in the {sb} sandbox.")),
+            views: simulated_task_views(&sb),
+        };
         if event_tx.send(BridgeEvent::TaskAdded(task)).await.is_err() { return; }
         task_ids.push(id);
         sleep(Duration::from_millis(20)).await;
@@ -595,6 +941,33 @@ async fn simulate_session(
     let _ = event_tx.send(BridgeEvent::OrchestrationComplete).await;
 }
 
+fn simulated_task_files(sandbox: &str, index: usize) -> Vec<String> {
+    match sandbox {
+        "frontend" => vec![
+            format!("src/views/agent_panel_{index}.tsx"),
+            format!("src/styles/session_{index}.css"),
+        ],
+        "backend" => vec![
+            format!("src/services/orchestration_{index}.rs"),
+            format!("src/api/session_routes_{index}.rs"),
+        ],
+        "verification" => vec![
+            format!("tests/orchestration_{index}_test.rs"),
+            format!("tests/fixtures/session_{index}.json"),
+        ],
+        other => vec![format!("{other}/task_{index}.txt")],
+    }
+}
+
+fn simulated_task_views(sandbox: &str) -> Vec<String> {
+    match sandbox {
+        "frontend" => vec!["Session timeline".into(), "Task inspector".into()],
+        "backend" => vec!["API contract".into(), "Execution trace".into()],
+        "verification" => vec!["Test report".into(), "Coverage delta".into()],
+        _ => Vec::new(),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tauri Commands
 // ─────────────────────────────────────────────────────────────────────────────
@@ -611,12 +984,16 @@ async fn get_tasks(state: State<'_, Arc<AppState>>) -> Result<Vec<Task>, String>
 
 #[tauri::command]
 async fn get_session_history(state: State<'_, Arc<AppState>>) -> Result<Vec<SessionSummary>, String> {
-    Ok(state.session_history.lock().unwrap().clone())
+    let mut history = state.session_history.lock().unwrap().clone();
+    history.sort_by_key(|item| item.started_at);
+    Ok(history)
 }
 
 #[tauri::command]
 async fn get_usage_history(state: State<'_, Arc<AppState>>) -> Result<Vec<UsageRecord>, String> {
-    Ok(state.usage_history.lock().unwrap().clone())
+    let mut history = state.usage_history.lock().unwrap().clone();
+    history.sort_by_key(|item| item.ts);
+    Ok(history)
 }
 
 #[tauri::command]
@@ -627,7 +1004,7 @@ async fn get_config(state: State<'_, Arc<AppState>>) -> Result<Config, String> {
 #[tauri::command]
 async fn save_config(state: State<'_, Arc<AppState>>, config: Config) -> Result<(), String> {
     *state.config.lock().unwrap() = config;
-    Ok(())
+    save_state(&state)
 }
 
 #[tauri::command]
@@ -654,6 +1031,7 @@ async fn start_session(
     let session_id = Uuid::new_v4().to_string();
     let cfg = state.config.lock().unwrap().clone();
     let resolved_mode = mode.unwrap_or_else(|| cfg.mode.clone());
+    let started_at = now();
 
     // Reset state
     *state.current_session_id.lock().unwrap() = Some(session_id.clone());
@@ -665,10 +1043,32 @@ async fn start_session(
     // Push user message
     state.messages.lock().unwrap().push(ChatMessage::User {
         content: prompt.clone(),
-        ts: now(),
+        ts: started_at,
     });
 
     // Send command to bridge — clone sender first to avoid holding lock across .await
+    let summary = SessionSummary {
+        id: session_id.clone(),
+        prompt: prompt.chars().take(80).collect(),
+        status: "running".into(),
+        started_at,
+        completed_at: None,
+        task_count: 0,
+        tasks_done: 0,
+    };
+    state.sessions.lock().unwrap().insert(session_id.clone(), SessionRecord {
+        summary: summary.clone(),
+        messages: state.messages.lock().unwrap().clone(),
+        tasks: Vec::new(),
+        tokens_total: 0,
+        tool_calls_total: 0,
+    });
+    {
+        let mut history = state.session_history.lock().unwrap();
+        upsert_history(&mut history, summary);
+    }
+    save_state(&state)?;
+
     let tx_opt = state.cmd_tx.lock().unwrap().clone();
     if let Some(tx) = tx_opt {
         let _ = tx.send(BridgeCommand::StartOrchestration {
@@ -689,28 +1089,72 @@ async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String> {
         let _ = tx.send(BridgeCommand::StopOrchestration).await;
     }
 
-    // Finalize history
-    if let Some(id) = state.current_session_id.lock().unwrap().take() {
-        let tasks = state.tasks.lock().unwrap();
-        let done = tasks.values().filter(|t| t.status == TaskStatus::Complete).count();
-        let total = tasks.len();
-        let msgs = state.messages.lock().unwrap();
-        let prompt = msgs.iter().find_map(|m| {
-            if let ChatMessage::User { content, .. } = m { Some(content.clone()) } else { None }
-        }).unwrap_or_default();
-        drop(msgs); drop(tasks);
-
-        state.session_history.lock().unwrap().push(SessionSummary {
-            id,
-            prompt: prompt.chars().take(80).collect(),
-            status: "stopped".into(),
-            started_at: now(),
-            completed_at: Some(now()),
-            task_count: total,
-            tasks_done: done,
-        });
+    {
+        let mut msgs = state.messages.lock().unwrap();
+        msgs.push(ChatMessage::System { content: "Session stopped.".into(), ts: now() });
     }
-    Ok(())
+    sync_current_session(&state, Some("stopped"), Some(Some(now())))?;
+    record_usage_for_current(&state, "stopped")?;
+    save_state(&state)
+}
+
+#[tauri::command]
+async fn get_current_session(state: State<'_, Arc<AppState>>) -> Result<Option<SessionDetail>, String> {
+    let session_id = state.current_session_id.lock().unwrap().clone();
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    let sessions = state.sessions.lock().unwrap();
+    Ok(sessions.get(&session_id).cloned().map(SessionDetail::from))
+}
+
+#[tauri::command]
+async fn load_session(state: State<'_, Arc<AppState>>, session_id: String) -> Result<SessionDetail, String> {
+    let record = {
+        let sessions = state.sessions.lock().unwrap();
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| format!("session not found: {session_id}"))?
+    };
+
+    *state.current_session_id.lock().unwrap() = Some(session_id);
+    *state.messages.lock().unwrap() = record.messages.clone();
+    *state.tasks.lock().unwrap() = record
+        .tasks
+        .iter()
+        .cloned()
+        .map(|task| (task.id.clone(), task))
+        .collect();
+    *state.tokens_total.lock().unwrap() = record.tokens_total;
+    *state.tool_calls_total.lock().unwrap() = record.tool_calls_total;
+    save_state(&state)?;
+
+    Ok(SessionDetail::from(record))
+}
+
+#[tauri::command]
+async fn clear_current_session(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    *state.current_session_id.lock().unwrap() = None;
+    state.messages.lock().unwrap().clear();
+    state.tasks.lock().unwrap().clear();
+    *state.tokens_total.lock().unwrap() = 0;
+    *state.tool_calls_total.lock().unwrap() = 0;
+    save_state(&state)
+}
+
+#[tauri::command]
+async fn window_control(app: tauri::AppHandle, action: String) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    match action.as_str() {
+        "close" => window.close().map_err(|err| format!("close window: {err}")),
+        "minimize" => window.minimize().map_err(|err| format!("minimize window: {err}")),
+        "toggle_maximize" => window.toggle_maximize().map_err(|err| format!("toggle maximize: {err}")),
+        other => Err(format!("unknown window action: {other}")),
+    }
 }
 
 #[tauri::command]
@@ -741,13 +1185,35 @@ async fn get_stats(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value,
     let total    = tasks.len();
     drop(tasks);
 
+    let usage_history = state.usage_history.lock().unwrap().clone();
+    let lifetime_tokens: u64 = usage_history.iter().map(|item| item.tokens).sum();
+    let lifetime_tool_calls: u64 = usage_history.iter().map(|item| item.tool_calls).sum();
+    let lifetime_tasks: usize = usage_history.iter().map(|item| item.task_count).sum();
+    let lifetime_duration_secs: u64 = usage_history.iter().map(|item| item.duration_secs).sum();
+    let current_tokens = *state.tokens_total.lock().unwrap();
+    let current_tool_calls = *state.tool_calls_total.lock().unwrap();
+    let current_is_running = {
+        let current_id = state.current_session_id.lock().unwrap().clone();
+        let sessions = state.sessions.lock().unwrap();
+        current_id
+            .and_then(|id| sessions.get(&id).map(|record| record.summary.status == "running"))
+            .unwrap_or(false)
+    };
+    let active_tokens = if current_is_running { current_tokens } else { 0 };
+    let active_tool_calls = if current_is_running { current_tool_calls } else { 0 };
+    let active_tasks = if current_is_running { done } else { 0 };
+
     Ok(serde_json::json!({
         "tasks_total":   total,
         "tasks_running": running,
         "tasks_done":    done,
         "tasks_failed":  failed,
-        "tokens_total":  *state.tokens_total.lock().unwrap(),
-        "tool_calls":    *state.tool_calls_total.lock().unwrap(),
+        "tokens_total":  current_tokens,
+        "tool_calls":    current_tool_calls,
+        "lifetime_tokens": lifetime_tokens + active_tokens,
+        "lifetime_tool_calls": lifetime_tool_calls + active_tool_calls,
+        "lifetime_tasks": lifetime_tasks + active_tasks,
+        "lifetime_duration_secs": lifetime_duration_secs,
         "daemon_connected": *state.daemon_connected.lock().unwrap(),
     }))
 }
@@ -779,6 +1245,10 @@ fn main() {
             check_daemon,
             start_session,
             stop_session,
+            get_current_session,
+            load_session,
+            clear_current_session,
+            window_control,
             get_system_info,
             get_stats,
             get_connection_state,

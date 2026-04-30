@@ -41,6 +41,8 @@ const MockState = {
   config: { socket_path: '/tmp/agentd.sock', max_agents: 100, mode: 'auto', provider: 'gemini', model: 'gemini-2.0-flash', api_key: '', gcp_project: '' },
   messages: [],
   tasks: {},
+  current_session_id: null,
+  sessions: {},
   session_history: [],
   usage_history: [],
   daemon: false,
@@ -48,30 +50,138 @@ const MockState = {
   tool_calls: 0,
 };
 
+const MOCK_STORE_KEY = 'mowisai_mock_state_v2';
+
+function loadMockState() {
+  try {
+    const raw = localStorage.getItem(MOCK_STORE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    Object.assign(MockState, parsed);
+  } catch {}
+}
+
+function saveMockState() {
+  try {
+    localStorage.setItem(MOCK_STORE_KEY, JSON.stringify(MockState));
+  } catch {}
+}
+
+loadMockState();
+
 function mockInvoke(cmd, args) {
   switch (cmd) {
     case 'get_config':          return Promise.resolve(MockState.config);
-    case 'save_config':         MockState.config = args.config; return Promise.resolve();
+    case 'save_config':         MockState.config = args.config; saveMockState(); return Promise.resolve();
     case 'get_messages':        return Promise.resolve(MockState.messages);
     case 'get_tasks':           return Promise.resolve(Object.values(MockState.tasks));
     case 'get_session_history': return Promise.resolve(MockState.session_history);
     case 'get_usage_history':   return Promise.resolve(MockState.usage_history);
+    case 'get_current_session': return Promise.resolve(mockCurrentSession());
+    case 'load_session':        return Promise.resolve(mockLoadSession(args.sessionId || args.session_id));
+    case 'clear_current_session': MockState.current_session_id = null; MockState.messages = []; MockState.tasks = {}; MockState.tokens = 0; MockState.tool_calls = 0; saveMockState(); return Promise.resolve();
+    case 'window_control':      return Promise.resolve();
     case 'get_daemon_status':   return Promise.resolve(MockState.daemon);
     case 'check_daemon':        return Promise.resolve(false);
     case 'get_system_info':     return Promise.resolve({ os: 'web', arch: 'x64', version: '0.1.0' });
-    case 'get_stats':           return Promise.resolve({ tasks_total: Object.keys(MockState.tasks).length, tasks_running: 0, tasks_done: Object.values(MockState.tasks).filter(t=>t.status==='complete').length, tasks_failed: 0, tokens_total: MockState.tokens, tool_calls: MockState.tool_calls, daemon_connected: false });
+    case 'get_stats':           return Promise.resolve(mockStats());
     case 'start_session':       return mockStartSession(args);
-    case 'stop_session':        return Promise.resolve();
+    case 'stop_session':        return mockStopSession();
     default: return Promise.reject(`Unknown command: ${cmd}`);
   }
 }
 
+function mockStats() {
+  const usageTokens = MockState.usage_history.reduce((sum, item) => sum + (item.tokens || 0), 0);
+  const usageTools = MockState.usage_history.reduce((sum, item) => sum + (item.tool_calls || 0), 0);
+  const usageTasks = MockState.usage_history.reduce((sum, item) => sum + (item.task_count || 0), 0);
+  const current = MockState.current_session_id ? MockState.sessions[MockState.current_session_id] : null;
+  const active = current?.summary?.status === 'running';
+  return {
+    tasks_total: Object.keys(MockState.tasks).length,
+    tasks_running: Object.values(MockState.tasks).filter(t => t.status === 'running').length,
+    tasks_done: Object.values(MockState.tasks).filter(t => t.status === 'complete').length,
+    tasks_failed: Object.values(MockState.tasks).filter(t => t.status === 'failed').length,
+    tokens_total: MockState.tokens,
+    tool_calls: MockState.tool_calls,
+    lifetime_tokens: usageTokens + (active ? MockState.tokens : 0),
+    lifetime_tool_calls: usageTools + (active ? MockState.tool_calls : 0),
+    lifetime_tasks: usageTasks + (active ? Object.values(MockState.tasks).filter(t => t.status === 'complete').length : 0),
+    daemon_connected: false,
+  };
+}
+
+function mockCurrentSession() {
+  const id = MockState.current_session_id;
+  if (!id || !MockState.sessions[id]) return null;
+  return MockState.sessions[id];
+}
+
+function mockLoadSession(id) {
+  const detail = MockState.sessions[id];
+  if (!detail) throw new Error(`session not found: ${id}`);
+  MockState.current_session_id = id;
+  MockState.messages = detail.messages || [];
+  MockState.tasks = Object.fromEntries((detail.tasks || []).map(t => [t.id, t]));
+  MockState.tokens = detail.tokens_total || 0;
+  MockState.tool_calls = detail.tool_calls_total || 0;
+  saveMockState();
+  return detail;
+}
+
+function mockSyncSession(status = 'running') {
+  const id = MockState.current_session_id;
+  if (!id) return;
+  const tasks = Object.values(MockState.tasks);
+  const existing = MockState.sessions[id];
+  const summary = existing?.summary || {
+    id,
+    prompt: MockState.messages.find(m => m.kind === 'user')?.content?.slice(0, 80) || '',
+    status,
+    started_at: nowTs(),
+    completed_at: null,
+    task_count: 0,
+    tasks_done: 0,
+  };
+  summary.status = status;
+  summary.task_count = tasks.length;
+  summary.tasks_done = tasks.filter(t => t.status === 'complete').length;
+  if (status !== 'running') summary.completed_at = nowTs();
+  MockState.sessions[id] = {
+    summary,
+    messages: MockState.messages,
+    tasks,
+    tokens_total: MockState.tokens,
+    tool_calls_total: MockState.tool_calls,
+  };
+  const idx = MockState.session_history.findIndex(s => s.id === id);
+  if (idx >= 0) MockState.session_history[idx] = summary;
+  else MockState.session_history.push(summary);
+  saveMockState();
+}
+
+function mockStopSession() {
+  MockState.messages.push({ kind: 'system', content: 'Session stopped.', ts: nowTs() });
+  mockSyncSession('stopped');
+  return Promise.resolve();
+}
+
 async function mockStartSession({ prompt, mode }) {
   const id = `sess-${Date.now().toString(36)}`;
+  MockState.current_session_id = id;
   MockState.messages = [{ kind: 'user', content: prompt, ts: nowTs() }];
   MockState.tasks = {};
   MockState.tokens = 0;
   MockState.tool_calls = 0;
+  MockState.sessions[id] = {
+    summary: { id, prompt: prompt.slice(0, 80), status: 'running', started_at: nowTs(), completed_at: null, task_count: 0, tasks_done: 0 },
+    messages: MockState.messages,
+    tasks: [],
+    tokens_total: 0,
+    tool_calls_total: 0,
+  };
+  MockState.session_history.push(MockState.sessions[id].summary);
+  saveMockState();
 
   // Run async simulation
   runBrowserSimulation(id, prompt, mode || MockState.config.mode);
@@ -84,6 +194,7 @@ async function runBrowserSimulation(sessionId, prompt, mode) {
   // Plan card
   const plan = { kind: 'plan', sandboxes: ['frontend', 'backend', 'verification'], task_count: 20, agent_count: 24, mode: mode || 'auto', ts: nowTs() };
   MockState.messages.push(plan);
+  mockSyncSession('running');
   dispatchMockEvent('chat_message', plan);
 
   await delay(400);
@@ -130,8 +241,19 @@ async function runBrowserSimulation(sessionId, prompt, mode) {
   for (let i = 0; i < sampleTasks.length; i++) {
     const id = `t${String(i).padStart(4,'0')}`;
     const [desc, sb] = sampleTasks[i];
-    const task = { id, description: desc, sandbox: sb, status: 'pending', started_at: null, completed_at: null };
+    const task = {
+      id,
+      description: desc,
+      sandbox: sb,
+      status: 'pending',
+      started_at: null,
+      completed_at: null,
+      files: mockTaskFiles(sb, i),
+      summary: `Implemented ${desc} in the ${sb} sandbox.`,
+      views: mockTaskViews(sb),
+    };
     MockState.tasks[id] = task;
+    mockSyncSession('running');
     dispatchMockEvent('task_added', task);
     taskIds.push(id);
     await delay(25);
@@ -143,17 +265,21 @@ async function runBrowserSimulation(sessionId, prompt, mode) {
     const batch = taskIds.slice(i, i + waveSize);
     for (const id of batch) {
       MockState.tasks[id].status = 'running';
+      MockState.tasks[id].started_at = nowTs();
       dispatchMockEvent('task_updated', { id, status: 'running' });
     }
     const tokDelta = batch.length * (60 + i * 5);
     MockState.tokens += tokDelta;
     MockState.tool_calls += batch.length;
+    mockSyncSession('running');
     dispatchMockEvent('stats_tick', { tasks_done: i, active_agents: batch.length, tokens_total: MockState.tokens });
     await delay(200);
     for (const id of batch) {
       MockState.tasks[id].status = 'complete';
+      MockState.tasks[id].completed_at = nowTs();
       dispatchMockEvent('task_updated', { id, status: 'complete' });
     }
+    mockSyncSession('running');
   }
 
   // Final agent message
@@ -168,16 +294,31 @@ async function runBrowserSimulation(sessionId, prompt, mode) {
   }
 
   await delay(200);
-  dispatchMockEvent('session_complete', {});
-  MockState.session_history.push({
-    id: sessionId,
-    prompt: prompt.slice(0, 80),
-    status: 'done',
-    started_at: nowTs() - 30,
-    completed_at: nowTs(),
+  mockSyncSession('done');
+  MockState.usage_history.push({
+    session_id: sessionId,
+    prompt_short: prompt.slice(0, 80),
+    ts: nowTs(),
     task_count: sampleTasks.length,
-    tasks_done: sampleTasks.length,
+    tokens: MockState.tokens,
+    tool_calls: MockState.tool_calls,
+    duration_secs: 30,
+    status: 'done',
   });
+  saveMockState();
+  dispatchMockEvent('session_complete', {});
+}
+
+function mockTaskFiles(sandbox, index) {
+  if (sandbox === 'frontend') return [`src/views/session-${index}.tsx`, `src/styles/tasks-${index}.css`];
+  if (sandbox === 'backend') return [`src/services/task-${index}.rs`, `src/api/session-${index}.rs`];
+  return [`tests/session-${index}.rs`, `tests/fixtures/task-${index}.json`];
+}
+
+function mockTaskViews(sandbox) {
+  if (sandbox === 'frontend') return ['Session timeline', 'Task inspector'];
+  if (sandbox === 'backend') return ['API contract', 'Execution trace'];
+  return ['Verification report'];
 }
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -187,9 +328,12 @@ function nowTs() { return Math.floor(Date.now() / 1000); }
 
 const State = {
   page: 'home',
+  homeMode: 'new',
   sessionActive: false,
   sessionId: null,
-  taskPanelOpen: true,
+  taskPanelOpen: false,
+  selectedTaskId: null,
+  sidebarCollapsed: localStorage.getItem('mowis_sidebar_collapsed') === '1',
   tasks: {},
   streamingContent: '',
   isStreaming: false,
@@ -228,7 +372,7 @@ function fmtTs(ts) {
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 
-function navigate(page) {
+function navigate(page, opts = {}) {
   State.page = page;
   document.querySelectorAll('.sb-item').forEach(i => i.classList.toggle('active', i.dataset.page === page));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === `page-${page}`));
@@ -236,22 +380,144 @@ function navigate(page) {
   const names = { home: 'Home', sessions: 'Sessions', usage: 'Usage', settings: 'Settings' };
   setText('tl-page', names[page] || page);
 
+  if (page === 'home' && !opts.preserveHomeMode) {
+    showHomeLanding({ clearBackend: !State.sessionActive });
+  }
   if (page === 'sessions') renderSessionsPage();
   if (page === 'usage') renderUsagePage();
   if (page === 'settings') loadSettings();
 }
 
+async function showHomeLanding({ clearBackend = false } = {}) {
+  State.homeMode = 'new';
+  State.taskPanelOpen = false;
+  State.selectedTaskId = null;
+  $('home-chat')?.classList.add('hidden');
+  $('home-chat')?.classList.remove('task-panel-open');
+  $('home-empty')?.classList.remove('hidden');
+  setText('tl-page', 'Home');
+  setText('compose-session-info', '');
+  setText('chat-session-title', 'Session');
+  updateTaskPanelVisibility();
+
+  if (clearBackend) {
+    State.sessionId = null;
+    State.tasks = {};
+    State.streamingContent = '';
+    State.isStreaming = false;
+    const chatMessages = $('chat-messages');
+    if (chatMessages) chatMessages.innerHTML = '';
+    try { await invoke('clear_current_session'); } catch {}
+    updateTaskPanelVisibility();
+    updateStatusBar();
+  }
+}
+
+function showSessionShell() {
+  State.homeMode = 'session';
+  $('home-empty')?.classList.add('hidden');
+  $('home-chat')?.classList.remove('hidden');
+  updateTaskPanelVisibility();
+}
+
+function renderSessionDetail(detail) {
+  if (!detail) return;
+  State.sessionId = detail.summary?.id || State.sessionId;
+  State.sessionActive = detail.summary?.status === 'running';
+  State.tasks = Object.fromEntries((detail.tasks || []).map(task => [task.id, task]));
+  State.taskPanelOpen = Object.keys(State.tasks).length > 0;
+  State.selectedTaskId = State.selectedTaskId && State.tasks[State.selectedTaskId]
+    ? State.selectedTaskId
+    : Object.keys(State.tasks)[0] || null;
+  State.stats.tokens_total = detail.tokens_total || 0;
+  State.stats.tool_calls = detail.tool_calls_total || 0;
+
+  const chatMessages = $('chat-messages');
+  if (chatMessages) chatMessages.innerHTML = '';
+  State.isStreaming = false;
+  State.streamingContent = '';
+  (detail.messages || []).forEach(msg => {
+    appendChatMessage(msg.kind === 'agent' ? { ...msg, streaming: false } : msg);
+  });
+
+  setText('compose-session-info', State.sessionId ? `session ${State.sessionId.slice(0,12)}` : '');
+  setText('chat-session-title', detail.summary?.prompt || 'Session');
+  setSessionActive(State.sessionActive, true);
+  renderTaskPanel();
+  updateStatusBar();
+  showSessionShell();
+}
+
+async function openSession(sessionId) {
+  if (State.sessionActive && State.sessionId && sessionId !== State.sessionId) {
+    toast('Stop the running session before opening another one', 'error');
+    return;
+  }
+  try {
+    const detail = await invoke('load_session', { sessionId });
+    renderSessionDetail(detail);
+    navigate('home', { preserveHomeMode: true });
+  } catch (err) {
+    toast('Could not open session: ' + err, 'error');
+  }
+}
+
+async function restoreInitialSession() {
+  try {
+    const [hist, detail] = await Promise.all([
+      invoke('get_session_history'),
+      invoke('get_current_session'),
+    ]);
+    setText('sb-badge-sessions', hist?.length ? String(hist.length) : '');
+    if (detail?.summary?.status === 'running') {
+      renderSessionDetail(detail);
+      navigate('home', { preserveHomeMode: true });
+    } else {
+      await showHomeLanding({ clearBackend: false });
+    }
+  } catch {
+    await showHomeLanding({ clearBackend: false });
+  }
+}
+
 // ── Window controls (decorations: false) ─────────────────────────────────────
 
-async function setupWindowControls() {
-  if (!_invoke) return; // browser: no window API
+async function runWindowAction(action) {
+  try {
+    await invoke('window_control', { action });
+  } catch {}
+
+  if (!_invoke) return;
   try {
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
     const win = getCurrentWindow();
-    $('tl-red')?.addEventListener('click', (e) => { e.stopPropagation(); win.close(); });
-    $('tl-yellow')?.addEventListener('click', (e) => { e.stopPropagation(); win.minimize(); });
-    $('tl-green')?.addEventListener('click', (e) => { e.stopPropagation(); win.toggleMaximize(); });
-  } catch { /* old Tauri build or browser */ }
+    if (action === 'close') await win.close();
+    if (action === 'minimize') await win.minimize();
+    if (action === 'toggle_maximize') await win.toggleMaximize();
+  } catch {}
+}
+
+function bindWindowControls(root = document) {
+  const bindings = [
+    ['.tl-red', 'close'],
+    ['.tl-yellow', 'minimize'],
+    ['.tl-green', 'toggle_maximize'],
+  ];
+  for (const [selector, action] of bindings) {
+    root.querySelectorAll(selector).forEach(btn => {
+      if (btn.dataset.windowControlBound) return;
+      btn.dataset.windowControlBound = '1';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        runWindowAction(action);
+      });
+    });
+  }
+}
+
+async function setupWindowControls() {
+  bindWindowControls(document);
 }
 
 // ── Splash ────────────────────────────────────────────────────────────────────
@@ -318,6 +584,9 @@ async function init() {
 
   // Setup UI handlers
   setupHandlers();
+  initCustomSelects();
+  setSidebarCollapsed(State.sidebarCollapsed);
+  await restoreInitialSession();
 
   // Statusbar provider
   setText('sb-provider', State.config?.provider || '—');
@@ -344,16 +613,7 @@ async function maybeShowWelcome() {
 
   welcome.classList.remove('hidden');
 
-  // Wire window dots on welcome screen too
-  if (_invoke) {
-    try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      const win = getCurrentWindow();
-      welcome.querySelector('.tl-red')?.addEventListener('click',    (e) => { e.stopPropagation(); win.close(); });
-      welcome.querySelector('.tl-yellow')?.addEventListener('click', (e) => { e.stopPropagation(); win.minimize(); });
-      welcome.querySelector('.tl-green')?.addEventListener('click',  (e) => { e.stopPropagation(); win.toggleMaximize(); });
-    } catch {}
-  }
+  bindWindowControls(welcome);
 
   // Trigger blur-to-clear animation after a short pause
   await delay(200);
@@ -483,7 +743,9 @@ async function setupListeners() {
   await listen('task_added', (e) => {
     const task = e.payload;
     if (!task) return;
+    const hadTasks = Object.keys(State.tasks).length > 0;
     State.tasks[task.id] = task;
+    if (!hadTasks && State.homeMode === 'session') State.taskPanelOpen = true;
     renderTaskPanel();
     updateTaskPanelVisibility();
   });
@@ -492,6 +754,8 @@ async function setupListeners() {
     const { id, status } = e.payload || {};
     if (id && State.tasks[id]) {
       State.tasks[id].status = status;
+      if (status === 'running') State.tasks[id].started_at = nowTs();
+      if (status === 'complete' || status === 'failed') State.tasks[id].completed_at = nowTs();
     }
     renderTaskPanel();
     updateStatusBar();
@@ -519,7 +783,7 @@ async function setupListeners() {
     setSessionActive(false, /* keep chat */ true);
 
     updateStatusBar();
-    toast('Session complete ✓', 'success');
+    toast('Session complete', 'success');
   });
 }
 
@@ -530,6 +794,8 @@ async function startSession(prompt, mode) {
 
   // Reset chat
   State.tasks = {};
+  State.selectedTaskId = null;
+  State.taskPanelOpen = false;
   State.isStreaming = false;
   State.streamingContent = '';
 
@@ -539,9 +805,7 @@ async function startSession(prompt, mode) {
   const taskPanelBody = $('task-panel-body');
   if (taskPanelBody) taskPanelBody.innerHTML = '';
 
-  // Show chat, hide empty
-  $('home-empty')?.classList.add('hidden');
-  $('home-chat')?.classList.remove('hidden');
+  showSessionShell();
 
   setSessionActive(true);
 
@@ -555,13 +819,14 @@ async function startSession(prompt, mode) {
     const id = await invoke('start_session', { prompt, mode: mode || 'auto' });
     State.sessionId = id;
     setText('compose-session-info', `session ${id.slice(0,12)}`);
+    setText('chat-session-title', prompt.slice(0, 120));
   } catch (err) {
     appendChatMessage({ kind: 'error', content: String(err), ts: nowTs() });
     setSessionActive(false);
   }
 
   // Navigate to home
-  navigate('home');
+  navigate('home', { preserveHomeMode: true });
 }
 
 function setSessionActive(active, keepChat = false) {
@@ -696,6 +961,7 @@ function createPlanCard(msg) {
       ${(msg.sandboxes || []).map(s => `<span class="plan-sb">${s}</span>`).join('')}
     </div>
   `;
+  card.addEventListener('click', () => setTaskPanelOpen(true));
   row.appendChild(card);
   return row;
 }
@@ -719,13 +985,19 @@ function scrollToBottom(el) {
 
 function updateTaskPanelVisibility() {
   const panel = $('task-panel');
+  const chat = $('home-chat');
+  const openBtn = $('task-panel-open');
   const hasTasks = Object.keys(State.tasks).length > 0;
-  if (panel) panel.style.display = hasTasks ? '' : 'none';
+  if (openBtn) openBtn.style.display = hasTasks ? '' : 'none';
+  if (!hasTasks) State.taskPanelOpen = false;
+  if (panel) panel.style.display = hasTasks && State.taskPanelOpen ? '' : 'none';
+  if (chat) chat.classList.toggle('task-panel-open', hasTasks && State.taskPanelOpen);
 }
 
 function renderTaskPanel() {
   const body = $('task-panel-body');
   const counts = $('task-counts');
+  const subtitle = $('task-panel-subtitle');
   const fill = $('task-progress-fill');
   if (!body) return;
 
@@ -734,16 +1006,71 @@ function renderTaskPanel() {
   const total = tasks.length;
 
   if (counts) counts.textContent = `${done} / ${total}`;
+  if (subtitle) subtitle.textContent = `${done} completed`;
   if (fill) fill.style.width = total > 0 ? `${(done / total * 100).toFixed(1)}%` : '0%';
 
+  if (!State.selectedTaskId || !State.tasks[State.selectedTaskId]) {
+    State.selectedTaskId = tasks[0]?.id || null;
+  }
+
   body.innerHTML = tasks.map(t => `
-    <div class="task-row">
+    <div class="task-row ${State.selectedTaskId === t.id ? 'selected' : ''}" data-id="${escHtml(t.id)}">
       <span class="task-dot ${t.status}"></span>
       <span class="task-desc">${escHtml(t.description)}</span>
       <span class="task-sb">${t.sandbox || ''}</span>
     </div>`).join('');
 
+  body.querySelectorAll('.task-row').forEach(row => {
+    row.addEventListener('click', () => {
+      State.selectedTaskId = row.dataset.id;
+      State.taskPanelOpen = true;
+      renderTaskPanel();
+      updateTaskPanelVisibility();
+    });
+  });
+
+  renderTaskDetail();
+  updateTaskPanelVisibility();
   updateStatusBar();
+}
+
+function renderTaskDetail() {
+  const el = $('task-detail');
+  if (!el) return;
+  const task = State.selectedTaskId ? State.tasks[State.selectedTaskId] : null;
+  if (!task) {
+    el.innerHTML = '<div class="task-detail-empty">Select a task to inspect its implementation details.</div>';
+    return;
+  }
+  const files = task.files || [];
+  const views = task.views || [];
+  el.innerHTML = `
+    <div class="task-detail-title">${escHtml(task.description)}</div>
+    <div class="task-detail-meta">
+      <span class="task-pill">${escHtml(task.status || 'pending')}</span>
+      ${task.sandbox ? `<span class="task-pill">${escHtml(task.sandbox)}</span>` : ''}
+      ${task.completed_at ? `<span class="task-pill">${fmtTs(task.completed_at)}</span>` : ''}
+    </div>
+    <div class="task-detail-empty">${escHtml(task.summary || 'No implementation summary reported yet.')}</div>
+    <div class="task-detail-section">
+      <h4>Files</h4>
+      <div class="task-detail-list">
+        ${files.length ? files.map(f => `<div>${escHtml(f)}</div>`).join('') : '<div>No file changes reported yet</div>'}
+      </div>
+    </div>
+    <div class="task-detail-section">
+      <h4>Views</h4>
+      <div class="task-detail-list">
+        ${views.length ? views.map(v => `<div>${escHtml(v)}</div>`).join('') : '<div>No view metadata reported yet</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function setTaskPanelOpen(open) {
+  State.taskPanelOpen = open && Object.keys(State.tasks).length > 0;
+  updateTaskPanelVisibility();
+  if (State.taskPanelOpen) renderTaskPanel();
 }
 
 // ── Status bar ────────────────────────────────────────────────────────────────
@@ -787,7 +1114,7 @@ async function renderSessionsPage() {
 
     list.querySelectorAll('.session-card').forEach(card => {
       card.addEventListener('click', () => {
-        toast(`Session ${card.dataset.id.slice(0,8)}`);
+        openSession(card.dataset.id);
       });
     });
   } catch (e) {
@@ -799,12 +1126,13 @@ async function renderSessionsPage() {
 
 async function renderUsagePage() {
   try {
-    const [stats, hist] = await Promise.all([invoke('get_stats'), invoke('get_session_history')]);
+    const [stats, hist, usage] = await Promise.all([invoke('get_stats'), invoke('get_session_history'), invoke('get_usage_history')]);
 
     setText('us-sessions', hist.length);
-    setText('us-tasks', fmtNumber(stats.tasks_done + stats.tasks_total));
-    setText('us-tokens', fmtNumber(stats.tokens_total));
-    setText('us-tools', fmtNumber(stats.tool_calls));
+    setText('us-tasks', fmtNumber(stats.lifetime_tasks ?? (stats.tasks_done + stats.tasks_total)));
+    setText('us-tokens', fmtNumber(stats.lifetime_tokens ?? stats.tokens_total));
+    setText('us-tools', fmtNumber(stats.lifetime_tool_calls ?? stats.tool_calls));
+    renderUsageChart(usage, stats);
 
     const wrap = $('usage-sessions-table');
     if (!wrap) return;
@@ -832,6 +1160,46 @@ async function renderUsagePage() {
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
+function renderUsageChart(usage, stats) {
+  const el = $('usage-chart');
+  if (!el) return;
+  const rows = [...(usage || [])].slice(-7);
+  const totalTokens = stats?.lifetime_tokens ?? rows.reduce((sum, item) => sum + (item.tokens || 0), 0);
+  setText('usage-total-label', `${fmtNumber(totalTokens)} tokens`);
+  setText('usage-chart-meta', rows.length ? `Last ${rows.length} sessions` : 'No completed sessions');
+
+  if (!rows.length) {
+    el.innerHTML = `<svg viewBox="0 0 640 170" role="img" aria-label="No usage history">
+      <line class="axis" x1="36" y1="130" x2="604" y2="130"></line>
+      <text class="trend-label" x="250" y="86">No usage recorded yet</text>
+    </svg>`;
+    return;
+  }
+
+  const width = 640;
+  const height = 170;
+  const pad = 34;
+  const max = Math.max(...rows.map(item => item.tokens || 0), 1);
+  const step = rows.length === 1 ? 0 : (width - pad * 2) / (rows.length - 1);
+  const points = rows.map((item, i) => {
+    const x = rows.length === 1 ? width / 2 : pad + i * step;
+    const y = height - pad - ((item.tokens || 0) / max) * (height - pad * 2);
+    return { x, y, item };
+  });
+  const line = points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+  const area = `${pad},${height - pad} ${line} ${points[points.length - 1].x.toFixed(1)},${height - pad}`;
+
+  el.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Usage trend">
+    <line class="axis" x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}"></line>
+    <polyline class="trend-fill" points="${area}"></polyline>
+    <polyline class="trend-line" points="${line}"></polyline>
+    ${points.map((p, i) => `
+      <circle class="trend-dot" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4"></circle>
+      <text class="trend-label" x="${(p.x - 16).toFixed(1)}" y="${height - 10}">${i + 1}</text>
+    `).join('')}
+  </svg>`;
+}
+
 function loadSettings() {
   const c = State.config || {};
   setVal('set-provider', c.provider || 'gemini');
@@ -844,7 +1212,13 @@ function loadSettings() {
   if (rowGcp) rowGcp.style.display = (c.provider === 'gemini') ? '' : 'none';
 }
 
-function setVal(id, val) { const e = $(id); if (!e) return; if (e.type === 'checkbox') e.checked = !!val; else e.value = val ?? ''; }
+function setVal(id, val) {
+  const e = $(id);
+  if (!e) return;
+  if (e.type === 'checkbox') e.checked = !!val;
+  else e.value = val ?? '';
+  if (e.tagName === 'SELECT') syncCustomSelect(e);
+}
 function getVal(id) { const e = $(id); if (!e) return ''; if (e.type === 'checkbox') return e.checked; return e.value; }
 
 async function saveSettings() {
@@ -869,11 +1243,90 @@ async function saveSettings() {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
+function setSidebarCollapsed(collapsed) {
+  State.sidebarCollapsed = !!collapsed;
+  document.querySelector('.layout')?.classList.toggle('sidebar-collapsed', State.sidebarCollapsed);
+  localStorage.setItem('mowis_sidebar_collapsed', State.sidebarCollapsed ? '1' : '0');
+  const btn = $('btn-sidebar-toggle');
+  if (btn) {
+    btn.title = State.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar';
+    btn.setAttribute('aria-label', btn.title);
+  }
+}
+
+function initCustomSelects() {
+  document.querySelectorAll('select.mini-select, select.form-select').forEach(select => {
+    if (select.dataset.customSelectReady) return;
+    select.dataset.customSelectReady = '1';
+    select.classList.add('native-select-hidden');
+
+    const wrap = document.createElement('div');
+    wrap.className = 'custom-select';
+    wrap.dataset.selectId = select.id;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'custom-select-button';
+
+    const menu = document.createElement('div');
+    menu.className = 'custom-select-menu';
+
+    wrap.appendChild(button);
+    wrap.appendChild(menu);
+    select.insertAdjacentElement('afterend', wrap);
+
+    button.addEventListener('click', (e) => {
+      e.preventDefault();
+      document.querySelectorAll('.custom-select.open').forEach(other => {
+        if (other !== wrap) other.classList.remove('open');
+      });
+      wrap.classList.toggle('open');
+    });
+
+    syncCustomSelect(select);
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.custom-select')) {
+      document.querySelectorAll('.custom-select.open').forEach(wrap => wrap.classList.remove('open'));
+    }
+  });
+}
+
+function syncCustomSelect(selectOrId) {
+  const select = typeof selectOrId === 'string' ? $(selectOrId) : selectOrId;
+  if (!select) return;
+  const wrap = document.querySelector(`.custom-select[data-select-id="${select.id}"]`);
+  if (!wrap) return;
+  const button = wrap.querySelector('.custom-select-button');
+  const menu = wrap.querySelector('.custom-select-menu');
+  const selected = select.options[select.selectedIndex];
+  if (button) button.textContent = selected?.textContent || '';
+  if (!menu) return;
+  menu.innerHTML = Array.from(select.options).map(option => `
+    <button type="button" class="custom-select-option ${option.value === select.value ? 'selected' : ''}" data-value="${escHtml(option.value)}">
+      ${escHtml(option.textContent)}
+    </button>`).join('');
+  menu.querySelectorAll('.custom-select-option').forEach(optionBtn => {
+    optionBtn.addEventListener('click', () => {
+      select.value = optionBtn.dataset.value;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      wrap.classList.remove('open');
+      syncCustomSelect(select);
+    });
+  });
+}
+
 function setupHandlers() {
+  const taskClose = $('task-panel-toggle');
+  if (taskClose) taskClose.textContent = 'x';
+
   // Nav
   document.querySelectorAll('.sb-item').forEach(item => {
     item.addEventListener('click', (e) => { e.preventDefault(); navigate(item.dataset.page); });
   });
+  $('btn-sidebar-toggle')?.addEventListener('click', () => setSidebarCollapsed(!State.sidebarCollapsed));
+  $('btn-chat-home')?.addEventListener('click', () => navigate('home'));
 
   // Home send
   $('btn-home-send')?.addEventListener('click', () => {
@@ -909,17 +1362,17 @@ function setupHandlers() {
     await invoke('stop_session');
     finalizeStreaming();
     setSessionActive(false, true);
-    const sys = { kind: 'system', content: '— session stopped —', ts: nowTs() };
+    const sys = { kind: 'system', content: 'Session stopped.', ts: nowTs() };
     appendChatMessage(sys);
     toast('Session stopped');
   });
 
   // Task panel toggle
+  $('task-panel-open')?.addEventListener('click', () => setTaskPanelOpen(true));
   $('task-panel-toggle')?.addEventListener('click', () => {
-    State.taskPanelOpen = !State.taskPanelOpen;
-    const body = $('task-panel-body');
-    const btn = $('task-panel-toggle');
-    if (body) body.classList.toggle('collapsed', !State.taskPanelOpen);
+    setTaskPanelOpen(false);
+    const btn = null;
+    return;
     if (btn) btn.textContent = State.taskPanelOpen ? '▲' : '▼';
   });
 

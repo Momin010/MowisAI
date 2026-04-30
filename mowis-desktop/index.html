@@ -63,6 +63,9 @@
     <nav class="sidebar" id="sidebar">
       <div class="sb-brand">
         <span class="sb-brand-text">Mowis<span class="accent">AI</span></span>
+        <button class="sb-collapse" id="btn-sidebar-toggle" title="Collapse sidebar" aria-label="Collapse sidebar">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8L10 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
       </div>
 
       <div class="sb-nav">
@@ -132,6 +135,14 @@
 
         <!-- Active chat — shown during/after a session -->
         <div id="home-chat" class="chat-wrap hidden">
+          <div class="chat-session-bar">
+            <button class="btn-outline sm" id="btn-chat-home">Home</button>
+            <div class="chat-session-title" id="chat-session-title">Session</div>
+            <button class="task-open-btn" id="task-panel-open" style="display:none">
+              <span id="task-toggle-label">Tasks</span>
+              <span id="task-counts">0 / 0</span>
+            </button>
+          </div>
           <!-- Messages -->
           <div class="chat-messages" id="chat-messages"></div>
 
@@ -139,10 +150,11 @@
           <div class="task-panel" id="task-panel" style="display:none">
             <div class="task-panel-head">
               <span class="task-panel-title">Tasks</span>
-              <span class="task-panel-counts" id="task-counts">0 / 0</span>
+              <span class="task-panel-counts" id="task-panel-subtitle">0 completed</span>
               <button class="task-panel-toggle" id="task-panel-toggle">▲</button>
             </div>
             <div class="task-panel-body" id="task-panel-body"></div>
+            <div class="task-detail" id="task-detail"></div>
             <div class="task-progress-bar"><div class="task-progress-fill" id="task-progress-fill"></div></div>
           </div>
 
@@ -200,6 +212,16 @@
               <div class="us-value" id="us-tools">0</div>
               <div class="us-label">Tool calls</div>
             </div>
+          </div>
+          <div class="usage-dashboard">
+            <div class="usage-chart-head">
+              <div>
+                <div class="usage-section-label">Usage trend</div>
+                <div class="usage-chart-total" id="usage-total-label">0 tokens</div>
+              </div>
+              <div class="usage-chart-meta" id="usage-chart-meta">Last 7 sessions</div>
+            </div>
+            <div class="usage-chart" id="usage-chart"></div>
           </div>
           <div class="usage-section-label">Recent sessions</div>
           <div id="usage-sessions-table" class="usage-table-wrap">
