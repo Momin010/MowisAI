@@ -4,7 +4,7 @@
 //
 //   1. WSL2 primary — fastest, uses the Linux kernel already on the machine.
 //      a. Detect WSL2 (wsl.exe --list — reliable even offline).
-//      b. Ensure Alpine Linux distro is installed (wsl --install Alpine).
+//      b. Ensure Alpine Linux distro is installed (via winget → AlpineLinux.WSL from Store).
 //      c. Copy the agentd-linux-x86_64 binary that was installed next to the
 //         exe by the NSIS installer into Alpine at /usr/local/bin/agentd.
 //      d. Install socat inside Alpine (apk add socat).
@@ -43,9 +43,9 @@ const AGENT_TCP_PORT: u16 = 9722;
 const AGENT_TCP_ADDR: &str = "127.0.0.1:9722";
 const AGENTD_BIN: &str = "agentd-linux-x86_64";
 
-/// Create a `wsl.exe` Command with the console window suppressed on Windows.
-fn wsl_cmd() -> Command {
-    let mut cmd = Command::new("wsl.exe");
+/// Create any Windows Command with the console window suppressed.
+fn win_cmd(prog: &str) -> Command {
+    let mut cmd = Command::new(prog);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
@@ -139,7 +139,7 @@ impl WindowsLauncher {
             let cached = self.wsl2_available.lock().unwrap();
             if let Some(v) = *cached { return v; }
         }
-        let ok = wsl_cmd()
+        let ok = win_cmd("wsl.exe")
             .args(["--list"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -153,54 +153,103 @@ impl WindowsLauncher {
 
     // ── Alpine distro install ─────────────────────────────────────────────────
 
-    async fn ensure_alpine_distro(&self) -> Result<()> {
-        let list = wsl_cmd()
+    /// Returns true if the Alpine WSL distro is already registered.
+    async fn alpine_is_installed(&self) -> bool {
+        match win_cmd("wsl.exe")
             .args(["--list", "--quiet"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .output()
             .await
-            .context("running wsl --list")?;
+        {
+            Ok(out) => decode_wsl_list(&out.stdout)
+                .lines()
+                .any(|l| l.trim().eq_ignore_ascii_case(WSL_DISTRO)),
+            Err(_) => false,
+        }
+    }
 
-        let distros = decode_wsl_list(&list.stdout);
-        let already_installed = distros
-            .lines()
-            .any(|l| l.trim().eq_ignore_ascii_case(WSL_DISTRO));
-
-        if already_installed {
+    async fn ensure_alpine_distro(&self) -> Result<()> {
+        if self.alpine_is_installed().await {
             log::info!("Alpine WSL2 distro already installed");
             return Ok(());
         }
 
-        log::info!("Installing Alpine Linux via WSL2 (may show a UAC prompt)…");
-        let out = wsl_cmd()
-            .args(["--install", "--distribution", WSL_DISTRO, "--no-launch"])
+        // "Alpine" is NOT in Microsoft's hosted wsl --list --online distribution list.
+        // It is a third-party app published to the Microsoft Store (winget id: AlpineLinux.WSL).
+        // wsl --install --distribution Alpine therefore always fails with WSL_E_DISTRO_NOT_FOUND.
+        // The correct installation path is via winget.
+        log::info!("Alpine WSL distro not found — attempting install via winget…");
+
+        let winget_out = win_cmd("winget")
+            .args([
+                "install",
+                "--id", "AlpineLinux.WSL",
+                "--source", "msstore",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--silent",
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .await
-            .context("wsl --install Alpine")?;
+            .await;
 
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let detail = if stderr.is_empty() { stdout } else { stderr };
-            anyhow::bail!(
-                "Failed to install Alpine Linux via WSL2 (exit {}).\n\
-                 Output: {}\n\
-                 Fix: open PowerShell as Administrator and run: wsl --install --distribution Alpine",
-                out.status, detail
-            );
+        match winget_out {
+            Err(e) => {
+                // winget not found on this machine (very old Windows 10 build)
+                anyhow::bail!(
+                    "winget is not available on this machine ({e}).\n\n\
+                     Install Alpine WSL manually:\n\
+                     • Microsoft Store: search \"Alpine WSL\" and install it, then restart MowisAI.\n\
+                     • Or open PowerShell and run:\n\
+                       winget install --id AlpineLinux.WSL --source msstore --accept-package-agreements"
+                );
+            }
+            Ok(out) if !out.status.success() => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let detail = if stderr.is_empty() { stdout } else { stderr };
+                anyhow::bail!(
+                    "winget failed to install Alpine WSL (exit {}).\n\
+                     Output: {}\n\n\
+                     Install Alpine WSL manually:\n\
+                     • Microsoft Store: search \"Alpine WSL\" and install it, then restart MowisAI.\n\
+                     • Or open PowerShell and run:\n\
+                       winget install --id AlpineLinux.WSL --source msstore --accept-package-agreements",
+                    out.status, detail
+                );
+            }
+            Ok(_) => {
+                log::info!("winget install completed — waiting for Alpine to register with WSL…");
+            }
         }
 
-        // Give the newly-registered distro time to finish first-boot init.
-        sleep(Duration::from_secs(4)).await;
-        Ok(())
+        // Give the Store app time to finish first-boot initialisation and register
+        // itself with WSL. Poll for up to 30 s before giving up.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if self.alpine_is_installed().await {
+                log::info!("Alpine WSL distro is now registered");
+                return Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!(
+                    "Alpine WSL was installed by winget but did not appear in the WSL distro list \
+                     within 30 seconds.\n\
+                     Try restarting MowisAI. If the problem persists, open WSL manually once \
+                     by searching 'Alpine' in the Start menu, then restart MowisAI."
+                );
+            }
+            sleep(Duration::from_secs(2)).await;
+        }
     }
 
     // ── Copy agentd + socat into Alpine ──────────────────────────────────────
 
     async fn ensure_agentd_in_alpine(&self, token: &str) -> Result<()> {
         // Install socat — always run, idempotent and fast. Capture output for diagnostics.
-        let apk_out = wsl_cmd()
+        let apk_out = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "apk", "add", "--no-cache", "socat"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -218,7 +267,7 @@ impl WindowsLauncher {
         }
 
         // Check if agentd is already in Alpine.
-        let already = wsl_cmd()
+        let already = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "test", "-x", "/usr/local/bin/agentd"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -247,7 +296,7 @@ impl WindowsLauncher {
                 "cp '{}' /usr/local/bin/agentd && chmod +x /usr/local/bin/agentd",
                 wsl_src.replace('\'', "\\'")
             );
-            let copy_out = wsl_cmd()
+            let copy_out = win_cmd("wsl.exe")
                 .args(["-d", WSL_DISTRO, "--", "sh", "-c", &copy_cmd])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -276,7 +325,7 @@ impl WindowsLauncher {
              chmod 600 /root/.mowisai/token",
             token.replace('\'', "\\'")
         );
-        let tok_out = wsl_cmd()
+        let tok_out = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "sh", "-c", &token_cmd])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -299,7 +348,7 @@ impl WindowsLauncher {
 
         // Kill any stale processes from a previous session (best-effort).
         for proc in &["agentd", "socat"] {
-            let _ = wsl_cmd()
+            let _ = win_cmd("wsl.exe")
                 .args(["-d", WSL_DISTRO, "--", "pkill", "-f", proc])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -310,7 +359,7 @@ impl WindowsLauncher {
 
         // Start agentd in the background. The nohup shell command itself exits
         // immediately after forking; errors will appear in /var/log/agentd.log.
-        let agentd_out = wsl_cmd()
+        let agentd_out = win_cmd("wsl.exe")
             .args([
                 "-d", WSL_DISTRO, "--", "sh", "-c",
                 "nohup /usr/local/bin/agentd socket --path /tmp/agentd.sock \
@@ -342,7 +391,7 @@ impl WindowsLauncher {
              </dev/null >>/var/log/socat.log 2>&1 &",
             port = AGENT_TCP_PORT
         );
-        let socat_out = wsl_cmd()
+        let socat_out = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "sh", "-c", &socat_cmd])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -365,7 +414,7 @@ impl WindowsLauncher {
 
     /// Read the agentd and socat log files from Alpine for diagnostics.
     pub async fn read_alpine_logs(&self) -> String {
-        let agentd_log = wsl_cmd()
+        let agentd_log = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "sh", "-c",
                 "cat /var/log/agentd.log 2>/dev/null || echo '(agentd.log not found)'"])
             .stdout(Stdio::piped())
@@ -375,7 +424,7 @@ impl WindowsLauncher {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|_| "(could not read agentd.log)".into());
 
-        let socat_log = wsl_cmd()
+        let socat_log = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "sh", "-c",
                 "cat /var/log/socat.log 2>/dev/null || echo '(socat.log not found)'"])
             .stdout(Stdio::piped())
@@ -465,7 +514,7 @@ impl VmLauncher for WindowsLauncher {
 
     async fn stop(&self) -> Result<()> {
         for proc in &["agentd", "socat"] {
-            let _ = wsl_cmd()
+            let _ = win_cmd("wsl.exe")
                 .args(["-d", WSL_DISTRO, "--", "pkill", "-f", proc])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
