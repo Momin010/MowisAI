@@ -166,9 +166,20 @@ pub async fn generate_text(
     json_mode: bool,
     temperature: f64,
 ) -> Result<String> {
+    generate_text_with_limit(llm_config, system_prompt, user_message, json_mode, temperature, 16384).await
+}
+
+pub async fn generate_text_with_limit(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    user_message: &str,
+    json_mode: bool,
+    temperature: f64,
+    max_tokens: u32,
+) -> Result<String> {
     match llm_config.provider {
         AiProvider::VertexAi | AiProvider::Gemini => {
-            generate_text_gemini(llm_config, system_prompt, user_message, json_mode, temperature)
+            generate_text_gemini(llm_config, system_prompt, user_message, json_mode, temperature, max_tokens)
                 .await
         }
         AiProvider::OpenAi | AiProvider::Grok | AiProvider::Groq => {
@@ -178,11 +189,12 @@ pub async fn generate_text(
                 user_message,
                 json_mode,
                 temperature,
+                max_tokens,
             )
             .await
         }
         AiProvider::Anthropic => {
-            generate_text_anthropic(llm_config, system_prompt, user_message, json_mode, temperature).await
+            generate_text_anthropic(llm_config, system_prompt, user_message, json_mode, temperature, max_tokens).await
         }
     }
 }
@@ -193,12 +205,13 @@ async fn generate_text_gemini(
     user_message: &str,
     json_mode: bool,
     temperature: f64,
+    max_tokens: u32,
 ) -> Result<String> {
     let (url, auth_header) = gemini_url_and_auth(llm_config)?;
 
     let mut gen_config = json!({
         "temperature": temperature,
-        "maxOutputTokens": super::VERTEX_MAX_OUTPUT_TOKENS,
+        "maxOutputTokens": max_tokens,
     });
     if json_mode {
         gen_config
@@ -255,6 +268,7 @@ async fn generate_text_openai_compat(
     user_message: &str,
     json_mode: bool,
     temperature: f64,
+    max_tokens: u32,
 ) -> Result<String> {
     let url = openai_compat_url(llm_config);
     let api_key = llm_config
@@ -269,7 +283,7 @@ async fn generate_text_openai_compat(
             {"role": "user", "content": user_message}
         ],
         "temperature": temperature,
-        "max_tokens": 16384
+        "max_tokens": max_tokens
     });
 
     if json_mode {
@@ -327,6 +341,7 @@ async fn generate_text_anthropic(
     user_message: &str,
     json_mode: bool,
     temperature: f64,
+    max_tokens: u32,
 ) -> Result<String> {
     let api_key = llm_config
         .api_key
@@ -348,7 +363,7 @@ async fn generate_text_anthropic(
         "model": llm_config.model,
         "system": system_prompt,
         "messages": messages,
-        "max_tokens": 8192,
+        "max_tokens": max_tokens,
         "temperature": temperature
     });
 
