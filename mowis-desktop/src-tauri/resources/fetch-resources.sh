@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
-# Download build-time resources that are too large to commit to git.
-# Run this script once before `tauri build` on a CI/CD machine or dev box.
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEST="${SCRIPT_DIR}/alpine-minirootfs-x86_64.tar.gz"
+DEST_FINAL="${SCRIPT_DIR}/alpine-minirootfs-x86_64.tar.gz"
 
-if [[ -f "$DEST" ]]; then
-    echo "alpine-minirootfs-x86_64.tar.gz already present, skipping download."
+if [[ -f "$DEST_FINAL" ]]; then
+    echo "Alpine rootfs already present, skipping download."
     exit 0
 fi
 
-# Use latest-stable to avoid hardcoding version numbers that eventually 404
-# This automatically gets the current stable release (3.23.4 as of May 2026)
-ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-x86_64.tar.gz"
+echo "Fetching latest version metadata..."
+# This finds the exact current version string (e.g., 3.23.4)
+LATEST_VER=$(curl -s https://alpinelinux.org | \
+             grep -m 1 "version:" | awk '{print $2}')
 
-echo "Downloading Alpine latest-stable mini-rootfs (~3.5 MB)..."
-curl -fL --progress-bar -o "$DEST" "$ALPINE_URL"
-echo "Done: $DEST"
+if [[ -z "$LATEST_VER" ]]; then
+    echo "Error: Could not determine latest Alpine version."
+    exit 1
+fi
+
+FILENAME="alpine-minirootfs-${LATEST_VER}-x86_64.tar.gz"
+ALPINE_URL="https://alpinelinux.org{FILENAME}"
+
+echo "Downloading Alpine ${LATEST_VER} mini-rootfs..."
+# Download to a temporary file first, then rename to your generic DEST name
+curl -fL --progress-bar -o "$DEST_FINAL" "$ALPINE_URL"
+
+echo "Done: Saved as $DEST_FINAL"
