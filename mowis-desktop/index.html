@@ -299,6 +299,36 @@
             <div class="form-ctrl"><input type="number" id="set-max-agents" class="form-input sm" value="100" /></div>
           </div>
 
+          <div class="settings-section">Sandbox</div>
+          <div class="form-row">
+            <label class="form-label" for="set-sandbox-enabled">
+              Enable sandbox
+              <span class="form-hint">Isolate agent writes in a temp directory. Agents write to an upper dir; the original project (lower dir) is never touched.</span>
+            </label>
+            <div class="form-ctrl form-ctrl-toggle">
+              <label class="toggle-switch" aria-label="Enable sandbox">
+                <input type="checkbox" id="set-sandbox-enabled" />
+                <span class="toggle-track">
+                  <span class="toggle-thumb"></span>
+                </span>
+              </label>
+              <span class="toggle-label" id="sandbox-toggle-label">On</span>
+            </div>
+          </div>
+          <div class="form-row" id="row-sandbox-info" style="display:none">
+            <label class="form-label">
+              Active sandbox
+              <span class="form-hint">Paths for the current session's lower / upper dirs</span>
+            </label>
+            <div class="form-ctrl">
+              <div class="sandbox-info-block" id="sandbox-info-block"></div>
+              <div class="form-actions">
+                <button class="btn-outline sm" id="btn-discard-sandbox">Discard sandbox</button>
+                <span class="sandbox-size" id="sandbox-size"></span>
+              </div>
+            </div>
+          </div>
+
           <div class="settings-section">About</div>
           <div class="about-block">
             <div class="about-name">MowisAI Desktop</div>

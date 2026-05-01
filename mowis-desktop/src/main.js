@@ -41,7 +41,7 @@ function dispatchMockEvent(event, payload) {
 // ── Mock backend (browser dev) ────────────────────────────────────────────────
 
 const MockState = {
-  config: { socket_path: '/tmp/agentd.sock', max_agents: 100, mode: 'auto', provider: 'gemini', model: 'gemini-2.0-flash', api_key: '', gcp_project: '' },
+  config: { socket_path: '/tmp/agentd.sock', max_agents: 100, mode: 'auto', provider: 'gemini', model: 'gemini-2.0-flash', api_key: '', gcp_project: '', sandbox_enabled: true },
   messages: [],
   tasks: {},
   current_session_id: null,
@@ -51,6 +51,7 @@ const MockState = {
   daemon: false,
   tokens: 0,
   tool_calls: 0,
+  activeSandbox: null,
 };
 
 const MOCK_STORE_KEY = 'mowisai_mock_state_v2';
@@ -76,6 +77,9 @@ function mockInvoke(cmd, args) {
   switch (cmd) {
     case 'get_config':          return Promise.resolve(MockState.config);
     case 'save_config':         MockState.config = args.config; saveMockState(); return Promise.resolve();
+    case 'get_sandbox_status':  return Promise.resolve(MockState.activeSandbox || null);
+    case 'discard_sandbox':     MockState.activeSandbox = null; saveMockState(); return Promise.resolve();
+    case 'get_sandbox_size':    return Promise.resolve(0);
     case 'get_messages':        return Promise.resolve(MockState.messages);
     case 'get_tasks':           return Promise.resolve(Object.values(MockState.tasks));
     case 'get_session_history': return Promise.resolve(MockState.session_history);
@@ -199,6 +203,13 @@ async function mockStartSession({ prompt, mode }) {
   MockState.tasks = {};
   MockState.tokens = 0;
   MockState.tool_calls = 0;
+
+  // Simulate sandbox creation when enabled.
+  MockState.activeSandbox = MockState.config.sandbox_enabled ? {
+    id: `sb-${Date.now().toString(36)}`,
+    lower_dir: '/mock/project',
+    upper_dir: `/tmp/mowis-sandbox/sb-${Date.now().toString(36)}/upper`,
+  } : null;
   MockState.sessions[id] = {
     summary: { id, prompt: prompt.slice(0, 80), status: 'running', started_at: nowTs(), completed_at: null, task_count: 0, tasks_done: 0 },
     messages: MockState.messages,
@@ -1290,6 +1301,14 @@ function loadSettings() {
   setVal('set-max-agents', c.max_agents || 100);
   const rowGcp = $('row-gcp');
   if (rowGcp) rowGcp.style.display = (c.provider === 'gemini') ? '' : 'none';
+
+  // Sandbox toggle
+  const sandboxEnabled = c.sandbox_enabled !== false; // default true
+  setVal('set-sandbox-enabled', sandboxEnabled);
+  updateSandboxToggleLabel(sandboxEnabled);
+
+  // Sandbox status
+  refreshSandboxInfo();
 }
 
 function setVal(id, val) {
@@ -1310,6 +1329,7 @@ async function saveSettings() {
     model: getVal('set-model'),
     api_key: getVal('set-api-key'),
     gcp_project: getVal('set-gcp'),
+    sandbox_enabled: getVal('set-sandbox-enabled'),
   };
   try {
     await invoke('save_config', { config });
@@ -1319,6 +1339,47 @@ async function saveSettings() {
   } catch (err) {
     toast('Save failed: ' + err, 'error');
   }
+}
+
+// ── Sandbox helpers ───────────────────────────────────────────────────────────
+
+function updateSandboxToggleLabel(enabled) {
+  const label = $('sandbox-toggle-label');
+  if (label) label.textContent = enabled ? 'On' : 'Off';
+}
+
+async function refreshSandboxInfo() {
+  try {
+    const info = await invoke('get_sandbox_status');
+    const row = $('row-sandbox-info');
+    const block = $('sandbox-info-block');
+    const sizeEl = $('sandbox-size');
+    if (!row || !block) return;
+
+    if (!info) {
+      row.style.display = 'none';
+      return;
+    }
+
+    row.style.display = '';
+    block.innerHTML = `
+      <div class="sandbox-dir-row"><span class="sandbox-dir-label">lower</span><code class="sandbox-dir-path">${escHtml(info.lower_dir)}</code></div>
+      <div class="sandbox-dir-row"><span class="sandbox-dir-label">upper</span><code class="sandbox-dir-path">${escHtml(info.upper_dir)}</code></div>
+    `;
+
+    // Fetch size asynchronously (best-effort)
+    try {
+      const bytes = await invoke('get_sandbox_size');
+      if (sizeEl) sizeEl.textContent = bytes > 0 ? fmtBytes(bytes) : '';
+    } catch {}
+  } catch {}
+}
+
+function fmtBytes(bytes) {
+  if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(1) + ' GB';
+  if (bytes >= 1_048_576)     return (bytes / 1_048_576).toFixed(1) + ' MB';
+  if (bytes >= 1_024)         return (bytes / 1_024).toFixed(1) + ' KB';
+  return bytes + ' B';
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -1645,6 +1706,22 @@ function setupHandlers() {
   $('set-provider')?.addEventListener('change', (e) => {
     const rowGcp = $('row-gcp');
     if (rowGcp) rowGcp.style.display = e.target.value === 'gemini' ? '' : 'none';
+  });
+
+  // Sandbox toggle — update label live
+  $('set-sandbox-enabled')?.addEventListener('change', (e) => {
+    updateSandboxToggleLabel(e.target.checked);
+  });
+
+  // Discard sandbox button
+  $('btn-discard-sandbox')?.addEventListener('click', async () => {
+    try {
+      await invoke('discard_sandbox');
+      await refreshSandboxInfo();
+      toast('Sandbox discarded', 'success');
+    } catch (err) {
+      toast('Could not discard sandbox: ' + err, 'error');
+    }
   });
   $('btn-test-socket')?.addEventListener('click', async () => {
     const statusEl = $('socket-status');
