@@ -5,10 +5,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-ALPINE_VERSION="3.21.3"
-ALPINE_ROOTFS="alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
-ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION%%.*}.${ALPINE_VERSION#*.}/releases/x86_64/alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
 DEST="${SCRIPT_DIR}/alpine-minirootfs-x86_64.tar.gz"
 
 if [[ -f "$DEST" ]]; then
@@ -16,6 +12,10 @@ if [[ -f "$DEST" ]]; then
     exit 0
 fi
 
-echo "Downloading Alpine ${ALPINE_VERSION} mini-rootfs (~3.5 MB)..."
+# Use latest-stable to avoid hardcoding version numbers that eventually 404
+# This automatically gets the current stable release (3.23.4 as of May 2026)
+ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-x86_64.tar.gz"
+
+echo "Downloading Alpine latest-stable mini-rootfs (~3.5 MB)..."
 curl -fL --progress-bar -o "$DEST" "$ALPINE_URL"
 echo "Done: $DEST"
