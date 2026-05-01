@@ -1397,3 +1397,100 @@ a { text-decoration: none; color: inherit; }
   max-height: 280px;
   overflow-y: auto;
 }
+
+/* ── Toggle switch ───────────────────────────────────────── */
+.form-ctrl-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 6px;
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.toggle-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  transition: background 0.18s, border-color 0.18s;
+}
+.toggle-switch input:checked ~ .toggle-track {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: var(--tx-3);
+  border-radius: 50%;
+  transition: transform 0.18s, background 0.18s;
+}
+.toggle-switch input:checked ~ .toggle-track .toggle-thumb {
+  transform: translateX(16px);
+  background: #fff;
+}
+.toggle-switch:focus-within .toggle-track {
+  box-shadow: 0 0 0 2px rgba(59,139,255,0.28);
+}
+
+.toggle-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--tx-3);
+  min-width: 22px;
+}
+
+/* ── Sandbox info block ──────────────────────────────────── */
+.sandbox-info-block {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 460px;
+}
+.sandbox-dir-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.sandbox-dir-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--tx-4);
+  width: 36px;
+  flex-shrink: 0;
+}
+.sandbox-dir-path {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--tx-2);
+  word-break: break-all;
+}
+.sandbox-size {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--tx-4);
+  margin-left: 4px;
+}

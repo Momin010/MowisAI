@@ -2,9 +2,11 @@
 
 mod platform;
 mod backend;
+mod sandbox;
 
 use anyhow::Result;
 use backend::BackendBridge;
+use sandbox::SandboxInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -86,7 +88,13 @@ pub struct Config {
     pub model: String,
     pub api_key: String,
     pub gcp_project: String,
+    /// When true, agent writes are isolated in a tmpfs-style temp directory.
+    /// The original project (lower_dir) is never modified by agents.
+    #[serde(default = "default_sandbox_enabled")]
+    pub sandbox_enabled: bool,
 }
+
+fn default_sandbox_enabled() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
@@ -98,6 +106,7 @@ impl Default for Config {
             model: "gemini-2.0-flash".into(),
             api_key: String::new(),
             gcp_project: String::new(),
+            sandbox_enabled: true,
         }
     }
 }
@@ -204,6 +213,9 @@ pub struct AppState {
 
     // Channel to send commands to the background bridge
     pub cmd_tx: Mutex<Option<mpsc::Sender<BridgeCommand>>>,
+
+    // Active soft sandbox for the current session (None when sandbox is off or no session).
+    pub active_sandbox: Mutex<Option<SandboxInfo>>,
 }
 
 impl AppState {
@@ -241,6 +253,7 @@ impl AppState {
             tool_calls_total: Mutex::new(current_record.as_ref().map(|record| record.tool_calls_total).unwrap_or_default()),
             storage_path,
             cmd_tx: Mutex::new(None),
+            active_sandbox: Mutex::new(None),
         }
     }
 }
@@ -1260,13 +1273,52 @@ async fn start_session(
     let session_id = Uuid::new_v4().to_string();
     let cfg = state.config.lock().unwrap().clone();
     let resolved_mode = mode.unwrap_or_else(|| cfg.mode.clone());
+
+    // Discard any sandbox left over from a previous session.
+    {
+        let prev = state.active_sandbox.lock().unwrap().take();
+        if let Some(sb) = prev {
+            if let Err(err) = sandbox::destroy_sandbox(&sb.id) {
+                log::warn!("Failed to clean up previous sandbox {}: {err}", sb.id);
+            }
+        }
+    }
+
+    // Resolve repo context, optionally redirecting project_path to a sandbox upper_dir.
     let repo_context = project_path
         .filter(|path| !path.trim().is_empty())
-        .map(|path| RepositoryContext {
-            project_path: path,
-            repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
-            repo_url,
-        });
+        .map(|path| -> Result<RepositoryContext, String> {
+            if cfg.sandbox_enabled {
+                let lower = std::path::Path::new(&path);
+                match sandbox::create_sandbox(lower) {
+                    Ok(info) => {
+                        let upper = info.upper_dir.clone();
+                        log::info!("Sandbox created: id={} upper={}", info.id, upper);
+                        *state.active_sandbox.lock().unwrap() = Some(info);
+                        Ok(RepositoryContext {
+                            project_path: upper,
+                            repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
+                            repo_url,
+                        })
+                    }
+                    Err(err) => {
+                        log::warn!("Sandbox creation failed ({err}), falling back to direct access");
+                        Ok(RepositoryContext {
+                            project_path: path,
+                            repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
+                            repo_url,
+                        })
+                    }
+                }
+            } else {
+                Ok(RepositoryContext {
+                    project_path: path,
+                    repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
+                    repo_url,
+                })
+            }
+        })
+        .transpose()?;
     let started_at = now();
 
     // Reset state
@@ -1326,6 +1378,16 @@ async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String> {
         let _ = tx.send(BridgeCommand::StopOrchestration).await;
     }
 
+    // Discard sandbox on stop.
+    {
+        let sb = state.active_sandbox.lock().unwrap().take();
+        if let Some(info) = sb {
+            if let Err(err) = sandbox::destroy_sandbox(&info.id) {
+                log::warn!("Failed to destroy sandbox {} on stop: {err}", info.id);
+            }
+        }
+    }
+
     {
         let mut msgs = state.messages.lock().unwrap();
         msgs.push(ChatMessage::System { content: "Session stopped.".into(), ts: now() });
@@ -1378,6 +1440,29 @@ async fn clear_current_session(state: State<'_, Arc<AppState>>) -> Result<(), St
     *state.tokens_total.lock().unwrap() = 0;
     *state.tool_calls_total.lock().unwrap() = 0;
     save_state(&state)
+}
+
+/// Return the active sandbox for the current session, or null if none.
+#[tauri::command]
+async fn get_sandbox_status(state: State<'_, Arc<AppState>>) -> Result<Option<SandboxInfo>, String> {
+    Ok(state.active_sandbox.lock().unwrap().clone())
+}
+
+/// Discard the active sandbox immediately (removes the upper_dir from disk).
+#[tauri::command]
+async fn discard_sandbox(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let sb = state.active_sandbox.lock().unwrap().take();
+    if let Some(info) = sb {
+        sandbox::destroy_sandbox(&info.id).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+/// Return the size in bytes of the sandbox upper_dir (0 when no sandbox is active).
+#[tauri::command]
+async fn get_sandbox_size(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
+    let guard = state.active_sandbox.lock().unwrap();
+    Ok(guard.as_ref().map(sandbox::upper_dir_size).unwrap_or(0))
 }
 
 #[tauri::command]
@@ -1507,6 +1592,9 @@ fn main() {
             get_stats,
             get_connection_state,
             get_engine_logs,
+            get_sandbox_status,
+            discard_sandbox,
+            get_sandbox_size,
         ])
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");
