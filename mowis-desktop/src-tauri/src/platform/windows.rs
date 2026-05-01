@@ -149,19 +149,33 @@ impl WindowsLauncher {
     // ── WSL2 detection ────────────────────────────────────────────────────────
 
     /// Returns true if WSL2 is enabled and wsl.exe responds.
+    /// Returns false if wsl.exe is not found (program not found error).
     async fn detect_wsl2(&self) -> bool {
         {
             let cached = self.wsl2_available.lock().unwrap();
             if let Some(v) = *cached { return v; }
         }
-        let ok = win_cmd("wsl.exe")
+        
+        // Try to run wsl.exe - if it's not found, we'll get a specific error
+        let result = win_cmd("wsl.exe")
             .args(["--list"])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .await;
+        
+        let ok = match result {
+            Ok(status) => status.success(),
+            Err(e) => {
+                // Check if this is a "program not found" error
+                let err_str = e.to_string().to_lowercase();
+                if err_str.contains("not found") || err_str.contains("cannot find") {
+                    log::warn!("WSL not found: {}", e);
+                }
+                false
+            }
+        };
+        
         *self.wsl2_available.lock().unwrap() = Some(ok);
         ok
     }
@@ -537,6 +551,29 @@ impl VmLauncher for WindowsLauncher {
 
         // ── QEMU/WHPX fallback ─────────────────────────────────────────────
         log::warn!("WSL2 not available — falling back to QEMU/WHPX");
+        
+        // Check if QEMU is available before trying to spawn
+        let qemu_check = Command::new("qemu-system-x86_64")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        
+        if let Err(e) = qemu_check {
+            let err_str = e.to_string().to_lowercase();
+            if err_str.contains("not found") || err_str.contains("cannot find") {
+                anyhow::bail!(
+                    "Neither WSL nor QEMU are available on this system.\n\n\
+                     To use MowisAI with the full engine:\n\
+                     1. Install WSL2: Open PowerShell as Administrator and run 'wsl --install', then reboot\n\
+                     2. OR install QEMU: Download from https://qemu.org/download/\n\n\
+                     You can continue using MowisAI in Zero-Protection mode (no engine required) \
+                     by selecting 'zero' mode in Settings."
+                );
+            }
+        }
+        
         let child = self.qemu_fallback
             .spawn_process(&token, true)
             .await

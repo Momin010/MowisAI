@@ -28,6 +28,37 @@ use std::path::Path;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
+// ── Skill loading ─────────────────────────────────────────────────────────────
+
+/// Check if the prompt is asking to build a website/frontend
+fn is_website_project(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    let keywords = [
+        "website", "web page", "landing page", "frontend", "ui", "interface",
+        "dashboard", "web app", "html", "css", "react", "vue", "component",
+        "portfolio", "blog", "site", "webpage"
+    ];
+    keywords.iter().any(|kw| lower.contains(kw))
+}
+
+/// Load frontend skill files if they exist
+fn load_frontend_skills() -> Option<String> {
+    let skill_files = ["SKILL_FRONTNED (1).md", "SKILL_FRONTNED (2).md"];
+    let mut skills = Vec::new();
+    
+    for file in &skill_files {
+        if let Ok(content) = std::fs::read_to_string(file) {
+            skills.push(content);
+        }
+    }
+    
+    if skills.is_empty() {
+        None
+    } else {
+        Some(skills.join("\n\n---\n\n"))
+    }
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub use workspace::WorkspaceInfo as ZeroWorkspaceInfo;
@@ -101,7 +132,7 @@ async fn run_chat_mode(
         }
     }
 
-    let _ = event_tx.send(BridgeEvent::OrchestrationComplete).await;
+    // NO OrchestrationComplete in chat mode - session stays active for follow-up messages
 }
 
 /// Build mode — full tool-calling loop
@@ -131,8 +162,16 @@ async fn run_build_mode(
         if let serde_json::Value::Array(arr) = v { arr } else { vec![v] }
     }).collect();
 
+    // Check if this is a website project and load skills
+    let is_website = is_website_project(&prompt);
+    let frontend_skills = if is_website {
+        load_frontend_skills()
+    } else {
+        None
+    };
+
     // Build initial conversation.
-    let system_prompt = system_prompt_for(&workspace);
+    let system_prompt = system_prompt_for(&workspace, frontend_skills.as_deref());
     let mut messages: Vec<LlmMessage> = vec![
         LlmMessage::user(prompt.clone()),
     ];
@@ -313,14 +352,14 @@ async fn run_build_mode(
         sleep(Duration::from_millis(40)).await;
     }
 
-    // NO closing summary - just complete silently
-    let _ = event_tx.send(BridgeEvent::OrchestrationComplete).await;
+    // NO OrchestrationComplete in zero mode - session stays active for follow-up messages
+    // The session will naturally pause after inactivity timeout (handled by frontend)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn system_prompt_for(ws: &WorkspaceInfo) -> String {
-    format!(
+fn system_prompt_for(ws: &WorkspaceInfo, frontend_skills: Option<&str>) -> String {
+    let base_prompt = format!(
         "You are an AI agent running in Zero-Protection mode on the user's computer.\n\
          Your workspace directory is: {path}\n\n\
          You have 13 tools available:\n\
@@ -331,12 +370,41 @@ fn system_prompt_for(ws: &WorkspaceInfo) -> String {
          - search_files, search_in_files — find files by name or search content (grep)\n\
          - run_command — execute shell commands (use sparingly)\n\n\
          All paths you supply must be workspace-relative (e.g. 'src/main.py', not '/home/…').\n\
-         Do not reference files outside the workspace.\n\
+         Do not reference files outside the workspace.\n\n\
+         CRITICAL EFFICIENCY RULES:\n\
+         1. **Write complete files in ONE call** - NEVER split a file into multiple write_file + append_file calls\n\
+         2. When creating HTML/CSS/JS files, write the ENTIRE file content in a single write_file call\n\
+         3. Only use append_file for genuinely adding to existing files, not for building new files piece by piece\n\
+         4. Plan your file structure first, then create each file completely in one operation\n\
+         5. Avoid rapid-fire tool calls - think, plan, then execute efficiently\n\n\
          Work systematically: understand the request → plan → execute → verify.\n\
          Ask clarifying questions if the request is ambiguous.\n\
          When you are finished, summarize what was created or changed.",
         path = ws.path
-    )
+    );
+
+    if let Some(skills) = frontend_skills {
+        format!(
+            "{}\n\n\
+             ═══════════════════════════════════════════════════════════════════════════════\n\
+             FRONTEND DESIGN SKILLS LOADED\n\
+             ═══════════════════════════════════════════════════════════════════════════════\n\n\
+             You are building a website/frontend interface. The following design guidelines \n\
+             MUST be followed to create distinctive, production-grade interfaces:\n\n\
+             {}\n\n\
+             ═══════════════════════════════════════════════════════════════════════════════\n\
+             Remember:\n\
+             - NO generic fonts (Inter, Roboto, Arial) - choose distinctive typography\n\
+             - NO emojis as icons - use SVG icons (Heroicons, Lucide, etc.)\n\
+             - NO purple gradients or cookie-cutter SaaS layouts\n\
+             - Commit to a BOLD aesthetic direction and execute it fully\n\
+             - Write complete, production-ready code in single file operations\n\
+             ═══════════════════════════════════════════════════════════════════════════════",
+            base_prompt, skills
+        )
+    } else {
+        base_prompt
+    }
 }
 
 /// Split text into roughly equal-sized chunks for UI streaming effect.

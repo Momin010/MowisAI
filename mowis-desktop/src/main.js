@@ -971,11 +971,12 @@ async function setupListeners() {
       setText('sb-badge-sessions', String(hist.length));
     } catch {}
 
-    // Re-enable send
-    setSessionActive(false, /* keep chat */ true);
+    // DON'T call setSessionActive(false) - this would disable the send button
+    // In zero mode, the session should stay active for follow-up messages
+    // In orchestration mode, the session naturally completes but user can still send new messages
 
     updateStatusBar();
-    toast('Session complete', 'success');
+    // Don't show "Session complete" toast - it's confusing in zero mode
   });
 }
 
