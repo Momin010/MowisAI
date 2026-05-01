@@ -492,6 +492,13 @@ pub enum BridgeCommand {
         config: Config,
         workspace: zero_mode::ZeroWorkspaceInfo,
     },
+    /// Continue an existing zero mode session with a follow-up message
+    ContinueZeroMode {
+        session_id: String,
+        message: String,
+        config: Config,
+        workspace: zero_mode::ZeroWorkspaceInfo,
+    },
     StopOrchestration,
     CheckSocket,
 }
@@ -618,6 +625,12 @@ fn start_bridge(
                         BridgeCommand::StartZeroMode { session_id, prompt, config, workspace } => {
                             tokio::spawn(async move {
                                 zero_mode::run_zero_session(session_id, prompt, config, workspace, tx).await;
+                            });
+                        }
+
+                        BridgeCommand::ContinueZeroMode { session_id, message, config, workspace } => {
+                            tokio::spawn(async move {
+                                zero_mode::run_zero_session(session_id, message, config, workspace, tx).await;
                             });
                         }
                     }
@@ -1453,6 +1466,38 @@ async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn send_message(
+    state: State<'_, Arc<AppState>>,
+    message: String,
+) -> Result<(), String> {
+    let session_id = state.current_session_id.lock().unwrap().clone()
+        .ok_or_else(|| "No active session".to_string())?;
+    
+    let cfg = state.config.lock().unwrap().clone();
+    let workspace = state.zero_workspace.lock().unwrap().clone()
+        .ok_or_else(|| "No zero workspace active".to_string())?;
+    
+    // Add user message to history
+    state.messages.lock().unwrap().push(ChatMessage::User {
+        content: message.clone(),
+        ts: now(),
+    });
+    
+    // Send to bridge
+    let tx_opt = state.cmd_tx.lock().unwrap().clone();
+    if let Some(tx) = tx_opt {
+        let _ = tx.send(BridgeCommand::ContinueZeroMode {
+            session_id,
+            message,
+            config: cfg,
+            workspace,
+        }).await;
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_current_session(state: State<'_, Arc<AppState>>) -> Result<Option<SessionDetail>, String> {
     let session_id = state.current_session_id.lock().unwrap().clone();
     let Some(session_id) = session_id else {
@@ -1651,6 +1696,7 @@ fn main() {
             check_daemon,
             start_session,
             stop_session,
+            send_message,
             get_current_session,
             load_session,
             clear_current_session,

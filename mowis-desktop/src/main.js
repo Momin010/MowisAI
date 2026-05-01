@@ -696,18 +696,68 @@ async function runSplash() {
   });
 
   // Give the backend up to 60 s (WSL install can take a while).
-  // The splash stays until ready or error; we never hide it silently on timeout
-  // so the user always sees the last status message.
-  await Promise.race([backendReady, delay(60000)]);
+  const result = await Promise.race([backendReady, delay(60000).then(() => ({ stage: 'timeout' }))]);
   if (unlisten) unlisten();
 
-  // Store any setup error so the offline banner can surface it.
+  // Store any setup error so we can show it in the modal
   if (lastErrorMessage) State.setupError = lastErrorMessage;
 
   if (fill) fill.style.width = '100%';
   await delay(200);
   $('splash')?.classList.add('hidden');
   $('app')?.classList.remove('hidden');
+
+  // If there was an error, show the engine setup modal
+  if (result.stage === 'error' || result.stage === 'timeout') {
+    showEngineSetupModal(lastErrorMessage || 'Connection timed out');
+  }
+}
+
+function showEngineSetupModal(errorMessage) {
+  const modal = $('engine-setup-modal');
+  if (!modal) return;
+
+  const statusMsg = $('engine-status-message');
+  const errorBlock = $('engine-error');
+  const errorMsg = $('engine-error-message');
+
+  if (statusMsg) statusMsg.textContent = 'Could not detect WSL or QEMU on your system';
+  if (errorMsg) errorMsg.textContent = errorMessage;
+  if (errorBlock) errorBlock.classList.remove('hidden');
+
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+
+  // Bind button handlers
+  $('engine-retry')?.addEventListener('click', () => {
+    modal.classList.add('hidden');
+    // Reload the app to retry
+    window.location.reload();
+  });
+
+  $('engine-manual')?.addEventListener('click', () => {
+    toast('Manual installation path selection coming soon', 'info');
+    // TODO: Implement file picker for QEMU/WSL path
+  });
+
+  $('engine-continue')?.addEventListener('click', () => {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+    // Continue with zero mode only
+    toast('Continuing in Zero-Protection mode', 'info');
+  });
+
+  $('engine-help-wsl')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    toast('Opening WSL installation guide...', 'info');
+    // TODO: Open external link
+  });
+
+  $('engine-help-qemu')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    toast('Opening QEMU installation guide...', 'info');
+    // TODO: Open external link
+  });
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -1978,16 +2028,23 @@ function setupHandlers() {
   $('chat-input')?.addEventListener('input', autoResize);
 }
 
-function sendChatMessage() {
+async function sendChatMessage() {
   const input = $('chat-input');
   if (!input) return;
   const text = input.value.trim();
   if (!text) return;
+  
+  // Add user message to UI immediately
   appendChatMessage({ kind: 'user', content: text, ts: nowTs() });
   input.value = '';
   autoResize.call(input);
-  // TODO: wire to follow-up command once backend supports it
-  toast('Follow-up sent (requires running daemon)', 'info');
+  
+  // Send to backend
+  try {
+    await invoke('send_message', { message: text });
+  } catch (err) {
+    appendChatMessage({ kind: 'error', content: `Failed to send message: ${err}`, ts: nowTs() });
+  }
 }
 
 function autoResize() {

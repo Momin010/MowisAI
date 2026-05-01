@@ -18,6 +18,81 @@
   <div class="splash-hint" id="splash-hint">Initializing…</div>
 </div>
 
+<!-- ══════════════════ ENGINE SETUP MODAL ══════════════════ -->
+<div id="engine-setup-modal" class="engine-modal hidden" aria-hidden="true">
+  <div class="engine-modal-backdrop"></div>
+  <div class="engine-modal-dialog" role="dialog" aria-modal="true">
+    <div class="engine-modal-head">
+      <div class="engine-modal-icon">⚙</div>
+      <div>
+        <div class="engine-modal-title">Engine Setup Required</div>
+        <div class="engine-modal-subtitle">MowisAI needs a Linux environment to run the full orchestration engine</div>
+      </div>
+    </div>
+    
+    <div class="engine-modal-body">
+      <div class="engine-status" id="engine-status">
+        <div class="engine-status-label">Status</div>
+        <div class="engine-status-message" id="engine-status-message">Detecting runtime environment...</div>
+      </div>
+      
+      <div class="engine-error hidden" id="engine-error">
+        <div class="engine-error-title">Setup Error</div>
+        <div class="engine-error-message" id="engine-error-message"></div>
+      </div>
+      
+      <div class="engine-options">
+        <div class="engine-option-title">What would you like to do?</div>
+        
+        <button class="engine-option-btn" id="engine-retry">
+          <div class="engine-option-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+            </svg>
+          </div>
+          <div>
+            <div class="engine-option-label">Keep Trying</div>
+            <div class="engine-option-desc">Continue detecting WSL/QEMU (if you're installing it now)</div>
+          </div>
+        </button>
+        
+        <button class="engine-option-btn" id="engine-manual">
+          <div class="engine-option-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+              <polyline points="13 2 13 9 20 9"/>
+            </svg>
+          </div>
+          <div>
+            <div class="engine-option-label">Point to Installation</div>
+            <div class="engine-option-desc">Specify where QEMU or WSL is installed on your system</div>
+          </div>
+        </button>
+        
+        <button class="engine-option-btn engine-option-primary" id="engine-continue">
+          <div class="engine-option-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M5 12h14M12 5l7 7-7 7"/>
+            </svg>
+          </div>
+          <div>
+            <div class="engine-option-label">Continue Without Engine</div>
+            <div class="engine-option-desc">Use Zero-Protection mode (direct LLM, no sandboxing)</div>
+          </div>
+        </button>
+      </div>
+      
+      <div class="engine-help">
+        <div class="engine-help-title">Need help installing?</div>
+        <div class="engine-help-links">
+          <a href="#" class="engine-help-link" id="engine-help-wsl">Install WSL2 (Windows)</a>
+          <a href="#" class="engine-help-link" id="engine-help-qemu">Install QEMU</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════════════ WELCOME (first launch) ══════════════════ -->
 <div id="welcome" class="welcome hidden">
   <div class="welcome-tl" data-tauri-drag-region>
