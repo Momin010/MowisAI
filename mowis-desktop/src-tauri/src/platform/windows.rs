@@ -485,7 +485,7 @@ impl WindowsLauncher {
     // ── Wait for bridge ───────────────────────────────────────────────────────
 
     async fn wait_for_bridge(&self) -> Result<()> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);  // Increased from 30 to 90 seconds
         loop {
             if std::time::Instant::now() > deadline {
                 let logs = self.read_alpine_logs().await;

@@ -81,7 +81,7 @@ impl BackendBridge {
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         self.emit_progress("detecting", "Detecting runtime environment…", 5).await;
 
-        let info = match self.connect_with_retry(5).await {
+        let info = match self.connect_with_retry(10).await {  // Increased from 5 to 10 attempts
             Ok(info) => info,
             Err(e) => {
                 // Surface the full error chain to the frontend so the user can read it.
@@ -115,7 +115,7 @@ impl BackendBridge {
 
     /// Try to start the launcher and open a connection, retrying on failure.
     async fn connect_with_retry(self: &Arc<Self>, max_attempts: u32) -> Result<ConnectionInfo> {
-        let mut delay = Duration::from_secs(1);
+        let mut delay = Duration::from_secs(3);  // Increased from 1 to 3 seconds initial delay
 
         for attempt in 1..=max_attempts {
             self.emit_progress(
@@ -155,7 +155,7 @@ impl BackendBridge {
 
             if attempt < max_attempts {
                 sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(16));
+                delay = (delay * 2).min(Duration::from_secs(30));  // Increased max delay from 16 to 30 seconds
             }
         }
 

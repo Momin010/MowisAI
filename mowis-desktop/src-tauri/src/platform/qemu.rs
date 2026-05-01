@@ -137,7 +137,7 @@ impl QemuLauncher {
         let addr: SocketAddr = self.config.agent_tcp
             .parse()
             .context("parse agent_tcp address")?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);  // Increased from 30 to 90 seconds
         loop {
             if std::time::Instant::now() > deadline {
                 bail!("Timed out waiting for agentd serial bridge on {}", self.config.agent_tcp);
