@@ -1494,3 +1494,89 @@ a { text-decoration: none; color: inherit; }
   color: var(--tx-4);
   margin-left: 4px;
 }
+
+/* ── Zero-Protection mode ────────────────────────────────── */
+
+/* Pill badge used in chat bar, settings hint, home hint */
+.zero-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--yellow);
+  background: rgba(232, 190, 74, 0.10);
+  border: 1px solid rgba(232, 190, 74, 0.28);
+  border-radius: 4px;
+  padding: 1px 5px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.zero-badge.sm { font-size: 7.5px; padding: 1px 4px; }
+
+/* Inline hint below the home mode selector */
+.zero-mode-hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--tx-4);
+  padding: 4px 0;
+  animation: fadeIn 0.18s ease;
+}
+
+/* Hint block inside settings */
+.zero-mode-settings-hint {
+  margin-top: 8px;
+  background: rgba(232,190,74,0.04);
+  border: 1px solid rgba(232,190,74,0.14);
+  border-radius: var(--r);
+  padding: 10px 12px;
+  font-size: 11.5px;
+  color: var(--tx-3);
+  line-height: 1.6;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  animation: fadeIn 0.18s ease;
+}
+.zero-mode-settings-hint code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--tx-2);
+  word-break: break-all;
+}
+
+/* Workspace bar in the active chat session header */
+.zero-workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  min-width: 0;
+}
+.zero-workspace-path {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--tx-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 340px;
+}
+
+/* Plan card shows "zero" sandbox in yellow */
+.plan-sb-zero {
+  color: var(--yellow);
+  border-color: rgba(232,190,74,0.28) !important;
+  background: rgba(232,190,74,0.07) !important;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

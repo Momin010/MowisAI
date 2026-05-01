@@ -52,6 +52,7 @@ const MockState = {
   tokens: 0,
   tool_calls: 0,
   activeSandbox: null,
+  zeroWorkspace: null,
 };
 
 const MOCK_STORE_KEY = 'mowisai_mock_state_v2';
@@ -80,6 +81,8 @@ function mockInvoke(cmd, args) {
     case 'get_sandbox_status':  return Promise.resolve(MockState.activeSandbox || null);
     case 'discard_sandbox':     MockState.activeSandbox = null; saveMockState(); return Promise.resolve();
     case 'get_sandbox_size':    return Promise.resolve(0);
+    case 'get_zero_workspace':  return Promise.resolve(MockState.zeroWorkspace || null);
+    case 'get_zero_workspace_base': return Promise.resolve('/mock/Documents/MowisAI/workspaces');
     case 'get_messages':        return Promise.resolve(MockState.messages);
     case 'get_tasks':           return Promise.resolve(Object.values(MockState.tasks));
     case 'get_session_history': return Promise.resolve(MockState.session_history);
@@ -204,11 +207,21 @@ async function mockStartSession({ prompt, mode }) {
   MockState.tokens = 0;
   MockState.tool_calls = 0;
 
-  // Simulate sandbox creation when enabled.
-  MockState.activeSandbox = MockState.config.sandbox_enabled ? {
+  const isZero = (mode || MockState.config.mode) === 'zero';
+
+  // Simulate sandbox creation when enabled (not applicable in zero mode).
+  MockState.activeSandbox = (!isZero && MockState.config.sandbox_enabled) ? {
     id: `sb-${Date.now().toString(36)}`,
     lower_dir: '/mock/project',
     upper_dir: `/tmp/mowis-sandbox/sb-${Date.now().toString(36)}/upper`,
+  } : null;
+
+  // Simulate zero workspace.
+  const wsSlug = `mowis-${new Date().toISOString().slice(0,10).replace(/-/g,'')}-${Date.now().toString(36).slice(-6)}`;
+  MockState.zeroWorkspace = isZero ? {
+    session_id: id,
+    slug: wsSlug,
+    path: `/mock/Documents/MowisAI/workspaces/${wsSlug}`,
   } : null;
   MockState.sessions[id] = {
     summary: { id, prompt: prompt.slice(0, 80), status: 'running', started_at: nowTs(), completed_at: null, task_count: 0, tasks_done: 0 },
@@ -220,8 +233,13 @@ async function mockStartSession({ prompt, mode }) {
   MockState.session_history.push(MockState.sessions[id].summary);
   saveMockState();
 
+  const resolvedMode = mode || MockState.config.mode;
   // Run async simulation
-  runBrowserSimulation(id, prompt, mode || MockState.config.mode);
+  if (resolvedMode === 'zero') {
+    runZeroBrowserSimulation(id, prompt, MockState.zeroWorkspace);
+  } else {
+    runBrowserSimulation(id, prompt, resolvedMode);
+  }
   return id;
 }
 
@@ -346,6 +364,95 @@ async function runBrowserSimulation(sessionId, prompt, mode) {
   dispatchMockEvent('session_complete', {});
 }
 
+async function runZeroBrowserSimulation(sessionId, prompt, ws) {
+  await delay(200);
+
+  // Plan card — zero mode shows "zero" as the single sandbox.
+  const plan = { kind: 'plan', sandboxes: ['zero'], task_count: 0, agent_count: 1, mode: 'zero', ts: nowTs() };
+  MockState.messages.push(plan);
+  mockSyncSession('running');
+  dispatchMockEvent('chat_message', plan);
+
+  await delay(300);
+
+  // Announce workspace.
+  const intro = [
+    `**Zero-Protection mode** — writing directly to disk.\n`,
+    `Workspace: \`${ws?.path || '/mock/MowisAI/workspaces/mowis-demo'}\`\n\n`,
+    `Connecting to ${MockState.config.provider || 'gemini'} (${MockState.config.model || 'default model'})…\n`,
+  ];
+  for (const chunk of intro) {
+    dispatchMockEvent('agent_chunk', { chunk });
+    await delay(80);
+  }
+
+  // Simulate tool calls.
+  const mockCalls = [
+    { name: 'create_directory', desc: 'mkdir src/', file: 'src/' },
+    { name: 'write_file', desc: 'Write src/main.py', file: 'src/main.py' },
+    { name: 'write_file', desc: 'Write README.md', file: 'README.md' },
+    { name: 'write_file', desc: 'Write requirements.txt', file: 'requirements.txt' },
+    { name: 'run_command', desc: 'Run: echo "setup complete"', file: null },
+    { name: 'list_directory', desc: 'List workspace', file: null },
+  ];
+
+  for (let i = 0; i < mockCalls.length; i++) {
+    const call = mockCalls[i];
+    const taskId = `z${String(i + 1).padStart(4, '0')}`;
+    const task = {
+      id: taskId,
+      description: call.desc,
+      sandbox: 'zero',
+      status: 'pending',
+      started_at: null,
+      completed_at: nowTs(),
+      files: call.file ? [call.file] : [],
+      summary: `Executed ${call.name} in zero workspace.`,
+      views: ['Workspace explorer'],
+    };
+    MockState.tasks[taskId] = task;
+    dispatchMockEvent('task_added', task);
+    await delay(40);
+
+    MockState.tasks[taskId].status = 'running';
+    MockState.tasks[taskId].started_at = nowTs();
+    dispatchMockEvent('task_updated', { id: taskId, status: 'running' });
+    await delay(180);
+
+    MockState.tasks[taskId].status = 'complete';
+    MockState.tasks[taskId].completed_at = nowTs();
+    dispatchMockEvent('task_updated', { id: taskId, status: 'complete' });
+    mockSyncSession('running');
+
+    const echo = `\n\`${call.name}\` → ok${call.file ? ': ' + call.file : ''}\n`;
+    dispatchMockEvent('agent_chunk', { chunk: echo });
+    await delay(60);
+  }
+
+  const closing = [
+    `\n\n**Done.** ${mockCalls.length} tool call(s) executed.\n`,
+    `Files are saved at: \`${ws?.path || '/mock/MowisAI/workspaces/mowis-demo'}\`\n`,
+  ];
+  for (const chunk of closing) {
+    dispatchMockEvent('agent_chunk', { chunk });
+    await delay(100);
+  }
+
+  mockSyncSession('done');
+  MockState.usage_history.push({
+    session_id: sessionId,
+    prompt_short: prompt.slice(0, 80),
+    ts: nowTs(),
+    task_count: mockCalls.length,
+    tokens: 1200,
+    tool_calls: mockCalls.length,
+    duration_secs: 8,
+    status: 'done',
+  });
+  saveMockState();
+  dispatchMockEvent('session_complete', {});
+}
+
 function mockTaskFiles(sandbox, index) {
   if (sandbox === 'frontend') return [`src/views/session-${index}.tsx`, `src/styles/tasks-${index}.css`];
   if (sandbox === 'backend') return [`src/services/task-${index}.rs`, `src/api/session-${index}.rs`];
@@ -380,6 +487,7 @@ const State = {
   cloneDestination: null,
   setupError: null,
   stats: { tasks_total: 0, tasks_done: 0, tasks_running: 0, tokens_total: 0, tool_calls: 0 },
+  zeroWorkspacePath: null,  // set when a zero-mode session is active
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -911,6 +1019,13 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
     State.sessionId = id;
     setText('compose-session-info', `session ${id.slice(0,12)}`);
     setText('chat-session-title', prompt.slice(0, 120));
+
+    // If zero mode, fetch and display the workspace path.
+    if ((mode || State.config?.mode) === 'zero') {
+      await refreshZeroWorkspace();
+    } else {
+      updateZeroWorkspaceBar(null);
+    }
   } catch (err) {
     appendChatMessage({ kind: 'error', content: String(err), ts: nowTs() });
     setSessionActive(false);
@@ -1049,7 +1164,7 @@ function createPlanCard(msg) {
       </div>
     </div>
     <div class="plan-sandboxes">
-      ${(msg.sandboxes || []).map(s => `<span class="plan-sb">${s}</span>`).join('')}
+      ${(msg.sandboxes || []).map(s => `<span class="plan-sb${s === 'zero' ? ' plan-sb-zero' : ''}">${s === 'zero' ? '✦ ' : ''}${s}</span>`).join('')}
     </div>
   `;
   card.addEventListener('click', () => setTaskPanelOpen(true));
@@ -1307,6 +1422,9 @@ function loadSettings() {
   setVal('set-sandbox-enabled', sandboxEnabled);
   updateSandboxToggleLabel(sandboxEnabled);
 
+  // Zero mode hint in settings
+  updateSettingsZeroHint(c.mode || 'auto');
+
   // Sandbox status
   refreshSandboxInfo();
 }
@@ -1341,7 +1459,54 @@ async function saveSettings() {
   }
 }
 
+// ── Zero mode helpers ─────────────────────────────────────────────────────────
+
+function isZeroMode() {
+  return (State.config?.mode || '') === 'zero';
+}
+
+function updateZeroWorkspaceBar(path) {
+  State.zeroWorkspacePath = path || null;
+  const bar = $('zero-workspace-bar');
+  const pathEl = $('zero-workspace-path');
+  if (!bar) return;
+  if (path) {
+    bar.classList.remove('hidden');
+    if (pathEl) pathEl.textContent = path;
+  } else {
+    bar.classList.add('hidden');
+  }
+}
+
+async function refreshZeroWorkspace() {
+  try {
+    const ws = await invoke('get_zero_workspace');
+    updateZeroWorkspaceBar(ws?.path || null);
+  } catch {}
+}
+
 // ── Sandbox helpers ───────────────────────────────────────────────────────────
+
+function updateSettingsZeroHint(mode) {
+  const hint = $('settings-zero-hint');
+  if (!hint) return;
+  if (mode === 'zero') {
+    hint.classList.remove('hidden');
+    // Populate base dir lazily.
+    const base = $('zero-workspace-base');
+    if (base && base.textContent === '…') {
+      invoke('get_zero_workspace_base').then(p => { if (base) base.textContent = p; }).catch(() => {});
+    }
+  } else {
+    hint.classList.add('hidden');
+  }
+}
+
+function updateHomeZeroHint(mode) {
+  const hint = $('home-zero-hint');
+  if (!hint) return;
+  hint.classList.toggle('hidden', mode !== 'zero');
+}
 
 function updateSandboxToggleLabel(enabled) {
   const label = $('sandbox-toggle-label');
@@ -1665,6 +1830,12 @@ function setupHandlers() {
     }
   });
 
+  // Show/hide zero-mode hint when home mode selector changes.
+  $('home-mode')?.addEventListener('change', (e) => {
+    updateHomeZeroHint(e.target.value);
+    syncCustomSelect($('home-mode'));
+  });
+
   // Suggestions
   document.querySelectorAll('.suggestion').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1706,6 +1877,9 @@ function setupHandlers() {
   $('set-provider')?.addEventListener('change', (e) => {
     const rowGcp = $('row-gcp');
     if (rowGcp) rowGcp.style.display = e.target.value === 'gemini' ? '' : 'none';
+  });
+  $('set-mode')?.addEventListener('change', (e) => {
+    updateSettingsZeroHint(e.target.value);
   });
 
   // Sandbox toggle — update label live
