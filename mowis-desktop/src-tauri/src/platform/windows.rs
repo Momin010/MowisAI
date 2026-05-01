@@ -4,22 +4,24 @@
 //
 //   1. WSL2 primary — fastest, uses the Linux kernel already on the machine.
 //      a. Detect WSL2 (wsl.exe --list — reliable even offline).
-//      b. Ensure Alpine Linux distro is installed (via winget → AlpineLinux.WSL from Store).
-//      c. Copy the agentd-linux-x86_64 binary that was installed next to the
-//         exe by the NSIS installer into Alpine at /usr/local/bin/agentd.
-//      d. Install socat inside Alpine (apk add socat).
-//      e. Start agentd inside Alpine: nohup agentd socket --path /tmp/agentd.sock
-//      f. Bridge the Unix socket out via TCP on localhost:9722 using socat.
+//      b. Ensure the private "MowisAI" distro is registered:
+//           - Check wsl --list --quiet for "MowisAI".
+//           - If absent: run  wsl --import MowisAI <data_dir> <bundled_rootfs> --version 2
+//             The Alpine mini-rootfs tarball is bundled with the installer at
+//             resources/alpine-minirootfs-x86_64.tar.gz (~3.5 MB).
+//      c. Copy the agentd-linux-x86_64 binary into the distro at /usr/local/bin/agentd.
+//      d. Install socat inside the distro (apk add socat).
+//      e. Start agentd:  nohup agentd socket --path /tmp/agentd.sock
+//      f. Bridge the Unix socket out via TCP on localhost:9722 with socat.
 //         WSL2 automatically forwards Linux localhost ports to Windows.
-//      g. Connect from the Windows side to 127.0.0.1:9722 with auth token.
+//      g. Connect from Windows to 127.0.0.1:9722 with auth token.
 //
-//   2. QEMU/WHPX fallback — if WSL2 is unavailable or Alpine install fails.
-//      Same image as macOS launcher but with -accel whpx.
+//   2. QEMU/WHPX fallback — if WSL2 is unavailable.
 //
-// Binary bundling: The Tauri NSIS installer places agentd-linux-x86_64 next
-// to MowisAI.exe (via tauri.conf.json "resources"). At runtime we locate it
-// with find_bundled_agentd() and copy it into the WSL2 distro over the
-// automatic /mnt/<drive>/ filesystem mapping.
+// Binary bundling: the Tauri NSIS installer copies both
+//   resources/agentd-linux-x86_64                    → next to MowisAI.exe
+//   resources/alpine-minirootfs-x86_64.tar.gz        → next to MowisAI.exe
+// At runtime we locate them with find_bundled_file().
 
 use crate::platform::auth;
 use crate::platform::connection::is_tcp_reachable;
@@ -27,6 +29,7 @@ use crate::platform::qemu::{QemuConfig, QemuLauncher};
 use crate::platform::{ConnectionInfo, ConnectionKind, VmLauncher};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -38,10 +41,12 @@ use tokio::time::sleep;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-const WSL_DISTRO: &str = "Alpine";
+/// Private distro name — unique to MowisAI so it never conflicts with user distros.
+const WSL_DISTRO: &str = "MowisAI";
 const AGENT_TCP_PORT: u16 = 9722;
 const AGENT_TCP_ADDR: &str = "127.0.0.1:9722";
 const AGENTD_BIN: &str = "agentd-linux-x86_64";
+const ALPINE_ROOTFS: &str = "alpine-minirootfs-x86_64.tar.gz";
 
 /// Create any Windows Command with the console window suppressed.
 fn win_cmd(prog: &str) -> Command {
@@ -49,6 +54,24 @@ fn win_cmd(prog: &str) -> Command {
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
+}
+
+/// Strip the \\?\ extended-length path prefix that some Windows APIs add.
+fn strip_unc(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        PathBuf::from(s[4..].to_string())
+    } else {
+        path
+    }
+}
+
+/// Where the private WSL distro's VHDX is stored.
+fn wsl_data_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("MowisAI")
+        .join("wsl")
 }
 
 fn qemu_image_path() -> PathBuf {
@@ -61,7 +84,6 @@ fn qemu_image_path() -> PathBuf {
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 /// Convert a Windows absolute path to the equivalent WSL2 /mnt/<drive>/... path.
-/// "C:\Program Files\MowisAI\agentd" → "/mnt/c/Program Files/MowisAI/agentd"
 fn windows_to_wsl_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     let mut chars = s.chars();
@@ -73,33 +95,28 @@ fn windows_to_wsl_path(path: &Path) -> String {
     s.replace('\\', "/")
 }
 
-/// Locate the agentd binary bundled by the installer.
-/// Searches: next to the exe, a "resources/" sub-dir, and the Cargo workspace
-/// root (handy during `cargo tauri dev`).
-fn find_bundled_agentd() -> Option<PathBuf> {
-    // 1. Next to the running exe (production NSIS install)
+/// Locate a bundled file by filename.
+/// Searches: next to the exe, a "resources/" sub-dir, and the Cargo workspace root.
+fn find_bundled_file(name: &str) -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
+        let exe = strip_unc(exe);
         if let Some(dir) = exe.parent() {
-            let p = dir.join(AGENTD_BIN);
+            let p = dir.join(name);
             if p.exists() { return Some(p); }
-            // Some Tauri versions copy resources into a sub-dir
-            let p2 = dir.join("resources").join(AGENTD_BIN);
+            let p2 = dir.join("resources").join(name);
             if p2.exists() { return Some(p2); }
         }
     }
-    // 2. Workspace root during cargo dev builds
+    // Workspace root during `cargo tauri dev`
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        let p = PathBuf::from(&manifest).join("..").join("..").join(AGENTD_BIN);
-        if let Ok(canon) = p.canonicalize() {
-            if canon.exists() { return Some(canon); }
-        }
+        let p = PathBuf::from(&manifest).join("..").join("..").join(name);
+        if p.exists() { return Some(p); }
     }
     None
 }
 
 /// Decode the stdout of `wsl --list --quiet`, which is UTF-16LE on Windows.
 fn decode_wsl_list(raw: &[u8]) -> String {
-    // UTF-16LE BOM or every-other-byte being 0x00 → it's UTF-16LE
     let is_utf16 = raw.starts_with(&[0xFF, 0xFE])
         || (raw.len() >= 4 && raw[1] == 0 && raw[3] == 0);
     if is_utf16 {
@@ -117,7 +134,6 @@ fn decode_wsl_list(raw: &[u8]) -> String {
 
 pub struct WindowsLauncher {
     qemu_fallback: QemuLauncher,
-    /// Cached WSL2 availability check so we only run wsl.exe once.
     wsl2_available: Mutex<Option<bool>>,
 }
 
@@ -132,8 +148,7 @@ impl WindowsLauncher {
 
     // ── WSL2 detection ────────────────────────────────────────────────────────
 
-    /// Returns true if WSL2 is enabled and wsl.exe is available.
-    /// Uses `--list` (not `--status`) because --status requires internet access.
+    /// Returns true if WSL2 is enabled and wsl.exe responds.
     async fn detect_wsl2(&self) -> bool {
         {
             let cached = self.wsl2_available.lock().unwrap();
@@ -151,10 +166,9 @@ impl WindowsLauncher {
         ok
     }
 
-    // ── Alpine distro install ─────────────────────────────────────────────────
+    // ── Private distro management ─────────────────────────────────────────────
 
-    /// Returns true if the Alpine WSL distro is already registered.
-    async fn alpine_is_installed(&self) -> bool {
+    async fn distro_is_registered(&self) -> bool {
         match win_cmd("wsl.exe")
             .args(["--list", "--quiet"])
             .stdout(Stdio::piped())
@@ -169,86 +183,73 @@ impl WindowsLauncher {
         }
     }
 
-    async fn ensure_alpine_distro(&self) -> Result<()> {
-        if self.alpine_is_installed().await {
-            log::info!("Alpine WSL2 distro already installed");
+    /// Ensure the private MowisAI WSL distro is registered.
+    ///
+    /// Uses `wsl --import` with the Alpine mini-rootfs bundled with the installer.
+    /// The VHDX is written to %LOCALAPPDATA%\MowisAI\wsl\ and persists across runs.
+    /// On subsequent launches the distro check is instant (just a wsl --list call).
+    async fn ensure_distro(&self) -> Result<()> {
+        if self.distro_is_registered().await {
+            log::info!("MowisAI WSL distro already registered");
             return Ok(());
         }
 
-        // "Alpine" is NOT in Microsoft's hosted wsl --list --online distribution list.
-        // It is a third-party app published to the Microsoft Store (winget id: AlpineLinux.WSL).
-        // wsl --install --distribution Alpine therefore always fails with WSL_E_DISTRO_NOT_FOUND.
-        // The correct installation path is via winget.
-        log::info!("Alpine WSL distro not found — attempting install via winget…");
+        // Find the bundled Alpine mini-rootfs tarball (~3.5 MB, shipped with the installer).
+        let rootfs = find_bundled_file(ALPINE_ROOTFS).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Bundled Alpine rootfs not found ({ALPINE_ROOTFS}).\n\
+                 Please reinstall MowisAI."
+            )
+        })?;
 
-        let winget_out = win_cmd("winget")
+        // Create the directory where WSL stores the VHDX.
+        let data_dir = wsl_data_dir();
+        fs::create_dir_all(&data_dir)
+            .with_context(|| format!("creating WSL data dir: {}", data_dir.display()))?;
+
+        log::info!(
+            "Importing Alpine Linux as '{WSL_DISTRO}' from {} into {}…",
+            rootfs.display(),
+            data_dir.display()
+        );
+
+        let import_out = win_cmd("wsl.exe")
             .args([
-                "install",
-                "--id", "AlpineLinux.WSL",
-                "--source", "msstore",
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-                "--silent",
+                "--import", WSL_DISTRO,
+                data_dir.to_str().unwrap_or("."),
+                rootfs.to_str().unwrap_or(ALPINE_ROOTFS),
+                "--version", "2",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .await;
+            .await
+            .context("running wsl --import")?;
 
-        match winget_out {
-            Err(e) => {
-                // winget not found on this machine (very old Windows 10 build)
-                anyhow::bail!(
-                    "winget is not available on this machine ({e}).\n\n\
-                     Install Alpine WSL manually:\n\
-                     • Microsoft Store: search \"Alpine WSL\" and install it, then restart MowisAI.\n\
-                     • Or open PowerShell and run:\n\
-                       winget install --id AlpineLinux.WSL --source msstore --accept-package-agreements"
-                );
-            }
-            Ok(out) if !out.status.success() => {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let detail = if stderr.is_empty() { stdout } else { stderr };
-                anyhow::bail!(
-                    "winget failed to install Alpine WSL (exit {}).\n\
-                     Output: {}\n\n\
-                     Install Alpine WSL manually:\n\
-                     • Microsoft Store: search \"Alpine WSL\" and install it, then restart MowisAI.\n\
-                     • Or open PowerShell and run:\n\
-                       winget install --id AlpineLinux.WSL --source msstore --accept-package-agreements",
-                    out.status, detail
-                );
-            }
-            Ok(_) => {
-                log::info!("winget install completed — waiting for Alpine to register with WSL…");
-            }
+        if !import_out.status.success() {
+            let stderr = String::from_utf8_lossy(&import_out.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&import_out.stdout).trim().to_string();
+            let detail = if stderr.is_empty() { stdout } else { stderr };
+            anyhow::bail!(
+                "wsl --import failed (exit {}).\n\
+                 Output: {}\n\n\
+                 WSL2 may not be fully enabled. Open PowerShell as Administrator and run:\n\
+                   wsl --install --no-distribution\n\
+                 then reboot and restart MowisAI.",
+                import_out.status, detail
+            );
         }
 
-        // Give the Store app time to finish first-boot initialisation and register
-        // itself with WSL. Poll for up to 30 s before giving up.
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            if self.alpine_is_installed().await {
-                log::info!("Alpine WSL distro is now registered");
-                return Ok(());
-            }
-            if std::time::Instant::now() > deadline {
-                anyhow::bail!(
-                    "Alpine WSL was installed by winget but did not appear in the WSL distro list \
-                     within 30 seconds.\n\
-                     Try restarting MowisAI. If the problem persists, open WSL manually once \
-                     by searching 'Alpine' in the Start menu, then restart MowisAI."
-                );
-            }
-            sleep(Duration::from_secs(2)).await;
-        }
+        log::info!("Alpine Linux imported successfully as '{WSL_DISTRO}'");
+        // Brief pause for WSL to complete registration.
+        sleep(Duration::from_secs(2)).await;
+        Ok(())
     }
 
-    // ── Copy agentd + socat into Alpine ──────────────────────────────────────
+    // ── Copy agentd + socat into the distro ──────────────────────────────────
 
-    async fn ensure_agentd_in_alpine(&self, token: &str) -> Result<()> {
-        // Install socat — always run, idempotent and fast. Capture output for diagnostics.
+    async fn ensure_agentd_in_distro(&self, token: &str) -> Result<()> {
+        // Install socat — idempotent and fast.
         let apk_out = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "apk", "add", "--no-cache", "socat"])
             .stdout(Stdio::piped())
@@ -260,13 +261,11 @@ impl WindowsLauncher {
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
                 let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let detail = if stderr.is_empty() { stdout } else { stderr };
-                log::warn!("apk add socat failed (exit {}): {}", out.status, detail);
-                // Non-fatal: agentd may already work without socat if it was previously installed.
+                log::warn!("apk add socat failed: {}", if stderr.is_empty() { stdout } else { stderr });
             }
         }
 
-        // Check if agentd is already in Alpine.
+        // Check if agentd is already installed.
         let already = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "test", "-x", "/usr/local/bin/agentd"])
             .stdout(Stdio::null())
@@ -277,48 +276,44 @@ impl WindowsLauncher {
             .unwrap_or(false);
 
         if !already {
-            // Find the binary bundled by the NSIS installer next to our exe.
-            let agentd_win = find_bundled_agentd().ok_or_else(|| {
+            let agentd_win = find_bundled_file(AGENTD_BIN).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "The agentd engine binary ({}) was not found next to the application.\n\
-                     Please reinstall MowisAI to restore bundled components.",
-                    AGENTD_BIN
+                    "agentd binary ({AGENTD_BIN}) not found next to the application.\n\
+                     Please reinstall MowisAI."
                 )
             })?;
 
-            log::info!("Copying {} → Alpine /usr/local/bin/agentd", agentd_win.display());
+            log::info!("Copying {} → {WSL_DISTRO}:/usr/local/bin/agentd", agentd_win.display());
 
-            // WSL2 mounts Windows drives at /mnt/<drive>/.
             let wsl_src = windows_to_wsl_path(&agentd_win);
-
-            // Single shell command: cp + chmod.
             let copy_cmd = format!(
                 "cp '{}' /usr/local/bin/agentd && chmod +x /usr/local/bin/agentd",
                 wsl_src.replace('\'', "\\'")
             );
+
             let copy_out = win_cmd("wsl.exe")
                 .args(["-d", WSL_DISTRO, "--", "sh", "-c", &copy_cmd])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output()
                 .await
-                .context("copying agentd binary into Alpine")?;
+                .context("copying agentd into the distro")?;
 
             if !copy_out.status.success() {
                 let stderr = String::from_utf8_lossy(&copy_out.stderr).trim().to_string();
                 let stdout = String::from_utf8_lossy(&copy_out.stdout).trim().to_string();
                 let detail = if stderr.is_empty() { stdout } else { stderr };
                 anyhow::bail!(
-                    "Failed to copy agentd into Alpine WSL2 (exit {}).\n\
+                    "Failed to copy agentd into {WSL_DISTRO} (exit {}).\n\
                      Source: {} → WSL: {}\n\
                      Error: {}",
                     copy_out.status, agentd_win.display(), wsl_src, detail
                 );
             }
-            log::info!("agentd installed in Alpine successfully");
+            log::info!("agentd installed successfully");
         }
 
-        // Write the auth token into the distro so agentd can verify clients.
+        // Write auth token.
         let token_cmd = format!(
             "mkdir -p /root/.mowisai && \
              printf '%s' '{}' > /root/.mowisai/token && \
@@ -331,7 +326,7 @@ impl WindowsLauncher {
             .stderr(Stdio::piped())
             .output()
             .await
-            .context("writing auth token into Alpine")?;
+            .context("writing auth token into distro")?;
 
         if !tok_out.status.success() {
             let stderr = String::from_utf8_lossy(&tok_out.stderr).trim().to_string();
@@ -344,7 +339,7 @@ impl WindowsLauncher {
     // ── Start agentd + socat TCP relay ────────────────────────────────────────
 
     async fn start_wsl2_bridge(&self, token: &str) -> Result<()> {
-        self.ensure_agentd_in_alpine(token).await?;
+        self.ensure_agentd_in_distro(token).await?;
 
         // Kill any stale processes from a previous session (best-effort).
         for proc in &["agentd", "socat"] {
@@ -357,8 +352,7 @@ impl WindowsLauncher {
         }
         sleep(Duration::from_millis(600)).await;
 
-        // Start agentd in the background. The nohup shell command itself exits
-        // immediately after forking; errors will appear in /var/log/agentd.log.
+        // Start agentd in the background.
         let agentd_out = win_cmd("wsl.exe")
             .args([
                 "-d", WSL_DISTRO, "--", "sh", "-c",
@@ -369,22 +363,21 @@ impl WindowsLauncher {
             .stderr(Stdio::piped())
             .output()
             .await
-            .context("starting agentd inside Alpine")?;
+            .context("starting agentd inside distro")?;
 
         if !agentd_out.status.success() {
             let stderr = String::from_utf8_lossy(&agentd_out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&agentd_out.stdout).trim().to_string();
             let detail = if stderr.is_empty() { stdout } else { stderr };
             anyhow::bail!(
-                "Failed to start agentd inside Alpine (exit {}).\nOutput: {}",
+                "Failed to start agentd (exit {}).\nOutput: {}",
                 agentd_out.status, detail
             );
         }
 
-        // Give agentd time to create and bind its socket.
         sleep(Duration::from_secs(2)).await;
 
-        // Bridge the Unix socket out to a TCP port Windows can reach.
+        // Bridge Unix socket → TCP so Windows can reach it.
         let socat_cmd = format!(
             "nohup socat TCP-LISTEN:{port},reuseaddr,fork \
              UNIX-CONNECT:/tmp/agentd.sock \
@@ -397,14 +390,14 @@ impl WindowsLauncher {
             .stderr(Stdio::piped())
             .output()
             .await
-            .context("starting socat TCP relay inside Alpine")?;
+            .context("starting socat TCP relay")?;
 
         if !socat_out.status.success() {
             let stderr = String::from_utf8_lossy(&socat_out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&socat_out.stdout).trim().to_string();
             let detail = if stderr.is_empty() { stdout } else { stderr };
             anyhow::bail!(
-                "Failed to start socat TCP relay inside Alpine (exit {}).\nOutput: {}",
+                "Failed to start socat relay (exit {}).\nOutput: {}",
                 socat_out.status, detail
             );
         }
@@ -412,7 +405,8 @@ impl WindowsLauncher {
         Ok(())
     }
 
-    /// Read the agentd and socat log files from Alpine for diagnostics.
+    // ── Log reader ────────────────────────────────────────────────────────────
+
     pub async fn read_alpine_logs(&self) -> String {
         let agentd_log = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "sh", "-c",
@@ -467,11 +461,11 @@ impl VmLauncher for WindowsLauncher {
         let token = auth::load_or_create().context("load/create auth token")?;
 
         if self.detect_wsl2().await {
-            log::info!("WSL2 available — using Alpine Linux distro");
+            log::info!("WSL2 available — using bundled Alpine distro");
 
-            self.ensure_alpine_distro()
+            self.ensure_distro()
                 .await
-                .context("ensuring Alpine WSL2 distro")?;
+                .context("registering MowisAI WSL distro")?;
 
             self.start_wsl2_bridge(&token)
                 .await
@@ -496,7 +490,7 @@ impl VmLauncher for WindowsLauncher {
             .spawn_process(&token, true)
             .await
             .context("spawning QEMU/WHPX")?;
-        drop(child); // detached; continues running
+        drop(child);
 
         self.qemu_fallback
             .wait_for_agent()
