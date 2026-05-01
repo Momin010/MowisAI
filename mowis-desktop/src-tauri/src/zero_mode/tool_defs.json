@@ -1,0 +1,228 @@
+[
+  {
+    "name": "read_file",
+    "description": "Read the entire contents of a file in the workspace.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative file path."
+        }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "read_file_lines",
+    "description": "Read specific lines from a file (e.g., lines 100-110).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative file path."
+        },
+        "start_line": {
+          "type": "integer",
+          "description": "Starting line number (1-indexed, inclusive)."
+        },
+        "end_line": {
+          "type": "integer",
+          "description": "Ending line number (1-indexed, inclusive). Omit to read to end of file."
+        }
+      },
+      "required": ["path", "start_line"]
+    }
+  },
+  {
+    "name": "write_file",
+    "description": "Write (create or overwrite) a file in the workspace.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative path."
+        },
+        "content": {
+          "type": "string",
+          "description": "Full file content to write."
+        }
+      },
+      "required": ["path", "content"]
+    }
+  },
+  {
+    "name": "append_file",
+    "description": "Append text to an existing file (creates it if absent).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative path."
+        },
+        "content": {
+          "type": "string",
+          "description": "Text to append."
+        }
+      },
+      "required": ["path", "content"]
+    }
+  },
+  {
+    "name": "replace_in_file",
+    "description": "Replace all occurrences of a string in a file with another string.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative path."
+        },
+        "old_text": {
+          "type": "string",
+          "description": "Text to find (exact match)."
+        },
+        "new_text": {
+          "type": "string",
+          "description": "Text to replace with."
+        }
+      },
+      "required": ["path", "old_text", "new_text"]
+    }
+  },
+  {
+    "name": "edit_file_lines",
+    "description": "Replace specific lines in a file (e.g., replace lines 100-110 with new content).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative path."
+        },
+        "start_line": {
+          "type": "integer",
+          "description": "Starting line number (1-indexed, inclusive)."
+        },
+        "end_line": {
+          "type": "integer",
+          "description": "Ending line number (1-indexed, inclusive)."
+        },
+        "new_content": {
+          "type": "string",
+          "description": "New content to replace the specified lines."
+        }
+      },
+      "required": ["path", "start_line", "end_line", "new_content"]
+    }
+  },
+  {
+    "name": "list_directory",
+    "description": "List files and directories at a given path (defaults to workspace root).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative path, or '.' for root."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "create_directory",
+    "description": "Create a directory (and parents) in the workspace.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative directory path."
+        }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "delete_file",
+    "description": "Delete a file or empty directory from the workspace.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative path to delete."
+        }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "move_file",
+    "description": "Move or rename a file within the workspace.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "Source workspace-relative path."
+        },
+        "to": {
+          "type": "string",
+          "description": "Destination workspace-relative path."
+        }
+      },
+      "required": ["from", "to"]
+    }
+  },
+  {
+    "name": "search_files",
+    "description": "Recursively search for files whose name contains a given string.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Substring to search for in file names."
+        }
+      },
+      "required": ["pattern"]
+    }
+  },
+  {
+    "name": "search_in_files",
+    "description": "Search for text content within files (grep-like search).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Text pattern to search for in file contents."
+        },
+        "path": {
+          "type": "string",
+          "description": "Optional: limit search to specific directory or file pattern."
+        }
+      },
+      "required": ["pattern"]
+    }
+  },
+  {
+    "name": "run_command",
+    "description": "Run a shell command inside the workspace directory (30-second timeout). Use sparingly.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute."
+        }
+      },
+      "required": ["command"]
+    }
+  }
+]

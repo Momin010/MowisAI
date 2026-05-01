@@ -14,13 +14,17 @@ use std::time::Duration;
 // ── Tool name constants ───────────────────────────────────────────────────────
 
 pub const READ_FILE:        &str = "read_file";
+pub const READ_FILE_LINES:  &str = "read_file_lines";
 pub const WRITE_FILE:       &str = "write_file";
 pub const APPEND_FILE:      &str = "append_file";
+pub const REPLACE_IN_FILE:  &str = "replace_in_file";
+pub const EDIT_FILE_LINES:  &str = "edit_file_lines";
 pub const LIST_DIRECTORY:   &str = "list_directory";
 pub const CREATE_DIRECTORY: &str = "create_directory";
 pub const DELETE_FILE:      &str = "delete_file";
 pub const MOVE_FILE:        &str = "move_file";
 pub const SEARCH_FILES:     &str = "search_files";
+pub const SEARCH_IN_FILES:  &str = "search_in_files";
 pub const RUN_COMMAND:      &str = "run_command";
 
 // ── Tool schema (OpenAI / Anthropic compatible JSON Schema) ──────────────────
@@ -37,13 +41,26 @@ fn builtin_tool_defs() -> Value {
     serde_json::json!([
         {
             "name": READ_FILE,
-            "description": "Read the contents of a file in the workspace.",
+            "description": "Read the entire contents of a file in the workspace.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Workspace-relative file path." }
                 },
                 "required": ["path"]
+            }
+        },
+        {
+            "name": READ_FILE_LINES,
+            "description": "Read specific lines from a file (e.g., lines 100-110).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Workspace-relative file path." },
+                    "start_line": { "type": "integer", "description": "Starting line number (1-indexed, inclusive)." },
+                    "end_line": { "type": "integer", "description": "Ending line number (1-indexed, inclusive). Omit to read to end of file." }
+                },
+                "required": ["path", "start_line"]
             }
         },
         {
@@ -68,6 +85,33 @@ fn builtin_tool_defs() -> Value {
                     "content": { "type": "string", "description": "Text to append." }
                 },
                 "required": ["path", "content"]
+            }
+        },
+        {
+            "name": REPLACE_IN_FILE,
+            "description": "Replace all occurrences of a string in a file with another string.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Workspace-relative path." },
+                    "old_text": { "type": "string", "description": "Text to find (exact match)." },
+                    "new_text": { "type": "string", "description": "Text to replace with." }
+                },
+                "required": ["path", "old_text", "new_text"]
+            }
+        },
+        {
+            "name": EDIT_FILE_LINES,
+            "description": "Replace specific lines in a file (e.g., replace lines 100-110 with new content).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Workspace-relative path." },
+                    "start_line": { "type": "integer", "description": "Starting line number (1-indexed, inclusive)." },
+                    "end_line": { "type": "integer", "description": "Ending line number (1-indexed, inclusive)." },
+                    "new_content": { "type": "string", "description": "New content to replace the specified lines." }
+                },
+                "required": ["path", "start_line", "end_line", "new_content"]
             }
         },
         {
@@ -127,6 +171,18 @@ fn builtin_tool_defs() -> Value {
             }
         },
         {
+            "name": SEARCH_IN_FILES,
+            "description": "Search for text content within files (grep-like search).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Text pattern to search for in file contents." },
+                    "path": { "type": "string", "description": "Optional: limit search to specific directory or file pattern." }
+                },
+                "required": ["pattern"]
+            }
+        },
+        {
             "name": RUN_COMMAND,
             "description": "Run a shell command inside the workspace directory (30-second timeout). Use sparingly.",
             "parameters": {
@@ -147,13 +203,17 @@ fn builtin_tool_defs() -> Value {
 pub fn execute_tool(workspace: &Path, name: &str, args: &Value) -> String {
     match name {
         READ_FILE        => tool_read_file(workspace, args),
+        READ_FILE_LINES  => tool_read_file_lines(workspace, args),
         WRITE_FILE       => tool_write_file(workspace, args),
         APPEND_FILE      => tool_append_file(workspace, args),
+        REPLACE_IN_FILE  => tool_replace_in_file(workspace, args),
+        EDIT_FILE_LINES  => tool_edit_file_lines(workspace, args),
         LIST_DIRECTORY   => tool_list_directory(workspace, args),
         CREATE_DIRECTORY => tool_create_directory(workspace, args),
         DELETE_FILE      => tool_delete_file(workspace, args),
         MOVE_FILE        => tool_move_file(workspace, args),
         SEARCH_FILES     => tool_search_files(workspace, args),
+        SEARCH_IN_FILES  => tool_search_in_files(workspace, args),
         RUN_COMMAND      => tool_run_command(workspace, args),
         other            => format!("unknown tool: {other}"),
     }
@@ -202,6 +262,10 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(|v| v.as_str()).unwrap_or("")
 }
 
+fn int_arg(args: &Value, key: &str) -> Option<usize> {
+    args.get(key).and_then(|v| v.as_i64()).map(|n| n as usize)
+}
+
 // ── Individual tools ──────────────────────────────────────────────────────────
 
 fn tool_read_file(workspace: &Path, args: &Value) -> String {
@@ -220,6 +284,46 @@ fn tool_read_file(workspace: &Path, args: &Value) -> String {
                     let lines = content.lines().count();
                     let bytes = content.len();
                     format!("// {rel} ({lines} lines, {bytes} bytes)\n{content}")
+                }
+                Err(e) => format!("error reading {rel}: {e}"),
+            }
+        }
+    }
+}
+
+fn tool_read_file_lines(workspace: &Path, args: &Value) -> String {
+    let rel = str_arg(args, "path");
+    let start = int_arg(args, "start_line");
+    let end = int_arg(args, "end_line");
+    
+    if start.is_none() {
+        return "error: start_line is required".to_string();
+    }
+    let start = start.unwrap();
+    
+    match safe_path(workspace, rel) {
+        Err(e) => format!("error: {e}"),
+        Ok(p) => {
+            if !p.exists() {
+                return format!("error: file not found: {rel}");
+            }
+            match fs::read_to_string(&p) {
+                Ok(content) => {
+                    let all_lines: Vec<&str> = content.lines().collect();
+                    let total = all_lines.len();
+                    
+                    if start < 1 || start > total {
+                        return format!("error: start_line {start} out of range (file has {total} lines)");
+                    }
+                    
+                    let end_line = end.unwrap_or(total).min(total);
+                    if end_line < start {
+                        return format!("error: end_line {end_line} is before start_line {start}");
+                    }
+                    
+                    let selected: Vec<&str> = all_lines[(start - 1)..end_line].to_vec();
+                    let result = selected.join("\n");
+                    format!("// {rel} (lines {start}-{end_line} of {total})\n{result}")
                 }
                 Err(e) => format!("error reading {rel}: {e}"),
             }
@@ -363,6 +467,148 @@ fn tool_move_file(workspace: &Path, args: &Value) -> String {
     match fs::rename(&from, &to) {
         Ok(()) => format!("ok: moved {from_rel} → {to_rel}"),
         Err(e) => format!("error moving {from_rel} → {to_rel}: {e}"),
+    }
+}
+
+fn tool_replace_in_file(workspace: &Path, args: &Value) -> String {
+    let rel = str_arg(args, "path");
+    let old_text = str_arg(args, "old_text");
+    let new_text = str_arg(args, "new_text");
+    
+    if old_text.is_empty() {
+        return "error: old_text cannot be empty".to_string();
+    }
+    
+    match safe_path(workspace, rel) {
+        Err(e) => format!("error: {e}"),
+        Ok(p) => {
+            if !p.exists() {
+                return format!("error: file not found: {rel}");
+            }
+            match fs::read_to_string(&p) {
+                Ok(content) => {
+                    let count = content.matches(old_text).count();
+                    if count == 0 {
+                        return format!("error: text not found in {rel}");
+                    }
+                    let new_content = content.replace(old_text, new_text);
+                    match fs::write(&p, new_content) {
+                        Ok(()) => format!("ok: replaced {count} occurrence(s) in {rel}"),
+                        Err(e) => format!("error writing {rel}: {e}"),
+                    }
+                }
+                Err(e) => format!("error reading {rel}: {e}"),
+            }
+        }
+    }
+}
+
+fn tool_edit_file_lines(workspace: &Path, args: &Value) -> String {
+    let rel = str_arg(args, "path");
+    let start = int_arg(args, "start_line");
+    let end = int_arg(args, "end_line");
+    let new_content = str_arg(args, "new_content");
+    
+    if start.is_none() || end.is_none() {
+        return "error: start_line and end_line are required".to_string();
+    }
+    let start = start.unwrap();
+    let end = end.unwrap();
+    
+    match safe_path(workspace, rel) {
+        Err(e) => format!("error: {e}"),
+        Ok(p) => {
+            if !p.exists() {
+                return format!("error: file not found: {rel}");
+            }
+            match fs::read_to_string(&p) {
+                Ok(content) => {
+                    let mut lines: Vec<&str> = content.lines().collect();
+                    let total = lines.len();
+                    
+                    if start < 1 || start > total {
+                        return format!("error: start_line {start} out of range (file has {total} lines)");
+                    }
+                    if end < start || end > total {
+                        return format!("error: end_line {end} out of range or before start_line");
+                    }
+                    
+                    // Replace lines [start-1..end] with new_content
+                    let new_lines: Vec<&str> = new_content.lines().collect();
+                    lines.splice((start - 1)..end, new_lines);
+                    
+                    let result = lines.join("\n");
+                    match fs::write(&p, result) {
+                        Ok(()) => format!("ok: replaced lines {start}-{end} in {rel}"),
+                        Err(e) => format!("error writing {rel}: {e}"),
+                    }
+                }
+                Err(e) => format!("error reading {rel}: {e}"),
+            }
+        }
+    }
+}
+
+fn tool_search_in_files(workspace: &Path, args: &Value) -> String {
+    let pattern = str_arg(args, "pattern");
+    let search_path = str_arg(args, "path");
+    
+    if pattern.is_empty() {
+        return "error: pattern is required".to_string();
+    }
+    
+    let root = if search_path.is_empty() {
+        workspace.to_path_buf()
+    } else {
+        match safe_path(workspace, search_path) {
+            Err(e) => return format!("error: {e}"),
+            Ok(p) => p,
+        }
+    };
+    
+    let mut results: Vec<String> = Vec::new();
+    search_content_recursive(&root, workspace, pattern, &mut results, 0);
+    
+    if results.is_empty() {
+        format!("no matches found for '{pattern}'")
+    } else {
+        let count = results.len();
+        let display = if count > 50 {
+            results.truncate(50);
+            format!("found {count} matches (showing first 50):\n{}", results.join("\n"))
+        } else {
+            format!("found {count} match(es):\n{}", results.join("\n"))
+        };
+        display
+    }
+}
+
+fn search_content_recursive(dir: &Path, workspace: &Path, pattern: &str, out: &mut Vec<String>, depth: usize) {
+    if depth > 8 || out.len() >= 50 { return; }
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    
+    for entry in entries.filter_map(|e| e.ok()) {
+        if out.len() >= 50 { break; }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        
+        if name.starts_with('.') { continue; }
+        
+        if path.is_file() {
+            // Only search text files (skip binaries)
+            if let Ok(content) = fs::read_to_string(&path) {
+                for (line_num, line) in content.lines().enumerate() {
+                    if line.contains(pattern) {
+                        if let Ok(rel) = path.strip_prefix(workspace) {
+                            out.push(format!("{}:{}: {}", rel.display(), line_num + 1, line.trim()));
+                            if out.len() >= 50 { break; }
+                        }
+                    }
+                }
+            }
+        } else if path.is_dir() {
+            search_content_recursive(&path, workspace, pattern, out, depth + 1);
+        }
     }
 }
 
