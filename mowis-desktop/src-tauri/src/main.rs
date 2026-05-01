@@ -508,6 +508,24 @@ pub enum BridgeEvent {
     OrchestrationComplete,
     OrchestrationFailed(String),
     SimulationTick { tasks_done: usize, active_agents: usize, tokens_delta: u64 },
+    /// Compact file change summary to show in chat (icon + filename)
+    FileChanges(Vec<FileChange>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub action: FileAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileAction {
+    Created,
+    Modified,
+    Deleted,
+    Read,
+    Moved,
 }
 
 fn start_bridge(
@@ -707,6 +725,11 @@ async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app: &ta
                 log::warn!("Failed to persist agent message: {err}");
             }
             let _ = app.emit("chat_message", &msg);
+        }
+
+        BridgeEvent::FileChanges(changes) => {
+            // Emit file changes as a compact visual summary in chat
+            let _ = app.emit("file_changes", &changes);
         }
 
         BridgeEvent::OrchestrationComplete => {

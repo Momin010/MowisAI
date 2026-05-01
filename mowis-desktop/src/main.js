@@ -926,6 +926,12 @@ async function setupListeners() {
     appendAgentChunk(chunk);
   });
 
+  await listen('file_changes', (e) => {
+    const changes = e.payload;
+    if (!changes || !Array.isArray(changes) || changes.length === 0) return;
+    appendFileChanges(changes);
+  });
+
   await listen('task_added', (e) => {
     const task = e.payload;
     if (!task) return;
@@ -1128,6 +1134,67 @@ function finalizeStreaming() {
   const text = $('streaming-text');
   if (text) text.removeAttribute('id');
   State.streamingContent = '';
+}
+
+function appendFileChanges(changes) {
+  const container = $('chat-messages');
+  if (!container) return;
+
+  // Finalize any streaming first
+  if (State.isStreaming) {
+    finalizeStreaming();
+  }
+
+  const row = document.createElement('div');
+  row.className = 'msg-row file-changes';
+  
+  const card = document.createElement('div');
+  card.className = 'file-changes-card';
+  
+  changes.forEach(change => {
+    const item = document.createElement('div');
+    item.className = 'file-change-item';
+    item.dataset.action = change.action;
+    item.title = change.path; // Tooltip shows full path
+    
+    // Icon based on action
+    const icon = document.createElement('span');
+    icon.className = 'file-icon';
+    icon.innerHTML = getFileActionIcon(change.action);
+    
+    // Filename only (not full path)
+    const filename = change.path.split('/').pop() || change.path;
+    const label = document.createElement('span');
+    label.className = 'file-label';
+    label.textContent = filename;
+    
+    item.appendChild(icon);
+    item.appendChild(label);
+    
+    // Click to open diff (future feature)
+    item.addEventListener('click', () => {
+      toast(`Open diff for ${change.path}`, 'info');
+      // TODO: Implement diff panel
+    });
+    
+    card.appendChild(item);
+  });
+  
+  row.appendChild(card);
+  container.appendChild(row);
+  scrollToBottom(container);
+}
+
+function getFileActionIcon(action) {
+  // Using SVG icons (Lucide-style)
+  const icons = {
+    created: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>`,
+    modified: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M10.4 12.6a2 2 0 1 1 3 3L8 21l-4 1 1-4Z"></path></svg>`,
+    deleted: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="9" y1="15" x2="15" y2="15"></line></svg>`,
+    read: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M16 13H8"></path><path d="M16 17H8"></path><path d="M10 9H8"></path></svg>`,
+    moved: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><polyline points="10 9 9 9 8 9"></polyline><path d="m15 14-3-3 3-3"></path></svg>`,
+  };
+  return icons[action] || icons.modified;
 }
 
 function createMessageRow(type, content) {

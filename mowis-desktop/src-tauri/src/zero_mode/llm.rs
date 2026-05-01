@@ -101,9 +101,17 @@ async fn call_gemini(
     messages: &[LlmMessage],
     tool_defs: &[Value],
 ) -> Result<LlmResponse> {
-    let key = &config.api_key;
+    // Try config first, then fall back to environment variable
+    let key = if !config.api_key.is_empty() {
+        config.api_key.clone()
+    } else {
+        std::env::var("GEMINI_API_KEY")
+            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+            .unwrap_or_default()
+    };
+    
     if key.is_empty() {
-        bail!("Gemini API key is not set — configure it in Settings");
+        bail!("Gemini API key is not set — configure it in Settings or set GEMINI_API_KEY environment variable");
     }
 
     let model = if config.model.is_empty() { "gemini-2.0-flash" } else { config.model.as_str() };
@@ -225,9 +233,15 @@ async fn call_anthropic(
     messages: &[LlmMessage],
     tool_defs: &[Value],
 ) -> Result<LlmResponse> {
-    let key = &config.api_key;
+    // Try config first, then fall back to environment variable
+    let key = if !config.api_key.is_empty() {
+        config.api_key.clone()
+    } else {
+        std::env::var("ANTHROPIC_API_KEY").unwrap_or_default()
+    };
+    
     if key.is_empty() {
-        bail!("Anthropic API key is not set — configure it in Settings");
+        bail!("Anthropic API key is not set — configure it in Settings or set ANTHROPIC_API_KEY environment variable");
     }
 
     let model = if config.model.is_empty() { "claude-sonnet-4-6" } else { config.model.as_str() };
@@ -358,9 +372,28 @@ async fn call_openai_compat(
     messages: &[LlmMessage],
     tool_defs: &[Value],
 ) -> Result<LlmResponse> {
-    let key = &config.api_key;
+    // Try config first, then fall back to environment variable
+    let key = if !config.api_key.is_empty() {
+        config.api_key.clone()
+    } else {
+        // Fall back to environment variables based on provider
+        let env_var = match config.provider.as_str() {
+            "groq" => "GROQ_API_KEY",
+            "grok" => "XAI_API_KEY",
+            "openai" => "OPENAI_API_KEY",
+            _ => "API_KEY",
+        };
+        std::env::var(env_var).unwrap_or_default()
+    };
+    
     if key.is_empty() {
-        bail!("API key is not set — configure it in Settings");
+        let env_hint = match config.provider.as_str() {
+            "groq" => "GROQ_API_KEY",
+            "grok" => "XAI_API_KEY",
+            "openai" => "OPENAI_API_KEY",
+            _ => "API_KEY",
+        };
+        bail!("API key is not set — configure it in Settings or set {env_hint} environment variable");
     }
 
     let default_model = match config.provider.as_str() {

@@ -311,6 +311,25 @@ impl WindowsLauncher {
                 );
             }
             log::info!("agentd installed successfully");
+
+            // Verify the binary is executable and check its architecture
+            let verify_out = win_cmd("wsl.exe")
+                .args(["-d", WSL_DISTRO, "--", "sh", "-c", 
+                    "file /usr/local/bin/agentd && ldd /usr/local/bin/agentd 2>&1 | head -20"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await;
+
+            if let Ok(out) = verify_out {
+                let info = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                log::info!("agentd binary info:\n{}", info);
+                
+                // Check if it's a static binary (should show "not a dynamic executable")
+                if !info.contains("statically linked") && !info.contains("not a dynamic executable") {
+                    log::warn!("agentd appears to be dynamically linked - may have missing dependencies");
+                }
+            }
         }
 
         // Write auth token.
@@ -376,6 +395,38 @@ impl WindowsLauncher {
         }
 
         sleep(Duration::from_secs(2)).await;
+
+        // Verify agentd is actually running
+        let check_out = win_cmd("wsl.exe")
+            .args(["-d", WSL_DISTRO, "--", "pgrep", "-f", "agentd"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await;
+
+        if let Ok(out) = check_out {
+            if !out.status.success() {
+                // agentd crashed or never started - read the log
+                let log_out = win_cmd("wsl.exe")
+                    .args(["-d", WSL_DISTRO, "--", "cat", "/var/log/agentd.log"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .await;
+                
+                let log_content = if let Ok(log) = log_out {
+                    String::from_utf8_lossy(&log.stdout).trim().to_string()
+                } else {
+                    "(could not read log)".to_string()
+                };
+
+                anyhow::bail!(
+                    "agentd failed to start or crashed immediately.\n\
+                     Log output:\n{}",
+                    if log_content.is_empty() { "(empty log - binary may be missing dependencies)" } else { &log_content }
+                );
+            }
+        }
 
         // Bridge Unix socket → TCP so Windows can reach it.
         let socat_cmd = format!(
