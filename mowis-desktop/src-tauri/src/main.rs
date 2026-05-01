@@ -3,6 +3,7 @@
 mod platform;
 mod backend;
 mod sandbox;
+mod zero_mode;
 
 use anyhow::Result;
 use backend::BackendBridge;
@@ -216,6 +217,9 @@ pub struct AppState {
 
     // Active soft sandbox for the current session (None when sandbox is off or no session).
     pub active_sandbox: Mutex<Option<SandboxInfo>>,
+
+    // Workspace created by zero mode (None when not in zero mode).
+    pub zero_workspace: Mutex<Option<zero_mode::ZeroWorkspaceInfo>>,
 }
 
 impl AppState {
@@ -254,6 +258,7 @@ impl AppState {
             storage_path,
             cmd_tx: Mutex::new(None),
             active_sandbox: Mutex::new(None),
+            zero_workspace: Mutex::new(None),
         }
     }
 }
@@ -480,6 +485,13 @@ pub enum BridgeCommand {
         mode: String,
         repo_context: Option<RepositoryContext>,
     },
+    /// Zero-Protection mode — direct LLM + native workspace, no agentd.
+    StartZeroMode {
+        session_id: String,
+        prompt: String,
+        config: Config,
+        workspace: zero_mode::ZeroWorkspaceInfo,
+    },
     StopOrchestration,
     CheckSocket,
 }
@@ -582,6 +594,12 @@ fn start_bridge(
                         BridgeCommand::StartOrchestration { session_id, prompt, max_agents, mode, repo_context } => {
                             tokio::spawn(async move {
                                 run_orchestration(session_id, prompt, max_agents, mode, repo_context, b, tx).await;
+                            });
+                        }
+
+                        BridgeCommand::StartZeroMode { session_id, prompt, config, workspace } => {
+                            tokio::spawn(async move {
+                                zero_mode::run_zero_session(session_id, prompt, config, workspace, tx).await;
                             });
                         }
                     }
@@ -1359,13 +1377,27 @@ async fn start_session(
 
     let tx_opt = state.cmd_tx.lock().unwrap().clone();
     if let Some(tx) = tx_opt {
-        let _ = tx.send(BridgeCommand::StartOrchestration {
-            session_id: session_id.clone(),
-            prompt,
-            max_agents: cfg.max_agents,
-            mode: resolved_mode,
-            repo_context,
-        }).await;
+        if resolved_mode == "zero" {
+            // Zero-Protection mode: create native workspace, bypass agentd entirely.
+            let ws = zero_mode::workspace::create_workspace(&session_id)
+                .map_err(|e| format!("create zero workspace: {e}"))?;
+            *state.zero_workspace.lock().unwrap() = Some(ws.clone());
+            let _ = tx.send(BridgeCommand::StartZeroMode {
+                session_id: session_id.clone(),
+                prompt,
+                config: cfg,
+                workspace: ws,
+            }).await;
+        } else {
+            *state.zero_workspace.lock().unwrap() = None;
+            let _ = tx.send(BridgeCommand::StartOrchestration {
+                session_id: session_id.clone(),
+                prompt,
+                max_agents: cfg.max_agents,
+                mode: resolved_mode,
+                repo_context,
+            }).await;
+        }
     }
 
     Ok(session_id)
@@ -1440,6 +1472,18 @@ async fn clear_current_session(state: State<'_, Arc<AppState>>) -> Result<(), St
     *state.tokens_total.lock().unwrap() = 0;
     *state.tool_calls_total.lock().unwrap() = 0;
     save_state(&state)
+}
+
+/// Return the zero-mode workspace for the current session, or null.
+#[tauri::command]
+async fn get_zero_workspace(state: State<'_, Arc<AppState>>) -> Result<Option<zero_mode::ZeroWorkspaceInfo>, String> {
+    Ok(state.zero_workspace.lock().unwrap().clone())
+}
+
+/// Return the base directory where all zero-mode workspaces are created.
+#[tauri::command]
+async fn get_zero_workspace_base() -> Result<String, String> {
+    Ok(zero_mode::workspace::workspace_base_dir().to_string_lossy().into_owned())
 }
 
 /// Return the active sandbox for the current session, or null if none.
@@ -1595,6 +1639,8 @@ fn main() {
             get_sandbox_status,
             discard_sandbox,
             get_sandbox_size,
+            get_zero_workspace,
+            get_zero_workspace_base,
         ])
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");
