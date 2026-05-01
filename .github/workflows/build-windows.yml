@@ -74,6 +74,12 @@ jobs:
           $dst = "src-tauri\resources\agentd-linux-x86_64"
           if (Test-Path $src) { Move-Item $src $dst }
 
+      - name: Fetch Alpine rootfs
+        shell: bash
+        run: |
+          cd src-tauri/resources
+          bash fetch-resources.sh
+
       - name: Build Tauri NSIS installer
         run: npx tauri build --ci --bundles nsis
 
