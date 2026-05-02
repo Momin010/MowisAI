@@ -1354,6 +1354,8 @@ async fn start_session(
 
     // Resolve repo context, optionally redirecting project_path to a sandbox upper_dir.
     // NOTE: zero mode does NOT use repo_context (it writes directly to a workspace on disk).
+    // Clone before the if-else because the else branch moves project_path.
+    let project_path_zero = project_path.clone();
     let repo_context = if resolved_mode == "zero" {
         None
     } else {
@@ -1437,7 +1439,7 @@ async fn start_session(
             //
             // If the user picked a repository, we treat that directory as the workspace (not an "attachment").
             // Otherwise we create a new workspace under the default base dir.
-            let ws = match project_path.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let ws = match project_path_zero.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
                 Some(path) => zero_mode::workspace::use_existing_workspace(&session_id, path)
                     .map_err(|e| format!("use repository as zero workspace: {e}"))?,
                 None => zero_mode::workspace::create_workspace(&session_id)
