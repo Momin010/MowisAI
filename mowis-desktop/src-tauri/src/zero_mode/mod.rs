@@ -166,10 +166,11 @@ async fn run_chat_mode(
     }
     
     // Save assistant response to history
+    let response_text = response.text.clone();
     messages.push(LlmMessage::assistant_text(response.text));
     append_to_session(&session_id, vec![
         LlmMessage::user(prompt),
-        LlmMessage::assistant_text(response.text),
+        LlmMessage::assistant_text(response_text),
     ]);
 
     // NO OrchestrationComplete in chat mode - session stays active for follow-up messages
