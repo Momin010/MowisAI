@@ -531,7 +531,7 @@ pub struct FileChange {
     pub content: Option<String>, // Full file content for diff view
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum FileAction {
     Created,

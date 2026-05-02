@@ -63,6 +63,35 @@ fn load_frontend_skills() -> Option<String> {
 
 pub use workspace::WorkspaceInfo as ZeroWorkspaceInfo;
 
+// ── Session State Management ──────────────────────────────────────────────────
+
+use std::sync::Mutex;
+use std::collections::HashMap;
+
+lazy_static::lazy_static! {
+    static ref SESSION_HISTORY: Mutex<HashMap<String, Vec<LlmMessage>>> = Mutex::new(HashMap::new());
+}
+
+fn get_session_history(session_id: &str) -> Vec<LlmMessage> {
+    SESSION_HISTORY
+        .lock()
+        .unwrap()
+        .get(session_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn append_to_session(session_id: &str, messages: Vec<LlmMessage>) {
+    let mut history = SESSION_HISTORY.lock().unwrap();
+    history.entry(session_id.to_string())
+        .or_insert_with(Vec::new)
+        .extend(messages);
+}
+
+fn clear_session(session_id: &str) {
+    SESSION_HISTORY.lock().unwrap().remove(session_id);
+}
+
 /// Run a full zero-mode session.  Emits BridgeEvents for the UI.
 /// Never panics; errors are surfaced via OrchestrationFailed.
 pub async fn run_zero_session(
@@ -89,7 +118,7 @@ pub async fn run_zero_session(
 
 /// Chat mode — no tools, just conversation
 async fn run_chat_mode(
-    _session_id: String,
+    session_id: String,
     prompt: String,
     config: Config,
     _workspace: WorkspaceInfo,
@@ -111,7 +140,11 @@ async fn run_chat_mode(
         You're in chat mode - you cannot execute code or modify files right now. \
         If the user wants to build something, they should ask explicitly (e.g., 'build a login page').";
 
-    let messages = vec![LlmMessage::user(prompt)];
+    // Load previous conversation history
+    let mut messages = get_session_history(&session_id);
+    
+    // Append new user message
+    messages.push(LlmMessage::user(prompt.clone()));
 
     // Call LLM without tools
     let response = match llm::call_llm(&config, system_prompt, &messages, &[]).await {
@@ -131,13 +164,20 @@ async fn run_chat_mode(
             sleep(Duration::from_millis(12)).await;
         }
     }
+    
+    // Save assistant response to history
+    messages.push(LlmMessage::assistant_text(response.text));
+    append_to_session(&session_id, vec![
+        LlmMessage::user(prompt),
+        LlmMessage::assistant_text(response.text),
+    ]);
 
     // NO OrchestrationComplete in chat mode - session stays active for follow-up messages
 }
 
 /// Build mode — full tool-calling loop
 async fn run_build_mode(
-    _session_id: String,
+    session_id: String,
     prompt: String,
     config: Config,
     workspace: WorkspaceInfo,
@@ -170,11 +210,12 @@ async fn run_build_mode(
         None
     };
 
-    // Build initial conversation.
+    // Build initial conversation - load previous history
     let system_prompt = system_prompt_for(&workspace, frontend_skills.as_deref());
-    let mut messages: Vec<LlmMessage> = vec![
-        LlmMessage::user(prompt.clone()),
-    ];
+    let mut messages: Vec<LlmMessage> = get_session_history(&session_id);
+    
+    // Append new user message
+    messages.push(LlmMessage::user(prompt.clone()));
 
     let mut task_counter: usize = 0;
     let mut total_tool_calls: usize = 0;
@@ -524,6 +565,9 @@ async fn run_build_mode(
             messages.push(LlmMessage::tool_results(improvement_results));
         }
     }
+    
+    // Save conversation history for this session
+    append_to_session(&session_id, messages);
 
     // NO OrchestrationComplete in zero mode - session stays active for follow-up messages
     // The session will naturally pause after inactivity timeout (handled by frontend)
