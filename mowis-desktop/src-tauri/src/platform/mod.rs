@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod checksum;
 pub mod connection;
+pub mod developer_mode;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

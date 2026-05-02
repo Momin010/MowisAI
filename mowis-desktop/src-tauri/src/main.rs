@@ -523,6 +523,12 @@ pub enum BridgeEvent {
 pub struct FileChange {
     pub path: String,
     pub action: FileAction,
+    #[serde(default)]
+    pub lines_added: usize,
+    #[serde(default)]
+    pub lines_deleted: usize,
+    #[serde(default)]
+    pub content: Option<String>, // Full file content for diff view
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1710,7 +1716,28 @@ fn main() {
             get_sandbox_size,
             get_zero_workspace,
             get_zero_workspace_base,
+            get_developer_config,
+            save_developer_config,
+            validate_developer_config,
         ])
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");
+}
+
+
+// ── Developer Mode Commands ───────────────────────────────────────────────────
+
+#[tauri::command]
+async fn get_developer_config() -> Result<platform::developer_mode::DeveloperConfig, String> {
+    Ok(platform::developer_mode::DeveloperConfig::load_or_default())
+}
+
+#[tauri::command]
+async fn save_developer_config(config: platform::developer_mode::DeveloperConfig) -> Result<(), String> {
+    config.save().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn validate_developer_config(config: platform::developer_mode::DeveloperConfig) -> Result<Vec<String>, String> {
+    config.validate().map_err(|e| e.to_string())
 }

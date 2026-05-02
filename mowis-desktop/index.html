@@ -80,6 +80,19 @@
             <div class="engine-option-desc">Use Zero-Protection mode (direct LLM, no sandboxing)</div>
           </div>
         </button>
+        
+        <button class="engine-option-btn engine-option-developer" id="engine-developer">
+          <div class="engine-option-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="16 18 22 12 16 6"/>
+              <polyline points="8 6 2 12 8 18"/>
+            </svg>
+          </div>
+          <div>
+            <div class="engine-option-label">Developer Mode</div>
+            <div class="engine-option-desc">Custom QEMU setup (for advanced users with custom ISO/disk)</div>
+          </div>
+        </button>
       </div>
       
       <div class="engine-help">
@@ -504,3 +517,158 @@
 <script type="module" src="src/main.js"></script>
 </body>
 </html>
+
+
+<!-- ══════════════════ DEVELOPER MODE WIZARD ══════════════════ -->
+<div id="developer-wizard-modal" class="engine-modal hidden" aria-hidden="true">
+  <div class="engine-modal-backdrop"></div>
+  <div class="engine-modal-dialog developer-wizard-dialog" role="dialog" aria-modal="true">
+    <div class="engine-modal-head">
+      <div class="engine-modal-icon">🛠️</div>
+      <div>
+        <div class="engine-modal-title">Developer Mode Configuration</div>
+        <div class="engine-modal-subtitle">Let's configure MowisAI for your custom QEMU setup</div>
+      </div>
+    </div>
+    
+    <div class="engine-modal-body">
+      <!-- Step indicator -->
+      <div class="wizard-steps">
+        <div class="wizard-step active" data-step="1">
+          <div class="wizard-step-number">1</div>
+          <div class="wizard-step-label">QEMU Path</div>
+        </div>
+        <div class="wizard-step" data-step="2">
+          <div class="wizard-step-number">2</div>
+          <div class="wizard-step-label">ISO & Disk</div>
+        </div>
+        <div class="wizard-step" data-step="3">
+          <div class="wizard-step-number">3</div>
+          <div class="wizard-step-label">Mount Config</div>
+        </div>
+        <div class="wizard-step" data-step="4">
+          <div class="wizard-step-number">4</div>
+          <div class="wizard-step-label">Sync Strategy</div>
+        </div>
+      </div>
+      
+      <!-- Step 1: QEMU Path -->
+      <div class="wizard-page active" data-page="1">
+        <div class="wizard-question">Where is your QEMU binary located?</div>
+        <div class="wizard-hint">This is usually in C:\Program Files\qemu\ or a custom folder</div>
+        <div class="wizard-input-group">
+          <input type="text" class="wizard-input" id="dev-qemu-path" placeholder="C:\Users\Public\qemu\qemu-system-x86_64.exe" />
+          <button class="wizard-browse-btn" id="dev-browse-qemu">Browse</button>
+        </div>
+        <div class="wizard-example">Example: C:\Users\Public\qemu\qemu-system-x86_64.exe</div>
+      </div>
+      
+      <!-- Step 2: ISO & Disk -->
+      <div class="wizard-page" data-page="2">
+        <div class="wizard-question">Where are your ISO and disk files?</div>
+        
+        <div class="wizard-field">
+          <label class="wizard-label">ISO File (Alpine Linux)</label>
+          <div class="wizard-input-group">
+            <input type="text" class="wizard-input" id="dev-iso-path" placeholder="alpine-virt-3.19.1-x86_64.iso" />
+            <button class="wizard-browse-btn" id="dev-browse-iso">Browse</button>
+          </div>
+          <div class="wizard-example">Example: C:\Users\Public\mowisai-app\MowisAI Desktop\alpine-minirootfs-x86_64\alpine-virt-3.19.1-x86_64.iso</div>
+        </div>
+        
+        <div class="wizard-field">
+          <label class="wizard-label">Persistent Disk (qcow2)</label>
+          <div class="wizard-input-group">
+            <input type="text" class="wizard-input" id="dev-disk-path" placeholder="momin_disk.qcow2" />
+            <button class="wizard-browse-btn" id="dev-browse-disk">Browse</button>
+          </div>
+          <div class="wizard-example">Example: C:\Users\Public\mowisai-app\momin_disk.qcow2</div>
+        </div>
+        
+        <div class="wizard-field">
+          <label class="wizard-label">RAM (MB)</label>
+          <input type="number" class="wizard-input" id="dev-ram" value="512" min="256" max="4096" />
+        </div>
+      </div>
+      
+      <!-- Step 3: Mount Config -->
+      <div class="wizard-page" data-page="3">
+        <div class="wizard-question">How is your disk mounted inside the VM?</div>
+        
+        <div class="wizard-field">
+          <label class="wizard-label">Device Name</label>
+          <input type="text" class="wizard-input" id="dev-disk-device" value="/dev/vda" />
+          <div class="wizard-hint">Usually /dev/vda, /dev/sda, or /dev/hda</div>
+        </div>
+        
+        <div class="wizard-field">
+          <label class="wizard-label">Mount Point</label>
+          <input type="text" class="wizard-input" id="dev-mount-point" value="/mnt/mowisai" />
+          <div class="wizard-hint">Where the disk is mounted (e.g., /mnt/mowisai)</div>
+        </div>
+        
+        <div class="wizard-field">
+          <label class="wizard-label">agentd Location</label>
+          <input type="text" class="wizard-input" id="dev-agentd-path" value="/mnt/mowisai/agentd" />
+          <div class="wizard-hint">Where agentd binary will be stored on the persistent disk</div>
+        </div>
+        
+        <div class="wizard-field">
+          <label class="wizard-label">TCP Port</label>
+          <input type="number" class="wizard-input" id="dev-agent-port" value="9722" min="1024" max="65535" />
+          <div class="wizard-hint">Port for agentd communication (forwarded to Windows)</div>
+        </div>
+      </div>
+      
+      <!-- Step 4: Sync Strategy -->
+      <div class="wizard-page" data-page="4">
+        <div class="wizard-question">How should file changes be synced to disk?</div>
+        <div class="wizard-hint">Since your system runs in RAM, changes need to be synced to the persistent disk</div>
+        
+        <div class="wizard-radio-group">
+          <label class="wizard-radio">
+            <input type="radio" name="sync-strategy" value="interval" checked />
+            <div class="wizard-radio-content">
+              <div class="wizard-radio-title">⏱️ Auto-sync (Interval)</div>
+              <div class="wizard-radio-desc">Automatically run 'sync' every N seconds (recommended)</div>
+            </div>
+          </label>
+          
+          <div class="wizard-field wizard-sub-field" id="sync-interval-field">
+            <label class="wizard-label">Sync every (seconds)</label>
+            <input type="number" class="wizard-input" id="dev-sync-interval" value="30" min="5" max="300" />
+          </div>
+          
+          <label class="wizard-radio">
+            <input type="radio" name="sync-strategy" value="always" />
+            <div class="wizard-radio-content">
+              <div class="wizard-radio-title">⚡ Auto-sync (Always)</div>
+              <div class="wizard-radio-desc">Sync after every file write (safest but slower)</div>
+            </div>
+          </label>
+          
+          <label class="wizard-radio">
+            <input type="radio" name="sync-strategy" value="manual" />
+            <div class="wizard-radio-content">
+              <div class="wizard-radio-title">🖐️ Manual Sync</div>
+              <div class="wizard-radio-desc">You run 'sync' command yourself when needed</div>
+            </div>
+          </label>
+        </div>
+      </div>
+      
+      <!-- Navigation -->
+      <div class="wizard-nav">
+        <button class="wizard-btn wizard-btn-secondary" id="dev-wizard-back">Back</button>
+        <button class="wizard-btn wizard-btn-primary" id="dev-wizard-next">Next</button>
+        <button class="wizard-btn wizard-btn-primary hidden" id="dev-wizard-finish">Finish & Save</button>
+      </div>
+      
+      <!-- Validation warnings -->
+      <div class="wizard-warnings hidden" id="dev-wizard-warnings">
+        <div class="wizard-warnings-title">⚠️ Configuration Warnings</div>
+        <ul id="dev-warnings-list"></ul>
+      </div>
+    </div>
+  </div>
+</div>

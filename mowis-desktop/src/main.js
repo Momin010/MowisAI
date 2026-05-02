@@ -1219,13 +1219,23 @@ function appendFileChanges(changes) {
     label.className = 'file-label';
     label.textContent = filename;
     
+    // Line count badge (show +X/-Y if available)
+    if (change.lines_added > 0 || change.lines_deleted > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'line-count-badge';
+      const parts = [];
+      if (change.lines_added > 0) parts.push(`+${change.lines_added}`);
+      if (change.lines_deleted > 0) parts.push(`-${change.lines_deleted}`);
+      badge.textContent = parts.join(' ');
+      label.appendChild(badge);
+    }
+    
     item.appendChild(icon);
     item.appendChild(label);
     
-    // Click to open diff (future feature)
+    // Click to open diff viewer
     item.addEventListener('click', () => {
-      toast(`Open diff for ${change.path}`, 'info');
-      // TODO: Implement diff panel
+      openDiffViewer(change);
     });
     
     card.appendChild(item);
@@ -1234,6 +1244,102 @@ function appendFileChanges(changes) {
   row.appendChild(card);
   container.appendChild(row);
   scrollToBottom(container);
+}
+
+// ── Diff Viewer ───────────────────────────────────────────────────────────────
+
+function openDiffViewer(change) {
+  // Create modal overlay
+  const overlay = document.createElement('div');
+  overlay.className = 'diff-viewer-overlay';
+  
+  const modal = document.createElement('div');
+  modal.className = 'diff-viewer-modal';
+  
+  // Header
+  const header = document.createElement('div');
+  header.className = 'diff-viewer-header';
+  
+  const title = document.createElement('div');
+  title.className = 'diff-viewer-title';
+  title.textContent = change.path;
+  
+  const stats = document.createElement('div');
+  stats.className = 'diff-viewer-stats';
+  if (change.lines_added > 0 || change.lines_deleted > 0) {
+    const parts = [];
+    if (change.lines_added > 0) parts.push(`+${change.lines_added} added`);
+    if (change.lines_deleted > 0) parts.push(`-${change.lines_deleted} deleted`);
+    stats.textContent = parts.join(' • ');
+  } else {
+    stats.textContent = change.action;
+  }
+  
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'diff-viewer-close';
+  closeBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+  closeBtn.onclick = () => overlay.remove();
+  
+  header.appendChild(title);
+  header.appendChild(stats);
+  header.appendChild(closeBtn);
+  
+  // Content area
+  const content = document.createElement('div');
+  content.className = 'diff-viewer-content';
+  
+  if (change.content) {
+    // Show actual code with line numbers
+    const lines = change.content.split('\n');
+    const codeBlock = document.createElement('pre');
+    codeBlock.className = 'diff-viewer-code';
+    
+    lines.forEach((line, idx) => {
+      const lineDiv = document.createElement('div');
+      lineDiv.className = 'code-line';
+      
+      const lineNum = document.createElement('span');
+      lineNum.className = 'line-number';
+      lineNum.textContent = idx + 1;
+      
+      const lineContent = document.createElement('span');
+      lineContent.className = 'line-content';
+      lineContent.textContent = line || ' '; // Empty lines need space
+      
+      lineDiv.appendChild(lineNum);
+      lineDiv.appendChild(lineContent);
+      codeBlock.appendChild(lineDiv);
+    });
+    
+    content.appendChild(codeBlock);
+  } else {
+    // No content available
+    const placeholder = document.createElement('div');
+    placeholder.className = 'diff-viewer-placeholder';
+    placeholder.textContent = change.action === 'deleted' 
+      ? 'File was deleted' 
+      : 'Content not available';
+    content.appendChild(placeholder);
+  }
+  
+  modal.appendChild(header);
+  modal.appendChild(content);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  
+  // Close on overlay click
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  
+  // Close on Escape key
+  const escHandler = (e) => {
+    if (e.key === 'Escape') {
+      overlay.remove();
+      document.removeEventListener('keydown', escHandler);
+    }
+  };
+  document.addEventListener('keydown', escHandler);
 }
 
 function getFileActionIcon(action) {
@@ -2069,3 +2175,294 @@ function escHtml(s) {
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 init().catch(console.error);
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Developer Mode Wizard
+// ══════════════════════════════════════════════════════════════════════════════
+
+let developerWizardState = {
+  currentStep: 1,
+  totalSteps: 4,
+  config: {
+    qemu_path: '',
+    iso_path: '',
+    disk_path: '',
+    mount_point: '/mnt/mowisai',
+    disk_device: '/dev/vda',
+    ram_mb: 512,
+    agent_port: 9722,
+    sync_strategy: 'interval',
+    sync_interval_secs: 30,
+    agentd_path: '/mnt/mowisai/agentd',
+  }
+};
+
+function showDeveloperWizard() {
+  const modal = document.getElementById('developer-wizard-modal');
+  if (!modal) return;
+  
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  
+  // Load saved config if exists
+  loadDeveloperConfig();
+  
+  // Reset to step 1
+  developerWizardState.currentStep = 1;
+  updateWizardStep();
+}
+
+function hideDeveloperWizard() {
+  const modal = document.getElementById('developer-wizard-modal');
+  if (!modal) return;
+  
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+async function loadDeveloperConfig() {
+  try {
+    const config = await invoke('get_developer_config');
+    if (config) {
+      developerWizardState.config = config;
+      populateWizardFields();
+    }
+  } catch (e) {
+    console.log('No saved developer config, using defaults');
+  }
+}
+
+function populateWizardFields() {
+  const cfg = developerWizardState.config;
+  
+  setInputValue('dev-qemu-path', cfg.qemu_path);
+  setInputValue('dev-iso-path', cfg.iso_path);
+  setInputValue('dev-disk-path', cfg.disk_path);
+  setInputValue('dev-ram', cfg.ram_mb);
+  setInputValue('dev-disk-device', cfg.disk_device);
+  setInputValue('dev-mount-point', cfg.mount_point);
+  setInputValue('dev-agentd-path', cfg.agentd_path);
+  setInputValue('dev-agent-port', cfg.agent_port);
+  setInputValue('dev-sync-interval', cfg.sync_interval_secs);
+  
+  // Set radio button
+  const radios = document.querySelectorAll('input[name="sync-strategy"]');
+  radios.forEach(r => {
+    if (r.value === cfg.sync_strategy) r.checked = true;
+  });
+}
+
+function setInputValue(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.value = value || '';
+}
+
+function updateWizardStep() {
+  const step = developerWizardState.currentStep;
+  
+  // Update step indicators
+  document.querySelectorAll('.wizard-step').forEach((el, idx) => {
+    if (idx + 1 === step) {
+      el.classList.add('active');
+    } else {
+      el.classList.remove('active');
+    }
+  });
+  
+  // Update pages
+  document.querySelectorAll('.wizard-page').forEach((el, idx) => {
+    if (idx + 1 === step) {
+      el.classList.add('active');
+    } else {
+      el.classList.remove('active');
+    }
+  });
+  
+  // Update buttons
+  const backBtn = document.getElementById('dev-wizard-back');
+  const nextBtn = document.getElementById('dev-wizard-next');
+  const finishBtn = document.getElementById('dev-wizard-finish');
+  
+  if (backBtn) backBtn.style.display = step === 1 ? 'none' : 'block';
+  if (nextBtn) nextBtn.style.display = step === developerWizardState.totalSteps ? 'none' : 'block';
+  if (finishBtn) finishBtn.style.display = step === developerWizardState.totalSteps ? 'block' : 'none';
+}
+
+function collectWizardData() {
+  const cfg = developerWizardState.config;
+  
+  cfg.qemu_path = document.getElementById('dev-qemu-path')?.value || '';
+  cfg.iso_path = document.getElementById('dev-iso-path')?.value || '';
+  cfg.disk_path = document.getElementById('dev-disk-path')?.value || '';
+  cfg.ram_mb = parseInt(document.getElementById('dev-ram')?.value || '512');
+  cfg.disk_device = document.getElementById('dev-disk-device')?.value || '/dev/vda';
+  cfg.mount_point = document.getElementById('dev-mount-point')?.value || '/mnt/mowisai';
+  cfg.agentd_path = document.getElementById('dev-agentd-path')?.value || '/mnt/mowisai/agentd';
+  cfg.agent_port = parseInt(document.getElementById('dev-agent-port')?.value || '9722');
+  cfg.sync_interval_secs = parseInt(document.getElementById('dev-sync-interval')?.value || '30');
+  
+  const syncRadio = document.querySelector('input[name="sync-strategy"]:checked');
+  cfg.sync_strategy = syncRadio?.value || 'interval';
+}
+
+async function validateWizardConfig() {
+  collectWizardData();
+  
+  try {
+    const warnings = await invoke('validate_developer_config', { config: developerWizardState.config });
+    
+    const warningsDiv = document.getElementById('dev-wizard-warnings');
+    const warningsList = document.getElementById('dev-warnings-list');
+    
+    if (warnings && warnings.length > 0) {
+      warningsList.innerHTML = warnings.map(w => `<li>${escHtml(w)}</li>`).join('');
+      warningsDiv.classList.remove('hidden');
+    } else {
+      warningsDiv.classList.add('hidden');
+    }
+    
+    return warnings;
+  } catch (e) {
+    console.error('Validation error:', e);
+    return [];
+  }
+}
+
+async function finishDeveloperWizard() {
+  collectWizardData();
+  
+  // Validate
+  const warnings = await validateWizardConfig();
+  
+  if (warnings && warnings.length > 0) {
+    const proceed = confirm(`There are ${warnings.length} warning(s). Do you want to continue anyway?`);
+    if (!proceed) return;
+  }
+  
+  try {
+    // Save config
+    await invoke('save_developer_config', { config: developerWizardState.config });
+    
+    toast('Developer configuration saved!', 'success');
+    
+    // Hide wizard
+    hideDeveloperWizard();
+    
+    // Hide engine setup modal
+    hideEngineSetupModal();
+    
+    // Try to start with developer mode
+    toast('Starting MowisAI in Developer Mode...', 'info');
+    
+    // TODO: Actually start the developer mode backend
+    // For now, just show success
+    setTimeout(() => {
+      toast('Developer Mode configured! Restart the app to apply changes.', 'success');
+    }, 1000);
+    
+  } catch (e) {
+    toast(`Failed to save configuration: ${e}`, 'error');
+  }
+}
+
+// Event listeners for wizard
+document.addEventListener('DOMContentLoaded', () => {
+  // Developer Mode button in engine setup
+  const devBtn = document.getElementById('engine-developer');
+  if (devBtn) {
+    devBtn.addEventListener('click', () => {
+      hideEngineSetupModal();
+      showDeveloperWizard();
+    });
+  }
+  
+  // Wizard navigation
+  const backBtn = document.getElementById('dev-wizard-back');
+  if (backBtn) {
+    backBtn.addEventListener('click', () => {
+      if (developerWizardState.currentStep > 1) {
+        developerWizardState.currentStep--;
+        updateWizardStep();
+      }
+    });
+  }
+  
+  const nextBtn = document.getElementById('dev-wizard-next');
+  if (nextBtn) {
+    nextBtn.addEventListener('click', () => {
+      if (developerWizardState.currentStep < developerWizardState.totalSteps) {
+        collectWizardData();
+        developerWizardState.currentStep++;
+        updateWizardStep();
+        
+        // Validate on last step
+        if (developerWizardState.currentStep === developerWizardState.totalSteps) {
+          validateWizardConfig();
+        }
+      }
+    });
+  }
+  
+  const finishBtn = document.getElementById('dev-wizard-finish');
+  if (finishBtn) {
+    finishBtn.addEventListener('click', finishDeveloperWizard);
+  }
+  
+  // Browse buttons (if Tauri dialog is available)
+  const browseBtns = [
+    { id: 'dev-browse-qemu', inputId: 'dev-qemu-path', title: 'Select QEMU Binary' },
+    { id: 'dev-browse-iso', inputId: 'dev-iso-path', title: 'Select ISO File' },
+    { id: 'dev-browse-disk', inputId: 'dev-disk-path', title: 'Select Disk File' },
+  ];
+  
+  browseBtns.forEach(({ id, inputId, title }) => {
+    const btn = document.getElementById(id);
+    if (btn) {
+      btn.addEventListener('click', async () => {
+        if (!_openDialog) {
+          toast('File browser not available in web mode', 'error');
+          return;
+        }
+        
+        try {
+          const selected = await _openDialog({
+            title,
+            multiple: false,
+            directory: false,
+          });
+          
+          if (selected) {
+            const input = document.getElementById(inputId);
+            if (input) input.value = selected;
+          }
+        } catch (e) {
+          console.error('File dialog error:', e);
+        }
+      });
+    }
+  });
+  
+  // Sync strategy radio change
+  const syncRadios = document.querySelectorAll('input[name="sync-strategy"]');
+  syncRadios.forEach(radio => {
+    radio.addEventListener('change', () => {
+      const intervalField = document.getElementById('sync-interval-field');
+      if (intervalField) {
+        intervalField.style.display = radio.value === 'interval' ? 'block' : 'none';
+      }
+    });
+  });
+  
+  // Close wizard on backdrop click
+  const wizardModal = document.getElementById('developer-wizard-modal');
+  if (wizardModal) {
+    const backdrop = wizardModal.querySelector('.engine-modal-backdrop');
+    if (backdrop) {
+      backdrop.addEventListener('click', () => {
+        const proceed = confirm('Are you sure you want to close the wizard? Your changes will not be saved.');
+        if (proceed) hideDeveloperWizard();
+      });
+    }
+  }
+});

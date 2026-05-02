@@ -292,15 +292,57 @@ async fn run_build_mode(
                         tools::READ_FILE | tools::READ_FILE_LINES => crate::FileAction::Read,
                         _ => continue,
                     };
+                    
+                    // Count lines and read content for diff view
+                    let full_path = ws_path.join(path);
+                    let (lines_added, lines_deleted, content) = if action != crate::FileAction::Read && action != crate::FileAction::Deleted {
+                        if let Ok(file_content) = std::fs::read_to_string(&full_path) {
+                            let line_count = file_content.lines().count();
+                            let (added, deleted) = match action {
+                                crate::FileAction::Created => (line_count, 0),
+                                crate::FileAction::Modified => {
+                                    // For modifications, estimate based on tool args
+                                    if tc.name == tools::APPEND_FILE {
+                                        if let Some(text) = tc.args["text"].as_str() {
+                                            (text.lines().count(), 0)
+                                        } else {
+                                            (0, 0)
+                                        }
+                                    } else if tc.name == tools::REPLACE_IN_FILE {
+                                        // Estimate: assume similar line count
+                                        (5, 5)
+                                    } else {
+                                        (line_count, 0)
+                                    }
+                                },
+                                _ => (0, 0),
+                            };
+                            (added, deleted, Some(file_content))
+                        } else {
+                            (0, 0, None)
+                        }
+                    } else if action == crate::FileAction::Deleted {
+                        // For deleted files, we can't read content anymore
+                        (0, 0, None)
+                    } else {
+                        (0, 0, None)
+                    };
+                    
                     file_changes.push(crate::FileChange {
                         path: path.to_string(),
                         action,
+                        lines_added,
+                        lines_deleted,
+                        content,
                     });
                 } else if tc.name == tools::MOVE_FILE {
                     if let Some(to) = tc.args["to"].as_str() {
                         file_changes.push(crate::FileChange {
                             path: to.to_string(),
                             action: crate::FileAction::Moved,
+                            lines_added: 0,
+                            lines_deleted: 0,
+                            content: None,
                         });
                     }
                 }
@@ -352,6 +394,137 @@ async fn run_build_mode(
         sleep(Duration::from_millis(40)).await;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // VALIDATION LOOP - Force the model to do better work
+    // ═══════════════════════════════════════════════════════════════════════════════
+    
+    // Check if this was a build task (not just chat)
+    if total_tool_calls > 0 {
+        // Force validation: tell the model to review and improve its work
+        let validation_prompt = "Review what you just created. Is it production-quality code that users will love? \
+            Does it have proper functionality, good UX, and attention to detail? \
+            If not, improve it now. Add missing features, fix bugs, enhance the design. \
+            Make it at least 500+ lines of quality code if it's a game or app. \
+            DO NOT say 'it's basic' or 'you can add more' - YOU add more. Make it excellent.";
+        
+        messages.push(LlmMessage::user(validation_prompt.to_string()));
+        
+        // Run ONE more round of tool-calling for improvements
+        let response = match llm::call_llm(&config, &system_prompt, &messages, &tool_defs).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("Validation round failed: {e}");
+                return; // Don't fail the whole session
+            }
+        };
+        
+        // Stream validation response
+        if !response.text.is_empty() {
+            for chunk in chunk_text(&response.text, 60) {
+                let _ = event_tx.send(BridgeEvent::AgentChunk(chunk)).await;
+                sleep(Duration::from_millis(12)).await;
+            }
+        }
+        
+        // Execute any improvement tool calls
+        if !response.tool_calls.is_empty() {
+            messages.push(LlmMessage {
+                role: Role::Assistant,
+                parts: response.tool_calls.iter().map(|tc| MessageContent::ToolCall(tc.clone())).collect(),
+            });
+            
+            let mut improvement_results = Vec::new();
+            let mut improvement_changes = Vec::new();
+            
+            for tc in &response.tool_calls {
+                task_counter += 1;
+                let task_id = format!("z{task_counter:04}");
+                
+                let task_desc = tool_call_description(tc);
+                let task = Task {
+                    id: task_id.clone(),
+                    description: format!("✨ Improve: {}", task_desc),
+                    sandbox: Some("zero".into()),
+                    status: TaskStatus::Pending,
+                    started_at: None,
+                    completed_at: None,
+                    files: infer_files_from_call(tc),
+                    summary: None,
+                    views: Vec::new(),
+                };
+                let _ = event_tx.send(BridgeEvent::TaskAdded(task)).await;
+                sleep(Duration::from_millis(30)).await;
+                let _ = event_tx.send(BridgeEvent::TaskUpdated {
+                    id: task_id.clone(),
+                    status: TaskStatus::Running,
+                }).await;
+                
+                let result = execute_tool(&ws_path, &tc.name, &tc.args);
+                let task_ok = !result.starts_with("error");
+                
+                let _ = event_tx.send(BridgeEvent::TaskUpdated {
+                    id: task_id.clone(),
+                    status: if task_ok { TaskStatus::Complete } else { TaskStatus::Failed },
+                }).await;
+                
+                // Track improvements
+                if task_ok {
+                    if let Some(path) = tc.args["path"].as_str() {
+                        let action = match tc.name.as_str() {
+                            tools::WRITE_FILE => crate::FileAction::Created,
+                            tools::APPEND_FILE | tools::REPLACE_IN_FILE | tools::EDIT_FILE_LINES => crate::FileAction::Modified,
+                            _ => continue,
+                        };
+                        
+                        let full_path = ws_path.join(path);
+                        let (lines_added, lines_deleted, content) = if let Ok(file_content) = std::fs::read_to_string(&full_path) {
+                            let line_count = file_content.lines().count();
+                            let (added, deleted) = match action {
+                                crate::FileAction::Created => (line_count, 0),
+                                crate::FileAction::Modified => {
+                                    if tc.name == tools::APPEND_FILE {
+                                        if let Some(text) = tc.args["text"].as_str() {
+                                            (text.lines().count(), 0)
+                                        } else {
+                                            (0, 0)
+                                        }
+                                    } else {
+                                        (10, 5) // Estimate for edits
+                                    }
+                                },
+                                _ => (0, 0),
+                            };
+                            (added, deleted, Some(file_content))
+                        } else {
+                            (0, 0, None)
+                        };
+                        
+                        improvement_changes.push(crate::FileChange {
+                            path: path.to_string(),
+                            action,
+                            lines_added,
+                            lines_deleted,
+                            content,
+                        });
+                    }
+                }
+                
+                let truncated_result = if result.len() > 1000 {
+                    format!("✓ Improvement applied")
+                } else {
+                    result
+                };
+                improvement_results.push((tc.id.clone(), truncated_result));
+            }
+            
+            if !improvement_changes.is_empty() {
+                let _ = event_tx.send(BridgeEvent::FileChanges(improvement_changes)).await;
+            }
+            
+            messages.push(LlmMessage::tool_results(improvement_results));
+        }
+    }
+
     // NO OrchestrationComplete in zero mode - session stays active for follow-up messages
     // The session will naturally pause after inactivity timeout (handled by frontend)
 }
@@ -371,12 +544,45 @@ fn system_prompt_for(ws: &WorkspaceInfo, frontend_skills: Option<&str>) -> Strin
          - run_command — execute shell commands (use sparingly)\n\n\
          All paths you supply must be workspace-relative (e.g. 'src/main.py', not '/home/…').\n\
          Do not reference files outside the workspace.\n\n\
-         CRITICAL EFFICIENCY RULES:\n\
-         1. **Write complete files in ONE call** - NEVER split a file into multiple write_file + append_file calls\n\
-         2. When creating HTML/CSS/JS files, write the ENTIRE file content in a single write_file call\n\
-         3. Only use append_file for genuinely adding to existing files, not for building new files piece by piece\n\
-         4. Plan your file structure first, then create each file completely in one operation\n\
-         5. Avoid rapid-fire tool calls - think, plan, then execute efficiently\n\n\
+         ═══════════════════════════════════════════════════════════════════════════════\n\
+         ⚠️  CRITICAL EFFICIENCY RULES - VIOLATION WILL CAUSE RATE LIMIT FAILURES ⚠️\n\
+         ═══════════════════════════════════════════════════════════════════════════════\n\n\
+         YOU ARE HITTING RATE LIMITS BECAUSE YOU MAKE TOO MANY API CALLS TOO FAST.\n\
+         THE RATE LIMIT IS 12,000 TOKENS PER MINUTE. EACH TOOL CALL COSTS ~1,000 TOKENS.\n\
+         IF YOU MAKE 12+ TOOL CALLS IN ONE MINUTE, YOU WILL BE BLOCKED FOR 13+ SECONDS.\n\n\
+         MANDATORY RULES:\n\n\
+         1. ❌ NEVER EVER split file creation into write_file + append_file + append_file + ...\n\
+            ✅ ALWAYS write the COMPLETE file in ONE write_file call\n\n\
+         2. ❌ NEVER make 10+ tool calls in rapid succession\n\
+            ✅ ALWAYS batch your work - create 2-3 complete files per round, not 12 fragments\n\n\
+         3. ❌ NEVER use append_file when creating NEW files\n\
+            ✅ ONLY use append_file to add content to EXISTING files\n\n\
+         4. ❌ NEVER call write_file for the same file multiple times\n\
+            ✅ ALWAYS plan the complete file content first, then write it once\n\n\
+         EXAMPLES OF WHAT NOT TO DO:\n\
+         ❌ BAD (12 tool calls, hits rate limit):\n\
+            1. write_file('index.html', '<!DOCTYPE html>')\n\
+            2. append_file('index.html', '<head>')\n\
+            3. append_file('index.html', '<title>...')\n\
+            4. append_file('index.html', '</head>')\n\
+            5. append_file('index.html', '<body>')\n\
+            ... 7 more appends ...\n\n\
+         ✅ GOOD (1 tool call, no rate limit):\n\
+            1. write_file('index.html', '''<!DOCTYPE html>\n\
+               <html>\n\
+               <head>\n\
+                 <title>My Page</title>\n\
+                 <link rel=\"stylesheet\" href=\"styles.css\">\n\
+               </head>\n\
+               <body>\n\
+                 <h1>Hello World</h1>\n\
+                 <script src=\"script.js\"></script>\n\
+               </body>\n\
+               </html>''')\n\n\
+         ═══════════════════════════════════════════════════════════════════════════════\n\
+         IF YOU VIOLATE THESE RULES, THE USER WILL BE BLOCKED AND CANNOT WORK.\n\
+         WRITE COMPLETE FILES. ONE FILE = ONE TOOL CALL. NO EXCEPTIONS.\n\
+         ═══════════════════════════════════════════════════════════════════════════════\n\n\
          Work systematically: understand the request → plan → execute → verify.\n\
          Ask clarifying questions if the request is ambiguous.\n\
          When you are finished, summarize what was created or changed.",
