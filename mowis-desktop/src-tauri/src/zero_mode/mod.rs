@@ -19,11 +19,11 @@ pub mod workspace;
 pub mod intent;
 
 use intent::{classify_intent, UserIntent};
-use llm::{LlmMessage, LlmResponse, MessageContent, Role, ToolCallRequest};
+use llm::{LlmMessage, MessageContent, Role, ToolCallRequest};
 use tools::{execute_tool, tool_definitions};
 use workspace::WorkspaceInfo;
 
-use crate::{BridgeEvent, Config, Task, TaskStatus};
+use crate::{BridgeEvent, Config, Task, TaskStatus, FileChange, FileAction};
 use std::path::Path;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};

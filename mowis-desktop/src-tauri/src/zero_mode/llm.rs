@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::super::Config; // crate::Config from main.rs
+use crate::Config;
 
 // ── Common message types ──────────────────────────────────────────────────────
 
