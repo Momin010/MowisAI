@@ -1441,7 +1441,7 @@ async fn start_session(
                 Some(path) => zero_mode::workspace::use_existing_workspace(&session_id, path)
                     .map_err(|e| format!("use repository as zero workspace: {e}"))?,
                 None => zero_mode::workspace::create_workspace(&session_id)
-                .map_err(|e| format!("create zero workspace: {e}"))?;
+                    .map_err(|e| format!("create zero workspace: {e}"))?,
             };
             *state.zero_workspace.lock().unwrap() = Some(ws.clone());
             let _ = tx.send(BridgeCommand::StartZeroMode {
