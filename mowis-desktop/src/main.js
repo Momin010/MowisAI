@@ -490,6 +490,11 @@ const State = {
   zeroWorkspacePath: null,  // set when a zero-mode session is active
   fileChanges: [],          // recent FileChange[] batches
   selectedChangePath: null, // selected file path for diff panel
+  diffTree: {
+    query: '',
+    actions: new Set(['created', 'modified', 'deleted', 'moved', 'read']),
+    expanded: new Set(), // folder paths
+  },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -890,7 +895,7 @@ async function init() {
   await runSplash();
 
   // Load config
-  try { State.config = await invoke('get_config'); } catch { State.config = { socket_path: '/tmp/agentd.sock', max_agents: 100, mode: 'auto', provider: 'gemini', model: 'gemini-2.0-flash', api_key: '', gcp_project: '' }; }
+  try { State.config = await invoke('get_config'); } catch { State.config = { socket_path: '/tmp/agentd.sock', max_agents: 100, mode: 'auto', provider: 'gemini', model: 'gemini-2.0-flash', api_key: '', gcp_project: '', gcp_region: 'us-central1' }; }
 
   // System info
   try {
@@ -1577,6 +1582,57 @@ function latestFlattenedChanges() {
   return out;
 }
 
+function buildChangeTree(changes) {
+  const root = { name: '', path: '', kind: 'dir', children: new Map() };
+  for (const c of changes) {
+    const parts = String(c.path || '').split('/').filter(Boolean);
+    let cur = root;
+    let curPath = '';
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      curPath = curPath ? `${curPath}/${part}` : part;
+      const isLeaf = i === parts.length - 1;
+      if (isLeaf) {
+        cur.children.set(curPath, { name: part, path: curPath, kind: 'file', change: c });
+      } else {
+        if (!cur.children.has(curPath)) {
+          cur.children.set(curPath, { name: part, path: curPath, kind: 'dir', children: new Map() });
+        }
+        cur = cur.children.get(curPath);
+      }
+    }
+  }
+  return root;
+}
+
+function treeToRows(node, depth, rows, opts) {
+  const { query, actions, expanded } = opts;
+  const kids = [...(node.children?.values() || [])];
+  kids.sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  for (const child of kids) {
+    if (child.kind === 'file') {
+      const c = child.change;
+      const okAction = actions.has(String(c.action));
+      const okQuery = !query || child.path.toLowerCase().includes(query);
+      if (!okAction || !okQuery) continue;
+      rows.push({ kind: 'file', depth, path: c.path, name: child.name, action: c.action });
+      continue;
+    }
+
+    const isOpen = expanded.has(child.path);
+    const tmp = [];
+    treeToRows(child, depth + 1, tmp, opts);
+    if (tmp.length === 0) continue;
+
+    rows.push({ kind: 'dir', depth, path: child.path, name: child.name, open: isOpen, count: tmp.filter(r => r.kind === 'file').length });
+    if (isOpen) rows.push(...tmp);
+  }
+}
+
 function renderDiffPanel() {
   const panel = $('task-panel');
   if (!panel) return;
@@ -1592,17 +1648,95 @@ function renderDiffPanel() {
   if (!body || !detail) return;
 
   const changes = latestFlattenedChanges();
-  body.innerHTML = changes.length === 0
-    ? `<div class="task-row"><div class="task-desc">No file changes yet</div></div>`
-    : changes.map(c => `
-      <div class="task-row ${State.selectedChangePath === c.path ? 'selected' : ''}" data-path="${escHtml(c.path)}">
-        <span class="task-dot ${c.action}"></span>
-        <div class="task-desc">${escHtml(c.path.split('/').pop() || c.path)}</div>
-        <div class="task-sb">${escHtml(c.action)}</div>
-      </div>
-    `).join('');
+  const tree = buildChangeTree(changes);
+  const q = (State.diffTree?.query || '').trim().toLowerCase();
+  const actions = State.diffTree?.actions || new Set(['created', 'modified', 'deleted', 'moved', 'read']);
+  const expanded = State.diffTree?.expanded || new Set();
+  const rows = [];
+  treeToRows(tree, 0, rows, { query: q, actions, expanded });
 
-  body.querySelectorAll('.task-row').forEach(row => {
+  const actionBtn = (id, label) => {
+    const on = actions.has(id);
+    return `<button class="diff-filter ${on ? 'on' : ''}" data-action="${escHtml(id)}">${escHtml(label)}</button>`;
+  };
+
+  const controls = `
+    <div class="diff-tree-controls">
+      <input class="diff-tree-search" id="diff-tree-search" placeholder="Search files…" value="${escHtml(State.diffTree?.query || '')}" />
+      <div class="diff-filter-row">
+        ${actionBtn('created','Created')}
+        ${actionBtn('modified','Modified')}
+        ${actionBtn('deleted','Deleted')}
+        ${actionBtn('moved','Moved')}
+        ${actionBtn('read','Read')}
+        <button class="diff-filter ghost" id="diff-filter-all">All</button>
+        <button class="diff-filter ghost" id="diff-filter-none">None</button>
+        <button class="diff-filter ghost" id="diff-collapse-all">Collapse</button>
+      </div>
+    </div>
+  `;
+
+  const rowsHtml = changes.length === 0
+    ? `<div class="task-row"><div class="task-desc">No file changes yet</div></div>`
+    : rows.map(r => {
+        const pad = `style="padding-left:${12 + r.depth * 14}px"`;
+        if (r.kind === 'dir') {
+          return `
+            <div class="diff-tree-row dir" data-dir="${escHtml(r.path)}" ${pad}>
+              <span class="chev">${r.open ? '▾' : '▸'}</span>
+              <span class="name">${escHtml(r.name)}</span>
+              <span class="meta">${r.count}</span>
+            </div>
+          `;
+        }
+        const selected = State.selectedChangePath === r.path ? 'selected' : '';
+        return `
+          <div class="diff-tree-row file ${selected}" data-path="${escHtml(r.path)}" ${pad}>
+            <span class="task-dot ${r.action}"></span>
+            <span class="name">${escHtml(r.name)}</span>
+            <span class="meta">${escHtml(r.action)}</span>
+          </div>
+        `;
+      }).join('');
+
+  body.innerHTML = controls + `<div class="diff-tree-rows">${rowsHtml}</div>`;
+
+  $('diff-tree-search')?.addEventListener('input', (e) => {
+    State.diffTree.query = e.target.value || '';
+    renderDiffPanel();
+  });
+  body.querySelectorAll('.diff-filter[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const a = btn.dataset.action;
+      if (!a) return;
+      if (State.diffTree.actions.has(a)) State.diffTree.actions.delete(a);
+      else State.diffTree.actions.add(a);
+      renderDiffPanel();
+    });
+  });
+  $('diff-filter-all')?.addEventListener('click', () => {
+    State.diffTree.actions = new Set(['created', 'modified', 'deleted', 'moved', 'read']);
+    renderDiffPanel();
+  });
+  $('diff-filter-none')?.addEventListener('click', () => {
+    State.diffTree.actions = new Set();
+    renderDiffPanel();
+  });
+  $('diff-collapse-all')?.addEventListener('click', () => {
+    State.diffTree.expanded = new Set();
+    renderDiffPanel();
+  });
+
+  body.querySelectorAll('.diff-tree-row.dir').forEach(row => {
+    row.addEventListener('click', () => {
+      const d = row.dataset.dir;
+      if (!d) return;
+      if (State.diffTree.expanded.has(d)) State.diffTree.expanded.delete(d);
+      else State.diffTree.expanded.add(d);
+      renderDiffPanel();
+    });
+  });
+  body.querySelectorAll('.diff-tree-row.file').forEach(row => {
     row.addEventListener('click', () => {
       const p = row.dataset.path;
       if (!p) return;
@@ -1967,11 +2101,15 @@ function loadSettings() {
   setVal('set-provider', c.provider || 'gemini');
   setVal('set-model', c.model || '');
   setVal('set-gcp', c.gcp_project || '');
+  setVal('set-gcp-region', c.gcp_region || 'us-central1');
   setVal('set-socket', c.socket_path || '/tmp/agentd.sock');
   setVal('set-mode', c.mode || 'auto');
   setVal('set-max-agents', c.max_agents || 100);
   const rowGcp = $('row-gcp');
-  if (rowGcp) rowGcp.style.display = (c.provider === 'gemini') ? '' : 'none';
+  const rowGcpRegion = $('row-gcp-region');
+  const showVertex = (c.provider === 'vertex');
+  if (rowGcp) rowGcp.style.display = showVertex ? '' : 'none';
+  if (rowGcpRegion) rowGcpRegion.style.display = showVertex ? '' : 'none';
 
   // Sandbox toggle
   const sandboxEnabled = c.sandbox_enabled !== false; // default true
@@ -2003,6 +2141,7 @@ async function saveSettings() {
     model: getVal('set-model'),
     api_key: getVal('set-api-key'),
     gcp_project: getVal('set-gcp'),
+    gcp_region: getVal('set-gcp-region'),
     sandbox_enabled: getVal('set-sandbox-enabled'),
   };
   try {
@@ -2439,7 +2578,11 @@ function setupHandlers() {
   });
   $('set-provider')?.addEventListener('change', (e) => {
     const rowGcp = $('row-gcp');
-    if (rowGcp) rowGcp.style.display = e.target.value === 'gemini' ? '' : 'none';
+    const rowGcpRegion = $('row-gcp-region');
+    const showVertex = e.target.value === 'vertex';
+    if (rowGcp) rowGcp.style.display = showVertex ? '' : 'none';
+    if (rowGcpRegion) rowGcpRegion.style.display = showVertex ? '' : 'none';
+    if (e.tagName === 'SELECT') syncCustomSelect(e);
   });
   $('set-mode')?.addEventListener('change', (e) => {
     updateSettingsZeroHint(e.target.value);

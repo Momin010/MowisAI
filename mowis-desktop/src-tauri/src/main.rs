@@ -89,6 +89,9 @@ pub struct Config {
     pub model: String,
     pub api_key: String,
     pub gcp_project: String,
+    /// Vertex AI region (e.g. "us-central1"). Only used when provider == "vertex".
+    #[serde(default = "default_gcp_region")]
+    pub gcp_region: String,
     /// When true, agent writes are isolated in a tmpfs-style temp directory.
     /// The original project (lower_dir) is never modified by agents.
     #[serde(default = "default_sandbox_enabled")]
@@ -96,6 +99,7 @@ pub struct Config {
 }
 
 fn default_sandbox_enabled() -> bool { true }
+fn default_gcp_region() -> String { "us-central1".to_string() }
 
 impl Default for Config {
     fn default() -> Self {
@@ -107,6 +111,7 @@ impl Default for Config {
             model: "gemini-2.0-flash".into(),
             api_key: String::new(),
             gcp_project: String::new(),
+            gcp_region: default_gcp_region(),
             sandbox_enabled: true,
         }
     }
@@ -1348,7 +1353,11 @@ async fn start_session(
     }
 
     // Resolve repo context, optionally redirecting project_path to a sandbox upper_dir.
-    let repo_context = project_path
+    // NOTE: zero mode does NOT use repo_context (it writes directly to a workspace on disk).
+    let repo_context = if resolved_mode == "zero" {
+        None
+    } else {
+        project_path
         .filter(|path| !path.trim().is_empty())
         .map(|path| -> Result<RepositoryContext, String> {
             if cfg.sandbox_enabled {
@@ -1381,7 +1390,8 @@ async fn start_session(
                 })
             }
         })
-        .transpose()?;
+        .transpose()?
+    };
     let started_at = now();
 
     // Reset state
@@ -1423,9 +1433,16 @@ async fn start_session(
     let tx_opt = state.cmd_tx.lock().unwrap().clone();
     if let Some(tx) = tx_opt {
         if resolved_mode == "zero" {
-            // Zero-Protection mode: create native workspace, bypass agentd entirely.
-            let ws = zero_mode::workspace::create_workspace(&session_id)
+            // Zero-Protection mode: write directly to a workspace on disk, bypass agentd entirely.
+            //
+            // If the user picked a repository, we treat that directory as the workspace (not an "attachment").
+            // Otherwise we create a new workspace under the default base dir.
+            let ws = match project_path.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                Some(path) => zero_mode::workspace::use_existing_workspace(&session_id, path)
+                    .map_err(|e| format!("use repository as zero workspace: {e}"))?,
+                None => zero_mode::workspace::create_workspace(&session_id)
                 .map_err(|e| format!("create zero workspace: {e}"))?;
+            };
             *state.zero_workspace.lock().unwrap() = Some(ws.clone());
             let _ = tx.send(BridgeCommand::StartZeroMode {
                 session_id: session_id.clone(),

@@ -224,7 +224,7 @@ async fn run_build_mode(
 
     // Build initial conversation - load previous history
     let system_prompt = system_prompt_for(&workspace, frontend_skills.as_deref());
-    let mut messages: Vec<LlmMessage> = original_history.clone();
+    let mut messages: Vec<LlmMessage> = get_session_history(&session_id);
     
     // Append new user message
     messages.push(LlmMessage::user(prompt.clone()));

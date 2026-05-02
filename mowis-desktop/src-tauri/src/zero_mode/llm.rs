@@ -85,6 +85,7 @@ pub async fn call_llm(
 ) -> Result<LlmResponse> {
     match config.provider.as_str() {
         "gemini"    => call_gemini(config, system_prompt, messages, tool_defs).await,
+        "vertex"    => call_vertex(config, system_prompt, messages, tool_defs).await,
         "anthropic" => call_anthropic(config, system_prompt, messages, tool_defs).await,
         "openai"    => call_openai_compat("https://api.openai.com/v1", config, system_prompt, messages, tool_defs).await,
         "grok"      => call_openai_compat("https://api.x.ai/v1", config, system_prompt, messages, tool_defs).await,
@@ -192,6 +193,114 @@ async fn call_gemini(
         bail!("Gemini API error {status}: {msg}");
     }
 
+    parse_gemini_response(&json)
+}
+
+// ── Vertex AI (Gemini on Vertex) ─────────────────────────────────────────────
+
+async fn call_vertex(
+    config: &Config,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+    tool_defs: &[Value],
+) -> Result<LlmResponse> {
+    // For Vertex, we authenticate via Application Default Credentials (gcloud, service account, metadata).
+    // api_key is ignored.
+    let project = config.gcp_project.trim();
+    if project.is_empty() {
+        bail!("Vertex AI requires a GCP Project — set it in Settings");
+    }
+    let region = config.gcp_region.trim();
+    if region.is_empty() {
+        bail!("Vertex AI requires a GCP Region — set it in Settings (e.g. us-central1)");
+    }
+
+    let model = if config.model.is_empty() { "gemini-2.0-flash" } else { config.model.as_str() };
+
+    // Vertex endpoint (GenerateContent):
+    // POST https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:generateContent
+    let url = format!(
+        "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:generateContent"
+    );
+
+    // Build contents array (same structure as Gemini generateContent).
+    let mut contents: Vec<Value> = Vec::new();
+    for msg in messages {
+        match msg.role {
+            Role::System => {}
+            Role::User => {
+                let text = msg.parts.iter().filter_map(|p| if let MessageContent::Text(t) = p { Some(t.as_str()) } else { None }).collect::<Vec<_>>().join("\n");
+                contents.push(json!({ "role": "user", "parts": [{ "text": text }] }));
+            }
+            Role::Assistant => {
+                let mut parts: Vec<Value> = Vec::new();
+                for part in &msg.parts {
+                    match part {
+                        MessageContent::Text(t) => parts.push(json!({ "text": t })),
+                        MessageContent::ToolCall(tc) => {
+                            parts.push(json!({ "functionCall": { "name": tc.name, "args": tc.args } }));
+                        }
+                        _ => {}
+                    }
+                }
+                contents.push(json!({ "role": "model", "parts": parts }));
+            }
+            Role::Tool => {
+                let mut parts: Vec<Value> = Vec::new();
+                for part in &msg.parts {
+                    if let MessageContent::ToolResult { content, .. } = part {
+                        parts.push(json!({
+                            "functionResponse": {
+                                "name": "tool_result",
+                                "response": { "content": content }
+                            }
+                        }));
+                    }
+                }
+                contents.push(json!({ "role": "user", "parts": parts }));
+            }
+        }
+    }
+
+    let func_decls: Vec<Value> = tool_defs.iter().map(|t| {
+        json!({
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t["parameters"]
+        })
+    }).collect();
+
+    let body = json!({
+        "system_instruction": { "parts": [{ "text": system_prompt }] },
+        "contents": contents,
+        "tools": [{ "function_declarations": func_decls }],
+        "generation_config": { "max_output_tokens": 8192, "temperature": 0.2 }
+    });
+
+    // Acquire bearer token
+    let provider = gcp_auth::provider().await.context("initialize GCP auth provider")?;
+    let token = provider
+        .token(&["https://www.googleapis.com/auth/cloud-platform"])
+        .await
+        .context("get GCP access token")?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .bearer_auth(token.as_str())
+        .json(&body)
+        .send()
+        .await
+        .context("Vertex AI HTTP request failed")?;
+
+    let status = resp.status();
+    let json: Value = resp.json().await.context("decode Vertex AI response")?;
+    if !status.is_success() {
+        let msg = json["error"]["message"].as_str().unwrap_or("unknown error");
+        bail!("Vertex AI error {status}: {msg}");
+    }
+
+    // Vertex generateContent returns the same candidate structure we already parse for Gemini.
     parse_gemini_response(&json)
 }
 

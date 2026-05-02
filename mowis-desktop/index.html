@@ -347,7 +347,8 @@
             <label class="form-label">Provider<span class="form-hint">LLM backend for agents</span></label>
             <div class="form-ctrl">
               <select id="set-provider" class="form-select">
-                <option value="gemini">Google Gemini / Vertex AI</option>
+                <option value="gemini">Gemini API (Google AI Studio)</option>
+                <option value="vertex">Vertex AI</option>
                 <option value="anthropic">Anthropic Claude</option>
                 <option value="openai">OpenAI GPT</option>
                 <option value="grok">xAI Grok</option>
@@ -366,6 +367,10 @@
           <div class="form-row" id="row-gcp">
             <label class="form-label">GCP Project<span class="form-hint">Required for Vertex AI</span></label>
             <div class="form-ctrl"><input type="text" id="set-gcp" class="form-input" placeholder="my-project-123456" /></div>
+          </div>
+          <div class="form-row" id="row-gcp-region">
+            <label class="form-label">GCP Region<span class="form-hint">Vertex endpoint region (e.g. us-central1)</span></label>
+            <div class="form-ctrl"><input type="text" id="set-gcp-region" class="form-input" placeholder="us-central1" /></div>
           </div>
 
           <div class="settings-section">Runtime</div>

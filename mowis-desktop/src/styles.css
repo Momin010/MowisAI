@@ -960,6 +960,78 @@ a { text-decoration: none; color: inherit; }
 .diff-line.del .diff-gutter { color: var(--red); }
 .diff-line.ctx { border: 1px solid transparent; }
 
+/* Diff tree (folders + search + filters) */
+.diff-tree-controls {
+  padding: 10px;
+  margin: -2px -2px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-top-left-radius: var(--r);
+  border-top-right-radius: var(--r);
+}
+
+.diff-tree-search {
+  width: 100%;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  color: var(--tx);
+  border-radius: 12px;
+  padding: 8px 10px;
+  outline: none;
+  box-shadow: var(--glow-top);
+}
+
+.diff-filter-row {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.diff-filter {
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.04);
+  color: var(--tx);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.diff-filter.on {
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.18);
+}
+.diff-filter.ghost { opacity: 0.9; }
+
+.diff-tree-rows { padding: 2px 0 6px; }
+
+.diff-tree-row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 12px;
+  margin: 2px 8px;
+}
+.diff-tree-row:hover { background: rgba(255,255,255,0.05); }
+.diff-tree-row.selected {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12);
+}
+.diff-tree-row .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-tree-row .meta { font-size: 12px; color: var(--tx-4); }
+.diff-tree-row.dir { font-weight: 600; }
+.diff-tree-row.dir .chev { color: var(--tx-4); }
+
 /* Make action dots usable in diff list */
 .task-dot.created,
 .task-dot.modified,
