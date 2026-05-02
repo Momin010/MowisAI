@@ -551,9 +551,21 @@ impl VmLauncher for WindowsLauncher {
 
         // ── QEMU/WHPX fallback ─────────────────────────────────────────────
         log::warn!("WSL2 not available — falling back to QEMU/WHPX");
+        let dev_cfg = crate::platform::developer_mode::DeveloperConfig::load_or_default();
+        let mut qemu_cfg = QemuConfig::windows_whpx(qemu_image_path());
+        if dev_cfg.qemu_path.exists() {
+            qemu_cfg.qemu_bin = dev_cfg.qemu_path.clone();
+        }
+        if dev_cfg.disk_path.exists() {
+            qemu_cfg.image_path = dev_cfg.disk_path.clone();
+        }
+        if dev_cfg.ram_mb >= 256 {
+            qemu_cfg.ram_mb = dev_cfg.ram_mb;
+        }
+        let qemu_launcher = QemuLauncher::new(qemu_cfg.clone());
         
         // Check if QEMU is available before trying to spawn
-        let qemu_check = Command::new("qemu-system-x86_64")
+        let qemu_check = Command::new(&qemu_cfg.qemu_bin)
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -574,13 +586,13 @@ impl VmLauncher for WindowsLauncher {
             }
         }
         
-        let child = self.qemu_fallback
+        let child = qemu_launcher
             .spawn_process(&token, true)
             .await
             .context("spawning QEMU/WHPX")?;
         drop(child);
 
-        self.qemu_fallback
+        qemu_launcher
             .wait_for_agent()
             .await
             .context("waiting for QEMU agentd bridge")?;
@@ -588,7 +600,7 @@ impl VmLauncher for WindowsLauncher {
         Ok(ConnectionInfo {
             kind: ConnectionKind::TcpWithToken,
             socket_path: None,
-            tcp_addr: Some(self.qemu_fallback.agent_tcp().to_owned()),
+            tcp_addr: Some(qemu_launcher.agent_tcp().to_owned()),
             pipe_name: None,
             auth_token: Some(token),
         })

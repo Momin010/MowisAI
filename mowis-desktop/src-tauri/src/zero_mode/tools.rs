@@ -573,9 +573,9 @@ fn tool_search_in_files(workspace: &Path, args: &Value) -> String {
         format!("no matches found for '{pattern}'")
     } else {
         let count = results.len();
-        let display = if count > 50 {
-            results.truncate(50);
-            format!("found {count} matches (showing first 50):\n{}", results.join("\n"))
+        let display = if count > 200 {
+            results.truncate(200);
+            format!("found {count} matches (showing first 200):\n{}", results.join("\n"))
         } else {
             format!("found {count} match(es):\n{}", results.join("\n"))
         };
@@ -584,11 +584,11 @@ fn tool_search_in_files(workspace: &Path, args: &Value) -> String {
 }
 
 fn search_content_recursive(dir: &Path, workspace: &Path, pattern: &str, out: &mut Vec<String>, depth: usize) {
-    if depth > 8 || out.len() >= 50 { return; }
+    if depth > 12 || out.len() >= 200 { return; }
     let Ok(entries) = fs::read_dir(dir) else { return };
     
     for entry in entries.filter_map(|e| e.ok()) {
-        if out.len() >= 50 { break; }
+        if out.len() >= 200 { break; }
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         
@@ -601,7 +601,7 @@ fn search_content_recursive(dir: &Path, workspace: &Path, pattern: &str, out: &m
                     if line.contains(pattern) {
                         if let Ok(rel) = path.strip_prefix(workspace) {
                             out.push(format!("{}:{}: {}", rel.display(), line_num + 1, line.trim()));
-                            if out.len() >= 50 { break; }
+                            if out.len() >= 200 { break; }
                         }
                     }
                 }
@@ -627,7 +627,7 @@ fn tool_search_files(workspace: &Path, args: &Value) -> String {
 }
 
 fn search_recursive(workspace: &Path, dir: &Path, pattern: &str, out: &mut Vec<String>, depth: usize) {
-    if depth > 8 { return; }
+    if depth > 12 || out.len() >= 600 { return; }
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -638,7 +638,7 @@ fn search_recursive(workspace: &Path, dir: &Path, pattern: &str, out: &mut Vec<S
                 out.push(rel.display().to_string());
             }
         }
-        if path.is_dir() && out.len() < 200 {
+        if path.is_dir() && out.len() < 600 {
             search_recursive(workspace, &path, pattern, out, depth + 1);
         }
     }

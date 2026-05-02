@@ -527,6 +527,9 @@ pub struct FileChange {
     pub lines_added: usize,
     #[serde(default)]
     pub lines_deleted: usize,
+    /// Best-effort previous file content (for diff view).
+    #[serde(default)]
+    pub before_content: Option<String>,
     #[serde(default)]
     pub content: Option<String>, // Full file content for diff view
 }

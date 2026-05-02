@@ -488,6 +488,8 @@ const State = {
   setupError: null,
   stats: { tasks_total: 0, tasks_done: 0, tasks_running: 0, tokens_total: 0, tool_calls: 0 },
   zeroWorkspacePath: null,  // set when a zero-mode session is active
+  fileChanges: [],          // recent FileChange[] batches
+  selectedChangePath: null, // selected file path for diff panel
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -503,6 +505,156 @@ function toast(msg, type = 'info') {
   t.textContent = msg;
   c.appendChild(t);
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s'; setTimeout(() => t.remove(), 320); }, 3200);
+}
+
+// ── Engine setup modal helpers ────────────────────────────────────────────────
+
+function hideEngineSetupModal() {
+  const modal = $('engine-setup-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function setModeToZeroAndReflectUI() {
+  if (!State.config) State.config = {};
+  State.config.mode = 'zero';
+
+  const homeMode = $('home-mode');
+  if (homeMode) {
+    homeMode.value = 'zero';
+    updateHomeZeroHint('zero');
+    syncCustomSelect(homeMode);
+  }
+
+  const setMode = $('set-mode');
+  if (setMode) {
+    setMode.value = 'zero';
+    syncCustomSelect(setMode);
+  }
+}
+
+async function pickPathWithDialog({ title, directory = false }) {
+  if (!_openDialog) return null;
+  try {
+    const selected = await _openDialog({
+      title,
+      multiple: false,
+      directory,
+    });
+    if (!selected) return null;
+    return Array.isArray(selected) ? selected[0] : selected;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeQemuPathFromSelection(selection) {
+  if (!selection) return '';
+  const normalized = String(selection).replace(/\//g, '\\');
+  if (normalized.toLowerCase().endsWith('.exe')) return normalized;
+  return `${normalized.replace(/[\\\/]+$/, '')}\\qemu-system-x86_64.exe`;
+}
+
+async function handlePointInstallationFlow() {
+  const qemuSelection = await pickPathWithDialog({
+    title: 'Select qemu-system-x86_64.exe or QEMU folder',
+    directory: false,
+  }) || await pickPathWithDialog({
+    title: 'Select QEMU installation folder',
+    directory: true,
+  });
+
+  if (!qemuSelection) {
+    toast('Installation path selection cancelled', 'info');
+    return;
+  }
+
+  const qemuPath = normalizeQemuPathFromSelection(qemuSelection);
+
+  // Prefill with your developer defaults and the selected QEMU path.
+  const defaultCfg = {
+    qemu_path: qemuPath,
+    iso_path: 'C:\\Users\\Public\\mowisai-app\\MowisAI Desktop\\alpine-minirootfs-x86_64\\alpine-virt-3.19.1-x86_64.iso',
+    disk_path: 'C:\\Users\\Public\\mowisai-app\\momin_disk.qcow2',
+    mount_point: '/mnt/mowisai',
+    disk_device: '/dev/vda',
+    ram_mb: 512,
+    agent_port: 9722,
+    sync_strategy: 'interval',
+    sync_interval_secs: 30,
+    agentd_path: '/mnt/mowisai/agentd',
+    extra_qemu_args: [],
+  };
+
+  try {
+    const existing = await invoke('get_developer_config');
+    // Keep user-specific advanced overrides but replace key paths with guided values.
+    const cfg = {
+      ...existing,
+      ...defaultCfg,
+      qemu_path: qemuPath,
+    };
+
+    const warnings = await invoke('validate_developer_config', { config: cfg });
+    if (Array.isArray(warnings) && warnings.length > 0) {
+      const proceed = confirm(
+        `I found ${warnings.length} issue(s):\n\n${warnings.join('\n')}\n\nSave anyway and retry engine startup?`
+      );
+      if (!proceed) return;
+    }
+
+    await invoke('save_developer_config', { config: cfg });
+    hideEngineSetupModal();
+    toast('Installation saved. Retrying engine startup...', 'success');
+    setTimeout(() => window.location.reload(), 350);
+  } catch (e) {
+    toast(`Could not save installation: ${e}`, 'error');
+  }
+}
+
+function setupEngineSetupModalHandlers() {
+  const retryBtn = $('engine-retry');
+  if (retryBtn) {
+    retryBtn.onclick = () => {
+      hideEngineSetupModal();
+      window.location.reload();
+    };
+  }
+
+  const continueBtn = $('engine-continue');
+  if (continueBtn) {
+    continueBtn.onclick = async () => {
+      hideEngineSetupModal();
+      setModeToZeroAndReflectUI();
+      try { await invoke('save_config', { config: State.config }); } catch {}
+      toast('Continuing in Zero-Protection mode', 'success');
+    };
+  }
+
+  const manualBtn = $('engine-manual');
+  if (manualBtn) {
+    manualBtn.onclick = async () => {
+      toast('Point to your QEMU installation', 'info');
+      await handlePointInstallationFlow();
+    };
+  }
+
+  const helpWsl = $('engine-help-wsl');
+  if (helpWsl) {
+    helpWsl.onclick = (e) => {
+      e.preventDefault();
+      toast('Open PowerShell (Admin) and run: wsl --install', 'info');
+    };
+  }
+
+  const helpQemu = $('engine-help-qemu');
+  if (helpQemu) {
+    helpQemu.onclick = (e) => {
+      e.preventDefault();
+      toast('Install QEMU, then restart the app', 'info');
+    };
+  }
 }
 
 function fmtNumber(n) {
@@ -727,37 +879,6 @@ function showEngineSetupModal(errorMessage) {
 
   modal.classList.remove('hidden');
   modal.setAttribute('aria-hidden', 'false');
-
-  // Bind button handlers
-  $('engine-retry')?.addEventListener('click', () => {
-    modal.classList.add('hidden');
-    // Reload the app to retry
-    window.location.reload();
-  });
-
-  $('engine-manual')?.addEventListener('click', () => {
-    toast('Manual installation path selection coming soon', 'info');
-    // TODO: Implement file picker for QEMU/WSL path
-  });
-
-  $('engine-continue')?.addEventListener('click', () => {
-    modal.classList.add('hidden');
-    modal.setAttribute('aria-hidden', 'true');
-    // Continue with zero mode only
-    toast('Continuing in Zero-Protection mode', 'info');
-  });
-
-  $('engine-help-wsl')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    toast('Opening WSL installation guide...', 'info');
-    // TODO: Open external link
-  });
-
-  $('engine-help-qemu')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    toast('Opening QEMU installation guide...', 'info');
-    // TODO: Open external link
-  });
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -765,6 +886,7 @@ function showEngineSetupModal(errorMessage) {
 async function init() {
   await loadTauri();
   setupWindowControls();   // non-blocking, sets up dot handlers
+  setupEngineSetupModalHandlers();
   await runSplash();
 
   // Load config
@@ -980,6 +1102,13 @@ async function setupListeners() {
     const changes = e.payload;
     if (!changes || !Array.isArray(changes) || changes.length === 0) return;
     appendFileChanges(changes);
+    State.fileChanges.unshift({ ts: nowTs(), changes });
+    State.fileChanges = State.fileChanges.slice(0, 20);
+
+    // Prefer showing diffs in the right panel instead of task inspector.
+    State.taskPanelOpen = true;
+    $('home-chat')?.classList.add('task-panel-open');
+    renderDiffPanel();
   });
 
   await listen('task_added', (e) => {
@@ -1342,6 +1471,195 @@ function openDiffViewer(change) {
   document.addEventListener('keydown', escHandler);
 }
 
+// ── Diff Panel (right sidebar) ────────────────────────────────────────────────
+
+function normalizeNewlines(text) {
+  if (text == null) return '';
+  let t = String(text);
+  // Handle accidentally escaped newlines coming from some sources
+  if (t.includes('\\n') && !t.includes('\n')) t = t.replace(/\\n/g, '\n');
+  return t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function diffLines(beforeText, afterText) {
+  const a = normalizeNewlines(beforeText).split('\n');
+  const b = normalizeNewlines(afterText).split('\n');
+
+  // Myers diff (line-based), good enough for UI.
+  const N = a.length;
+  const M = b.length;
+  const max = N + M;
+  const v = new Map();
+  v.set(1, 0);
+  const trace = [];
+
+  for (let d = 0; d <= max; d++) {
+    const vNext = new Map(v);
+    for (let k = -d; k <= d; k += 2) {
+      let x;
+      if (k === -d || (k !== d && (v.get(k - 1) ?? 0) < (v.get(k + 1) ?? 0))) {
+        x = v.get(k + 1) ?? 0; // down
+      } else {
+        x = (v.get(k - 1) ?? 0) + 1; // right
+      }
+      let y = x - k;
+      while (x < N && y < M && a[x] === b[y]) {
+        x++;
+        y++;
+      }
+      vNext.set(k, x);
+      if (x >= N && y >= M) {
+        trace.push(vNext);
+        return backtrack(trace, a, b);
+      }
+    }
+    trace.push(vNext);
+    v.clear();
+    for (const [k, x] of vNext) v.set(k, x);
+  }
+
+  return b.map(line => ({ type: 'ctx', text: line }));
+}
+
+function backtrack(trace, a, b) {
+  let x = a.length;
+  let y = b.length;
+  const edits = [];
+
+  for (let d = trace.length - 1; d >= 0; d--) {
+    const v = trace[d];
+    const k = x - y;
+    let prevK;
+    if (k === -d || (k !== d && (v.get(k - 1) ?? 0) < (v.get(k + 1) ?? 0))) {
+      prevK = k + 1;
+    } else {
+      prevK = k - 1;
+    }
+    const prevX = v.get(prevK) ?? 0;
+    const prevY = prevX - prevK;
+
+    while (x > prevX && y > prevY) {
+      edits.push({ type: 'ctx', text: a[x - 1] });
+      x--;
+      y--;
+    }
+
+    if (d === 0) break;
+
+    if (x === prevX) {
+      // insertion
+      edits.push({ type: 'add', text: b[y - 1] });
+      y--;
+    } else {
+      // deletion
+      edits.push({ type: 'del', text: a[x - 1] });
+      x--;
+    }
+  }
+
+  edits.reverse();
+  return edits;
+}
+
+function latestFlattenedChanges() {
+  const flat = [];
+  for (const batch of State.fileChanges) {
+    for (const c of batch.changes) flat.push(c);
+  }
+  // dedupe by path keeping newest first
+  const seen = new Set();
+  const out = [];
+  for (const c of flat) {
+    if (seen.has(c.path)) continue;
+    seen.add(c.path);
+    out.push(c);
+  }
+  return out;
+}
+
+function renderDiffPanel() {
+  const panel = $('task-panel');
+  if (!panel) return;
+
+  // Replace task inspector chrome
+  const title = panel.querySelector('.task-panel-title');
+  if (title) title.textContent = 'Diff';
+  const subtitle = $('task-panel-subtitle');
+  if (subtitle) subtitle.textContent = 'Select a file to inspect changes';
+
+  const body = $('task-panel-body');
+  const detail = $('task-detail');
+  if (!body || !detail) return;
+
+  const changes = latestFlattenedChanges();
+  body.innerHTML = changes.length === 0
+    ? `<div class="task-row"><div class="task-desc">No file changes yet</div></div>`
+    : changes.map(c => `
+      <div class="task-row ${State.selectedChangePath === c.path ? 'selected' : ''}" data-path="${escHtml(c.path)}">
+        <span class="task-dot ${c.action}"></span>
+        <div class="task-desc">${escHtml(c.path.split('/').pop() || c.path)}</div>
+        <div class="task-sb">${escHtml(c.action)}</div>
+      </div>
+    `).join('');
+
+  body.querySelectorAll('.task-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const p = row.dataset.path;
+      if (!p) return;
+      State.selectedChangePath = p;
+      renderDiffPanel();
+    });
+  });
+
+  const selected = changes.find(c => c.path === State.selectedChangePath) || changes[0] || null;
+  if (!State.selectedChangePath && selected) State.selectedChangePath = selected.path;
+
+  if (!selected) {
+    detail.innerHTML = `<div class="task-detail-empty">No diff to show yet.</div>`;
+    return;
+  }
+
+  // Diff view
+  const before = selected.before_content ?? '';
+  const after = selected.content ?? '';
+
+  let hunks = [];
+  if (selected.action === 'created') {
+    hunks = normalizeNewlines(after).split('\n').map(t => ({ type: 'add', text: t }));
+  } else if (selected.action === 'deleted') {
+    hunks = normalizeNewlines(before).split('\n').map(t => ({ type: 'del', text: t }));
+  } else if (selected.action === 'modified') {
+    hunks = diffLines(before, after);
+  } else {
+    // read/moved fallback
+    hunks = normalizeNewlines(after || before).split('\n').map(t => ({ type: 'ctx', text: t }));
+  }
+
+  const header = `
+    <div class="diff-panel-head">
+      <div class="diff-panel-path">${escHtml(selected.path)}</div>
+      <div class="diff-panel-meta">${escHtml(selected.action)}</div>
+    </div>
+  `;
+
+  let addCount = 0, delCount = 0;
+  for (const h of hunks) { if (h.type === 'add') addCount++; if (h.type === 'del') delCount++; }
+  if (subtitle) subtitle.textContent = `${addCount} added · ${delCount} removed`;
+
+  const linesHtml = hunks.map((h, i) => {
+    const sign = h.type === 'add' ? '+' : h.type === 'del' ? '-' : ' ';
+    return `
+      <div class="diff-line ${h.type}">
+        <span class="diff-gutter">${sign}</span>
+        <span class="diff-lno">${i + 1}</span>
+        <span class="diff-text">${escHtml(h.text || ' ')}</span>
+      </div>
+    `;
+  }).join('');
+
+  detail.innerHTML = `${header}<div class="diff-panel-body">${linesHtml || '<div class="task-detail-empty">Empty file</div>'}</div>`;
+}
+
 function getFileActionIcon(action) {
   // Using SVG icons (Lucide-style)
   const icons = {
@@ -1418,13 +1736,20 @@ function updateTaskPanelVisibility() {
   const chat = $('home-chat');
   const openBtn = $('task-panel-open');
   const hasTasks = Object.keys(State.tasks).length > 0;
-  if (openBtn) openBtn.style.display = hasTasks ? '' : 'none';
-  if (!hasTasks) State.taskPanelOpen = false;
-  if (panel) panel.style.display = hasTasks && State.taskPanelOpen ? '' : 'none';
-  if (chat) chat.classList.toggle('task-panel-open', hasTasks && State.taskPanelOpen);
+  const hasChanges = State.fileChanges && State.fileChanges.length > 0;
+  if (openBtn) openBtn.style.display = (hasTasks || hasChanges) ? '' : 'none';
+  if (!hasTasks && !hasChanges) State.taskPanelOpen = false;
+  if (panel) panel.style.display = (hasTasks || hasChanges) && State.taskPanelOpen ? '' : 'none';
+  if (chat) chat.classList.toggle('task-panel-open', (hasTasks || hasChanges) && State.taskPanelOpen);
 }
 
 function renderTaskPanel() {
+  // If we have file changes, the right panel becomes a Diff panel.
+  if (State.fileChanges && State.fileChanges.length > 0) {
+    renderDiffPanel();
+    updateTaskPanelVisibility();
+    return;
+  }
   const body = $('task-panel-body');
   const counts = $('task-counts');
   const subtitle = $('task-panel-subtitle');
@@ -1465,6 +1790,11 @@ function renderTaskPanel() {
 }
 
 function renderTaskDetail() {
+  // Diff panel owns the detail area when changes exist.
+  if (State.fileChanges && State.fileChanges.length > 0) {
+    renderDiffPanel();
+    return;
+  }
   const el = $('task-detail');
   if (!el) return;
   const task = State.selectedTaskId ? State.tasks[State.selectedTaskId] : null;
@@ -1498,7 +1828,9 @@ function renderTaskDetail() {
 }
 
 function setTaskPanelOpen(open) {
-  State.taskPanelOpen = open && Object.keys(State.tasks).length > 0;
+  const hasTasks = Object.keys(State.tasks).length > 0;
+  const hasChanges = State.fileChanges && State.fileChanges.length > 0;
+  State.taskPanelOpen = open && (hasTasks || hasChanges);
   updateTaskPanelVisibility();
   if (State.taskPanelOpen) renderTaskPanel();
 }
@@ -2098,6 +2430,13 @@ function setupHandlers() {
 
   // Settings
   $('btn-save-settings')?.addEventListener('click', saveSettings);
+  $('btn-engine-point')?.addEventListener('click', async () => {
+    toast('Point to your QEMU installation', 'info');
+    await handlePointInstallationFlow();
+  });
+  $('btn-engine-developer')?.addEventListener('click', () => {
+    if (typeof showDeveloperWizard === 'function') showDeveloperWizard();
+  });
   $('set-provider')?.addEventListener('change', (e) => {
     const rowGcp = $('row-gcp');
     if (rowGcp) rowGcp.style.display = e.target.value === 'gemini' ? '' : 'none';

@@ -11,8 +11,8 @@
   --bg-3:   #1a1a1c;
   --bg-4:   #202022;
 
-  --line:   rgba(255,255,255,0.055);
-  --line-2: rgba(255,255,255,0.09);
+  --line:   rgba(255,255,255,0.032);
+  --line-2: rgba(255,255,255,0.062);
 
   --tx:     #ebebec;
   --tx-2:   rgba(235,235,236,0.68);
@@ -29,6 +29,7 @@
   --red:       #f05050;
   --red-dim:   rgba(240,80,80,0.12);
   --yellow:    #e8be4a;
+  --violet:    #a78bfa;
 
   --serif: 'Tinos', Georgia, serif;
   --sans:  'DM Sans', -apple-system, system-ui, sans-serif;
@@ -306,13 +307,14 @@ a { text-decoration: none; color: inherit; }
   flex-shrink: 0;
   display: flex; align-items: center;
   padding: 0 14px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(10,10,11,0.7);
+  border-bottom: 1px solid rgba(255,255,255,0.035);
+  background: linear-gradient(180deg, rgba(22,22,24,0.68), rgba(14,14,15,0.56));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   -webkit-app-region: drag;
   user-select: none;
   position: relative; z-index: 50;
+  box-shadow: var(--glow-top), 0 10px 30px rgba(0,0,0,0.26);
 }
 .tl-dots {
   display: flex; gap: 6px; align-items: center;
@@ -368,9 +370,12 @@ a { text-decoration: none; color: inherit; }
   flex-shrink: 0;
   display: flex; flex-direction: column;
   padding: 18px 10px 14px;
-  border-right: 1px solid var(--line);
-  background: var(--bg-1);
+  border-right: 1px solid rgba(255,255,255,0.04);
+  background: linear-gradient(180deg, rgba(28,28,30,0.82), rgba(18,18,20,0.78));
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
   overflow: hidden;
+  box-shadow: var(--glow-top), 12px 0 28px rgba(0,0,0,0.24);
 }
 .sb-brand {
   padding: 0 8px;
@@ -435,7 +440,11 @@ a { text-decoration: none; color: inherit; }
 }
 .sb-badge:empty { display: none; }
 .sb-spacer { flex: 1; }
-.sb-bottom { padding-top: 8px; border-top: 1px solid var(--line); }
+.sb-bottom {
+  padding-top: 10px;
+  border-top: 1px solid rgba(255,255,255,0.03);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.025);
+}
 .sb-daemon-status {
   display: flex; align-items: center; gap: 7px;
   padding: 6px 8px;
@@ -472,7 +481,8 @@ a { text-decoration: none; color: inherit; }
 /* ── Page scaffolding ────────────────────────────────── */
 .page-head {
   padding: 22px 32px 16px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  box-shadow: inset 0 -1px 0 rgba(255,255,255,0.02);
   display: flex; align-items: center; justify-content: space-between;
   flex-shrink: 0;
 }
@@ -634,22 +644,16 @@ a { text-decoration: none; color: inherit; }
   min-height: 42px;
   display: flex; align-items: center; gap: 10px;
   padding: 8px 40px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(10,10,11,0.45);
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  background: linear-gradient(180deg, rgba(24,24,26,0.52), rgba(14,14,15,0.38));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
   flex-shrink: 0;
 }
-.chat-session-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--tx-4);
-}
+.chat-session-title { display: none; }
 .task-open-btn {
   display: inline-flex; align-items: center; gap: 8px;
   background: var(--bg-2);
-  border: 1px solid var(--line-2);
+  border: 1px solid rgba(255,255,255,0.07);
   border-radius: var(--r);
   color: var(--tx-3);
   padding: 5px 9px;
@@ -658,7 +662,12 @@ a { text-decoration: none; color: inherit; }
   transition: border-color 0.12s, color 0.12s, background 0.12s;
 }
 .task-open-btn:hover { color: var(--tx); border-color: rgba(255,255,255,0.18); background: var(--bg-3); }
-.task-open-btn span:last-child { color: var(--blue); }
+.task-open-btn span:first-child { display: none; }
+.task-open-btn span:last-child {
+  color: var(--blue);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
 .chat-messages {
   grid-column: 1; grid-row: 2;
   flex: 1;
@@ -784,8 +793,8 @@ a { text-decoration: none; color: inherit; }
 /* ── Task panel ──────────────────────────────────────── */
 .task-panel {
   flex-shrink: 0;
-  border-top: 1px solid var(--line);
-  background: var(--bg-1);
+  border-top: 1px solid rgba(255,255,255,0.03);
+  background: linear-gradient(180deg, rgba(28,28,30,0.72), rgba(16,16,18,0.72));
   max-height: 220px;
   display: flex; flex-direction: column;
 }
@@ -894,6 +903,78 @@ a { text-decoration: none; color: inherit; }
   transform: rotate(-45deg);
 }
 
+/* Diff panel (uses task panel container) */
+.diff-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.diff-panel-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--tx);
+}
+.diff-panel-meta {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--tx-4);
+  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.03);
+  border-radius: var(--r);
+  padding: 2px 6px;
+}
+.diff-panel-body {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.diff-line {
+  display: grid;
+  grid-template-columns: 16px 52px 1fr;
+  gap: 10px;
+  padding: 2px 10px;
+  border-radius: 8px;
+  white-space: pre;
+}
+.diff-line:hover { background: rgba(255,255,255,0.02); }
+.diff-gutter { color: var(--tx-4); text-align: center; }
+.diff-lno { color: var(--tx-5); text-align: right; user-select: none; }
+.diff-text { color: var(--tx-2); overflow-x: auto; }
+.diff-line.add {
+  background: rgba(62,207,114,0.06);
+  border: 1px solid rgba(62,207,114,0.12);
+}
+.diff-line.add .diff-gutter { color: var(--green); }
+.diff-line.add .diff-text { color: rgba(235,235,236,0.92); }
+.diff-line.del {
+  background: rgba(240,80,80,0.06);
+  border: 1px solid rgba(240,80,80,0.12);
+}
+.diff-line.del .diff-gutter { color: var(--red); }
+.diff-line.ctx { border: 1px solid transparent; }
+
+/* Make action dots usable in diff list */
+.task-dot.created,
+.task-dot.modified,
+.task-dot.deleted,
+.task-dot.read,
+.task-dot.moved {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: var(--glow-top);
+}
+.task-dot.created { background: rgba(62,207,114,0.14); border-color: rgba(62,207,114,0.22); }
+.task-dot.modified { background: rgba(59,139,255,0.14); border-color: rgba(59,139,255,0.22); }
+.task-dot.deleted { background: rgba(240,80,80,0.14); border-color: rgba(240,80,80,0.22); }
+.task-dot.moved { background: rgba(167,139,250,0.14); border-color: rgba(167,139,250,0.22); }
+
 /* Smooth iOS-style animations */
 @keyframes spin {
   0% { transform: rotate(0deg); }
@@ -914,9 +995,10 @@ a { text-decoration: none; color: inherit; }
   width: 100%;
   max-height: none;
   border-top: none;
-  border-left: 1px solid var(--line);
-  background: var(--bg-1);
+  border-left: 1px solid rgba(255,255,255,0.035);
+  background: linear-gradient(180deg, rgba(28,28,30,0.78), rgba(16,16,18,0.76));
   overflow: hidden;
+  box-shadow: -12px 0 32px rgba(0,0,0,0.28), var(--glow-top);
 }
 .chat-wrap:not(.task-panel-open) .task-panel { display: none !important; }
 .task-panel-head { padding: 12px 14px; }
@@ -991,9 +1073,9 @@ a { text-decoration: none; color: inherit; }
 /* ── Composer ────────────────────────────────────────── */
 .chat-compose {
   flex-shrink: 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid rgba(255,255,255,0.03);
   padding: 12px 40px 16px;
-  background: rgba(10,10,11,0.6);
+  background: linear-gradient(180deg, rgba(16,16,18,0.52), rgba(10,10,11,0.66));
   backdrop-filter: blur(12px);
 }
 .compose-inner {
@@ -1266,8 +1348,8 @@ a { text-decoration: none; color: inherit; }
   height: 22px; flex-shrink: 0;
   display: flex; align-items: center;
   padding: 0 14px; gap: 0;
-  border-top: 1px solid var(--line);
-  background: rgba(10,10,11,0.5);
+  border-top: 1px solid rgba(255,255,255,0.03);
+  background: linear-gradient(180deg, rgba(18,18,20,0.58), rgba(10,10,11,0.66));
   font-family: var(--mono); font-size: 9px; color: var(--tx-5);
   letter-spacing: 0.04em;
 }
@@ -1782,10 +1864,11 @@ a { text-decoration: none; color: inherit; }
   color: var(--yellow);
   background: rgba(232, 190, 74, 0.10);
   border: 1px solid rgba(232, 190, 74, 0.28);
-  border-radius: 4px;
-  padding: 1px 5px;
+  border-radius: var(--r);
+  padding: 2px 7px;
   vertical-align: middle;
   flex-shrink: 0;
+  box-shadow: var(--glow-top);
 }
 .zero-badge.sm { font-size: 7.5px; padding: 1px 4px; }
 
@@ -1797,17 +1880,17 @@ a { text-decoration: none; color: inherit; }
   font-family: var(--mono);
   font-size: 10px;
   color: var(--tx-4);
-  padding: 4px 0;
+  padding: 6px 0;
   animation: fadeIn 0.18s ease;
 }
 
 /* Hint block inside settings */
 .zero-mode-settings-hint {
   margin-top: 8px;
-  background: rgba(232,190,74,0.04);
-  border: 1px solid rgba(232,190,74,0.14);
-  border-radius: var(--r);
-  padding: 10px 12px;
+  background: linear-gradient(135deg, rgba(232,190,74,0.08), rgba(232,190,74,0.03));
+  border: 1px solid rgba(232,190,74,0.18);
+  border-radius: var(--r2);
+  padding: 12px 14px;
   font-size: 11.5px;
   color: var(--tx-3);
   line-height: 1.6;
@@ -1816,6 +1899,7 @@ a { text-decoration: none; color: inherit; }
   flex-direction: column;
   gap: 6px;
   animation: fadeIn 0.18s ease;
+  box-shadow: var(--shadow-sm), var(--glow-top);
 }
 .zero-mode-settings-hint code {
   font-family: var(--mono);
@@ -1831,7 +1915,12 @@ a { text-decoration: none; color: inherit; }
   gap: 6px;
   overflow: hidden;
   min-width: 0;
+  background: rgba(232,190,74,0.05);
+  border: 1px solid rgba(232,190,74,0.16);
+  border-radius: var(--r);
+  padding: 3px 8px;
 }
+.chat-session-bar .zero-workspace-bar { display: none !important; }
 .zero-workspace-path {
   font-family: var(--mono);
   font-size: 10px;
@@ -1911,7 +2000,7 @@ a { text-decoration: none; color: inherit; }
 }
 
 .file-change-item[data-action="moved"] .file-icon {
-  color: #a78bfa; /* purple */
+  color: var(--violet);
 }
 
 .file-label {
@@ -1954,10 +2043,10 @@ a { text-decoration: none; color: inherit; }
   align-items: center;
   justify-content: center;
   padding: 40px;
-  animation: fadeIn 0.2s cubic-bezier(0.4, 0.0, 0.2, 1);
+  animation: fadeInOverlay 0.2s cubic-bezier(0.4, 0.0, 0.2, 1);
 }
 
-@keyframes fadeIn {
+@keyframes fadeInOverlay {
   from { opacity: 0; }
   to { opacity: 1; }
 }

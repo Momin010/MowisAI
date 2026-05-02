@@ -43,7 +43,12 @@ fn is_website_project(prompt: &str) -> bool {
 
 /// Load frontend skill files if they exist
 fn load_frontend_skills() -> Option<String> {
-    let skill_files = ["SKILL_FRONTNED (1).md", "SKILL_FRONTNED (2).md"];
+    let skill_files = [
+        "SKILL_FRONTNED (1).md",
+        "SKILL_FRONTNED (2).md",
+        "SKILL_FRONTEND (1).md",
+        "SKILL_FRONTEND (2).md",
+    ];
     let mut skills = Vec::new();
     
     for file in &skill_files {
@@ -88,6 +93,11 @@ fn append_to_session(session_id: &str, messages: Vec<LlmMessage>) {
         .extend(messages);
 }
 
+fn set_session_history(session_id: &str, messages: Vec<LlmMessage>) {
+    let mut history = SESSION_HISTORY.lock().unwrap();
+    history.insert(session_id.to_string(), messages);
+}
+
 fn clear_session(session_id: &str) {
     SESSION_HISTORY.lock().unwrap().remove(session_id);
 }
@@ -102,6 +112,7 @@ pub async fn run_zero_session(
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
     let ws_path = Path::new(&workspace.path).to_path_buf();
+    let original_history = get_session_history(&session_id);
 
     // Classify intent: Chat or Build
     let intent = classify_intent(&prompt);
@@ -213,7 +224,7 @@ async fn run_build_mode(
 
     // Build initial conversation - load previous history
     let system_prompt = system_prompt_for(&workspace, frontend_skills.as_deref());
-    let mut messages: Vec<LlmMessage> = get_session_history(&session_id);
+    let mut messages: Vec<LlmMessage> = original_history.clone();
     
     // Append new user message
     messages.push(LlmMessage::user(prompt.clone()));
@@ -236,7 +247,7 @@ async fn run_build_mode(
         // Estimate tokens for this round (rough: 4 chars per token)
         let estimated_tokens = (context_size / 4) as u64 + 500; // +500 for system prompt & tool defs
 
-        let response = match llm::call_llm(&config, &system_prompt, &messages, &tool_defs).await {
+        let response = match call_llm_with_retry(&config, &system_prompt, &messages, &tool_defs, &event_tx).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
@@ -308,6 +319,20 @@ async fn run_build_mode(
                 status: TaskStatus::Running,
             }).await;
 
+            // Capture "before" content for diff view (best-effort).
+            let before_snapshot: Option<String> = tc
+                .args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .and_then(|rel| {
+                    let full = ws_path.join(rel);
+                    if full.is_file() {
+                        std::fs::read_to_string(full).ok()
+                    } else {
+                        None
+                    }
+                });
+
             // Execute on disk.
             let result = execute_tool(&ws_path, &tc.name, &tc.args);
 
@@ -327,8 +352,12 @@ async fn run_build_mode(
             // Track file changes for compact summary
             if task_ok {
                 if let Some(path) = tc.args["path"].as_str() {
+                    let full_path = ws_path.join(path);
+                    let existed_before = before_snapshot.is_some();
                     let action = match tc.name.as_str() {
-                        tools::WRITE_FILE => crate::FileAction::Created,
+                        tools::WRITE_FILE => {
+                            if existed_before { crate::FileAction::Modified } else { crate::FileAction::Created }
+                        }
                         tools::APPEND_FILE | tools::REPLACE_IN_FILE | tools::EDIT_FILE_LINES => crate::FileAction::Modified,
                         tools::DELETE_FILE => crate::FileAction::Deleted,
                         tools::READ_FILE | tools::READ_FILE_LINES => crate::FileAction::Read,
@@ -336,7 +365,6 @@ async fn run_build_mode(
                     };
                     
                     // Count lines and read content for diff view
-                    let full_path = ws_path.join(path);
                     let (lines_added, lines_deleted, content) = if action != crate::FileAction::Read && action != crate::FileAction::Deleted {
                         if let Ok(file_content) = std::fs::read_to_string(&full_path) {
                             let line_count = file_content.lines().count();
@@ -375,6 +403,7 @@ async fn run_build_mode(
                         action,
                         lines_added,
                         lines_deleted,
+                        before_content: before_snapshot,
                         content,
                     });
                 } else if tc.name == tools::MOVE_FILE {
@@ -384,6 +413,7 @@ async fn run_build_mode(
                             action: crate::FileAction::Moved,
                             lines_added: 0,
                             lines_deleted: 0,
+                            before_content: None,
                             content: None,
                         });
                     }
@@ -394,21 +424,7 @@ async fn run_build_mode(
 
             // CRITICAL: Truncate tool results to prevent token explosion
             // Full file contents can be 10KB+, but the LLM only needs a summary
-            let truncated_result = if result.len() > 1000 {
-                // For read operations, show first 500 chars + summary
-                if tc.name == tools::READ_FILE || tc.name == tools::READ_FILE_LINES {
-                    format!("{}...\n[truncated: {} total chars]", &result[..500], result.len())
-                } else {
-                    // For other operations, just show success/error
-                    if task_ok {
-                        format!("✓ {} completed successfully", tc.name)
-                    } else {
-                        result[..500].to_string()
-                    }
-                }
-            } else {
-                result
-            };
+            let truncated_result = compact_tool_result(&tc.name, result, task_ok);
 
             tool_results.push((tc.id.clone(), truncated_result));
         }
@@ -421,16 +437,7 @@ async fn run_build_mode(
         // Feed all tool results back as a single Tool message.
         messages.push(LlmMessage::tool_results(tool_results));
 
-        // CRITICAL: Sliding window to prevent context explosion
-        // Keep only: initial user message + last 6 messages (3 rounds of back-and-forth)
-        // This prevents token usage from growing linearly with each tool call
-        const MAX_CONTEXT_MESSAGES: usize = 7; // 1 user + 6 recent messages
-        if messages.len() > MAX_CONTEXT_MESSAGES {
-            let user_msg = messages[0].clone(); // Keep original prompt
-            let recent: Vec<_> = messages.iter().rev().take(6).rev().cloned().collect();
-            messages = vec![user_msg];
-            messages.extend(recent);
-        }
+        shrink_context_for_budget(&mut messages);
 
         // Brief yield so the UI can render.
         sleep(Duration::from_millis(40)).await;
@@ -443,16 +450,15 @@ async fn run_build_mode(
     // Check if this was a build task (not just chat)
     if total_tool_calls > 0 {
         // Force validation: tell the model to review and improve its work
-        let validation_prompt = "Review what you just created. Is it production-quality code that users will love? \
-            Does it have proper functionality, good UX, and attention to detail? \
-            If not, improve it now. Add missing features, fix bugs, enhance the design. \
-            Make it at least 500+ lines of quality code if it's a game or app. \
-            DO NOT say 'it's basic' or 'you can add more' - YOU add more. Make it excellent.";
+        let validation_prompt = "Perform one focused quality pass on your latest changes. \
+            Check correctness, missing edge cases, obvious UX issues, and broken imports. \
+            If issues exist, fix them now with tool calls. \
+            Keep edits high-signal and avoid rewriting files unless necessary.";
         
         messages.push(LlmMessage::user(validation_prompt.to_string()));
         
         // Run ONE more round of tool-calling for improvements
-        let response = match llm::call_llm(&config, &system_prompt, &messages, &tool_defs).await {
+        let response = match call_llm_with_retry(&config, &system_prompt, &messages, &tool_defs, &event_tx).await {
             Ok(r) => r,
             Err(e) => {
                 log::warn!("Validation round failed: {e}");
@@ -541,21 +547,18 @@ async fn run_build_mode(
                             (0, 0, None)
                         };
                         
-                        improvement_changes.push(crate::FileChange {
+                    improvement_changes.push(crate::FileChange {
                             path: path.to_string(),
                             action,
                             lines_added,
                             lines_deleted,
+                        before_content: None,
                             content,
                         });
                     }
                 }
                 
-                let truncated_result = if result.len() > 1000 {
-                    format!("✓ Improvement applied")
-                } else {
-                    result
-                };
+                let truncated_result = compact_tool_result(&tc.name, result, task_ok);
                 improvement_results.push((tc.id.clone(), truncated_result));
             }
             
@@ -567,8 +570,8 @@ async fn run_build_mode(
         }
     }
     
-    // Save conversation history for this session
-    append_to_session(&session_id, messages);
+    // Persist compacted history to prevent unbounded growth across turns.
+    set_session_history(&session_id, messages);
 
     // NO OrchestrationComplete in zero mode - session stays active for follow-up messages
     // The session will naturally pause after inactivity timeout (handled by frontend)
@@ -589,45 +592,12 @@ fn system_prompt_for(ws: &WorkspaceInfo, frontend_skills: Option<&str>) -> Strin
          - run_command — execute shell commands (use sparingly)\n\n\
          All paths you supply must be workspace-relative (e.g. 'src/main.py', not '/home/…').\n\
          Do not reference files outside the workspace.\n\n\
-         ═══════════════════════════════════════════════════════════════════════════════\n\
-         ⚠️  CRITICAL EFFICIENCY RULES - VIOLATION WILL CAUSE RATE LIMIT FAILURES ⚠️\n\
-         ═══════════════════════════════════════════════════════════════════════════════\n\n\
-         YOU ARE HITTING RATE LIMITS BECAUSE YOU MAKE TOO MANY API CALLS TOO FAST.\n\
-         THE RATE LIMIT IS 12,000 TOKENS PER MINUTE. EACH TOOL CALL COSTS ~1,000 TOKENS.\n\
-         IF YOU MAKE 12+ TOOL CALLS IN ONE MINUTE, YOU WILL BE BLOCKED FOR 13+ SECONDS.\n\n\
-         MANDATORY RULES:\n\n\
-         1. ❌ NEVER EVER split file creation into write_file + append_file + append_file + ...\n\
-            ✅ ALWAYS write the COMPLETE file in ONE write_file call\n\n\
-         2. ❌ NEVER make 10+ tool calls in rapid succession\n\
-            ✅ ALWAYS batch your work - create 2-3 complete files per round, not 12 fragments\n\n\
-         3. ❌ NEVER use append_file when creating NEW files\n\
-            ✅ ONLY use append_file to add content to EXISTING files\n\n\
-         4. ❌ NEVER call write_file for the same file multiple times\n\
-            ✅ ALWAYS plan the complete file content first, then write it once\n\n\
-         EXAMPLES OF WHAT NOT TO DO:\n\
-         ❌ BAD (12 tool calls, hits rate limit):\n\
-            1. write_file('index.html', '<!DOCTYPE html>')\n\
-            2. append_file('index.html', '<head>')\n\
-            3. append_file('index.html', '<title>...')\n\
-            4. append_file('index.html', '</head>')\n\
-            5. append_file('index.html', '<body>')\n\
-            ... 7 more appends ...\n\n\
-         ✅ GOOD (1 tool call, no rate limit):\n\
-            1. write_file('index.html', '''<!DOCTYPE html>\n\
-               <html>\n\
-               <head>\n\
-                 <title>My Page</title>\n\
-                 <link rel=\"stylesheet\" href=\"styles.css\">\n\
-               </head>\n\
-               <body>\n\
-                 <h1>Hello World</h1>\n\
-                 <script src=\"script.js\"></script>\n\
-               </body>\n\
-               </html>''')\n\n\
-         ═══════════════════════════════════════════════════════════════════════════════\n\
-         IF YOU VIOLATE THESE RULES, THE USER WILL BE BLOCKED AND CANNOT WORK.\n\
-         WRITE COMPLETE FILES. ONE FILE = ONE TOOL CALL. NO EXCEPTIONS.\n\
-         ═══════════════════════════════════════════════════════════════════════════════\n\n\
+         Efficiency and quality rules:\n\
+         - Prefer complete writes over many tiny append operations.\n\
+         - Keep tool calls purposeful; avoid repeated reads/writes of the same file.\n\
+         - For broad changes, create a short plan, then execute in coherent batches.\n\
+         - Use run_command for validation/build checks when useful, then fix failures.\n\
+         - If a command or tool fails, analyze the error and recover before continuing.\n\n\
          Work systematically: understand the request → plan → execute → verify.\n\
          Ask clarifying questions if the request is ambiguous.\n\
          When you are finished, summarize what was created or changed.",
@@ -665,6 +635,109 @@ fn chunk_text(text: &str, chunk_size: usize) -> Vec<String> {
         .chunks(chunk_size)
         .map(|c| c.iter().collect())
         .collect()
+}
+
+fn compact_tool_result(tool_name: &str, result: String, task_ok: bool) -> String {
+    let max_len = match tool_name {
+        tools::READ_FILE | tools::READ_FILE_LINES => 2_500,
+        tools::RUN_COMMAND => 3_000,
+        _ => 1_200,
+    };
+
+    if result.len() <= max_len {
+        return result;
+    }
+
+    if task_ok && tool_name != tools::READ_FILE && tool_name != tools::READ_FILE_LINES && tool_name != tools::RUN_COMMAND {
+        return format!("ok: {tool_name} completed (result truncated, {} chars)", result.len());
+    }
+
+    let head = max_len / 2;
+    let tail = max_len.saturating_sub(head);
+    let start = &result[..head.min(result.len())];
+    let end = &result[result.len().saturating_sub(tail)..];
+    format!("{start}\n...[truncated {} chars]...\n{end}", result.len().saturating_sub(max_len))
+}
+
+fn message_size_estimate(msg: &LlmMessage) -> usize {
+    msg.parts.iter().map(|p| match p {
+        MessageContent::Text(t) => t.len(),
+        MessageContent::ToolResult { content, .. } => content.len(),
+        MessageContent::ToolCall(_) => 160,
+    }).sum()
+}
+
+fn shrink_context_for_budget(messages: &mut Vec<LlmMessage>) {
+    const TARGET_CHARS: usize = 36_000;
+    if messages.is_empty() {
+        return;
+    }
+
+    let total: usize = messages.iter().map(message_size_estimate).sum();
+    if total <= TARGET_CHARS {
+        return;
+    }
+
+    let first = messages[0].clone();
+    let mut keep: Vec<LlmMessage> = Vec::new();
+    let mut kept_total = message_size_estimate(&first);
+
+    for msg in messages.iter().rev() {
+        let size = message_size_estimate(msg);
+        if kept_total + size > TARGET_CHARS {
+            continue;
+        }
+        keep.push(msg.clone());
+        kept_total += size;
+    }
+    keep.reverse();
+
+    if !matches!(keep.first().map(|m| &m.role), Some(Role::User)) {
+        keep.insert(0, first);
+    }
+
+    log::info!("Compacted context to ~{} chars ({} messages)", kept_total, keep.len());
+    *messages = keep;
+}
+
+fn is_retryable_llm_error(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("rate limit")
+        || e.contains("429")
+        || e.contains("resource exhausted")
+        || e.contains("too many requests")
+        || e.contains("quota")
+}
+
+async fn call_llm_with_retry(
+    config: &Config,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+    tool_defs: &[serde_json::Value],
+    event_tx: &mpsc::Sender<BridgeEvent>,
+) -> anyhow::Result<LlmResponse> {
+    const MAX_ATTEMPTS: usize = 4;
+    let mut backoff_secs = 2u64;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match llm::call_llm(config, system_prompt, messages, tool_defs).await {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                let text = e.to_string();
+                if attempt == MAX_ATTEMPTS || !is_retryable_llm_error(&text) {
+                    return Err(e);
+                }
+
+                let _ = event_tx.send(BridgeEvent::AgentChunk(
+                    format!("Rate limit detected. Retrying in {backoff_secs}s (attempt {attempt}/{MAX_ATTEMPTS})...\n")
+                )).await;
+                sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(16);
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("LLM call failed after retries"))
 }
 
 /// Human-readable description of what a tool call is doing.
