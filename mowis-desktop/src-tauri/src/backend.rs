@@ -4,7 +4,7 @@
 // Responsibilities:
 //   • Start the VM/daemon on first use
 //   • Retry connection up to 5 times with exponential backoff
-//   • Health-check loop every 10 s; auto-restart on failure
+//   • Health-check loop every 30 s; auto-restart on failure (3 retries)
 //   • Send JSON commands to agentd and stream back JSON events
 //   • Emit SetupProgress events to the Tauri frontend during first boot
 
@@ -81,7 +81,7 @@ impl BackendBridge {
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         self.emit_progress("detecting", "Detecting runtime environment…", 5).await;
 
-        let info = match self.connect_with_retry(10).await {  // Increased from 5 to 10 attempts
+        let info = match self.connect_with_retry(5).await {
             Ok(info) => info,
             Err(e) => {
                 // Surface the full error chain to the frontend so the user can read it.
@@ -115,7 +115,7 @@ impl BackendBridge {
 
     /// Try to start the launcher and open a connection, retrying on failure.
     async fn connect_with_retry(self: &Arc<Self>, max_attempts: u32) -> Result<ConnectionInfo> {
-        let mut delay = Duration::from_secs(3);  // Increased from 1 to 3 seconds initial delay
+        let mut delay = Duration::from_secs(1);
 
         for attempt in 1..=max_attempts {
             self.emit_progress(
@@ -155,7 +155,7 @@ impl BackendBridge {
 
             if attempt < max_attempts {
                 sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(30));  // Increased max delay from 16 to 30 seconds
+                delay = (delay * 2).min(Duration::from_secs(10));
             }
         }
 
@@ -173,7 +173,7 @@ impl BackendBridge {
 
     async fn health_loop(self: Arc<Self>) {
         loop {
-            sleep(Duration::from_secs(10)).await;
+            sleep(Duration::from_secs(30)).await;
 
             match self.launcher.health_check().await {
                 Ok(true) => {} // all good
@@ -186,7 +186,7 @@ impl BackendBridge {
                     });
 
                     // Attempt to reconnect.
-                    match self.connect_with_retry(5).await {
+                    match self.connect_with_retry(3).await {
                         Ok(info) => {
                             log::info!("[{}] Reconnected after failure", self.launcher.name());
                             *self.conn_info.lock().await = Some(info.clone());

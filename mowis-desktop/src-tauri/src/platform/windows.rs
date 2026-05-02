@@ -156,26 +156,31 @@ impl WindowsLauncher {
             if let Some(v) = *cached { return v; }
         }
         
-        // Try to run wsl.exe - if it's not found, we'll get a specific error
-        let result = win_cmd("wsl.exe")
+        // Try to run wsl.exe with a timeout so it can't hang indefinitely.
+        let cmd_future = win_cmd("wsl.exe")
             .args(["--list"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .status()
-            .await;
-        
-        let ok = match result {
-            Ok(status) => status.success(),
-            Err(e) => {
-                // Check if this is a "program not found" error
-                let err_str = e.to_string().to_lowercase();
-                if err_str.contains("not found") || err_str.contains("cannot find") {
-                    log::warn!("WSL not found: {}", e);
-                }
-                false
+            .status();
+
+        let ok = match tokio::time::timeout(Duration::from_secs(8), cmd_future).await {
+            Err(_elapsed) => {
+                log::warn!("wsl.exe --list timed out after 8s — treating WSL2 as unavailable");
+                *self.wsl2_available.lock().unwrap() = Some(false);
+                return false;
             }
+            Ok(result) => match result {
+                Ok(status) => status.success(),
+                Err(e) => {
+                    let err_str = e.to_string().to_lowercase();
+                    if err_str.contains("not found") || err_str.contains("cannot find") {
+                        log::warn!("WSL not found: {}", e);
+                    }
+                    false
+                }
+            },
         };
-        
+
         *self.wsl2_available.lock().unwrap() = Some(ok);
         ok
     }
@@ -374,6 +379,13 @@ impl WindowsLauncher {
     async fn start_wsl2_bridge(&self, token: &str) -> Result<()> {
         self.ensure_agentd_in_distro(token).await?;
 
+        // Warm-launch fast path: if the TCP bridge is already reachable, skip
+        // the kill/restart cycle entirely — this makes subsequent launches nearly instant.
+        if is_tcp_reachable(AGENT_TCP_ADDR).await {
+            log::info!("WSL2 bridge already reachable at {} — skipping restart", AGENT_TCP_ADDR);
+            return Ok(());
+        }
+
         // Kill any stale processes from a previous session (best-effort).
         for proc in &["agentd", "socat"] {
             let _ = win_cmd("wsl.exe")
@@ -499,7 +511,7 @@ impl WindowsLauncher {
     // ── Wait for bridge ───────────────────────────────────────────────────────
 
     async fn wait_for_bridge(&self) -> Result<()> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(90);  // Increased from 30 to 90 seconds
+        let deadline = std::time::Instant::now() + Duration::from_secs(25);
         loop {
             if std::time::Instant::now() > deadline {
                 let logs = self.read_alpine_logs().await;
