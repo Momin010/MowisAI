@@ -639,15 +639,11 @@ function removeOfflineBanner() {
 
 function setDaemonStatus(on) {
   State.daemonConnected = on;
-  const dot = $('daemon-dot');
   const sbDot = $('sb-daemon-dot');
   const sbLabel = $('sb-daemon-label');
-  const statusEl = $('sb-daemon-status');
 
-  if (dot)     dot.classList.toggle('on', on);
   if (sbDot)   sbDot.classList.toggle('on', on);
   if (sbLabel) sbLabel.textContent = on ? 'daemon online' : 'daemon offline';
-  setText('sb-daemon-status', `daemon: ${on ? 'online' : 'offline'}`);
 }
 
 // ── Tauri event listeners ─────────────────────────────────────────────────────
@@ -1538,15 +1534,10 @@ function setTaskPanelOpen(open) {
   if (State.taskPanelOpen) renderTaskPanel();
 }
 
-// ── Status bar ────────────────────────────────────────────────────────────────
+// ── Status bar (removed) ────────────────────────────────────────────────────
 
 function updateStatusBar() {
-  const tasks = Object.values(State.tasks);
-  const done = tasks.filter(t => t.status === 'complete').length;
-  const total = tasks.length;
-
-  setText('sb-session-info', State.sessionId ? `session ${State.sessionId.slice(0,10)}` : 'No session');
-  setText('sb-tasks', `${done} / ${total} tasks`);
+  // Status bar removed — no-op
 }
 
 // ── Sessions page ─────────────────────────────────────────────────────────────

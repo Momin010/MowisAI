@@ -317,15 +317,18 @@ impl DeveloperLauncher {
 
         // Direct kernel boot: bypasses BIOS, boots in ~5s, serial console guaranteed
         if use_direct_kernel {
-            log::info!("Using direct kernel boot (vmlinuz-virt + initramfs-virt)");
-            args.extend_from_slice(&[
-                "-kernel".into(), vmlinuz.display().to_string(),
-                "-initrd".into(), initramfs.display().to_string(),
-                "-append".into(), "console=ttyS0 root=/dev/sr0 modules=loop,squashfs,sd-mod,usb-storage quiet".into(),
-            ]);
+            log::info!("Using direct kernel boot: kernel={}, initrd={}",
+                vmlinuz.display(), initramfs.display());
+            args.push("-kernel".into());
+            args.push(vmlinuz.display().to_string());
+            args.push("-initrd".into());
+            args.push(initramfs.display().to_string());
+            args.push("-append".into());
+            // IMPORTANT: This must be a SINGLE argument string — spaces are part of the value
+            args.push("console=ttyS0 root=/dev/sr0 modules=loop,squashfs,sd-mod,usb-storage quiet".into());
         } else {
             log::info!("Using ISO boot (no vmlinuz-virt found, BIOS boot — slower)");
-            // Append nographic mode flag so BIOS/kernel outputs to serial
+            // -nographic redirects serial to stdio AND sets console=ttyS0 in the kernel
             args.push("-nographic".into());
         }
 
@@ -355,23 +358,113 @@ impl DeveloperLauncher {
         )
     }
 
-    async fn bootstrap(&self, child: Child, pw: &Option<ProgressSender>) -> Result<ConnectionInfo> {
+    async fn bootstrap(&self, mut child: Child, pw: &Option<ProgressSender>) -> Result<ConnectionInfo> {
+        // ── Step 0: Verify QEMU didn't crash immediately ─────────────────────
+        // Give QEMU 2 seconds to start, then check if it's still alive
+        sleep(Duration::from_secs(2)).await;
+
+        // Check if the process already exited (common: bad args, missing accel, path issues)
+        match child.try_wait() {
+            Ok(Some(exit_status)) => {
+                // QEMU already died! Capture stderr for diagnostics
+                let stderr_output = if let Some(mut stderr) = child.stderr.take() {
+                    let mut buf = String::new();
+                    let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf).await;
+                    buf
+                } else {
+                    "(stderr not captured)".into()
+                };
+
+                let msg = format!(
+                    "QEMU exited immediately with status: {}\n\nQEMU stderr:\n{}\n\n\
+                     Common causes:\n\
+                     - Paths with spaces not handled correctly\n\
+                     - WHPX/acceleration not available (try without -accel)\n\
+                     - Kernel or initrd file not found\n\
+                     - Disk image corrupted or locked by another process",
+                    exit_status,
+                    if stderr_output.is_empty() { "(empty)" } else { &stderr_output }
+                );
+                emit(pw, "error", "QEMU crashed on startup!", 0, "error", Some(msg.clone())).await;
+                log::error!("QEMU died immediately: {}", msg);
+                anyhow::bail!("{}", msg);
+            }
+            Ok(None) => {
+                // Still running — good!
+                emit(pw, "booting", "QEMU process is alive", 12, "success", None).await;
+                log::info!("QEMU process confirmed alive after 2s");
+            }
+            Err(e) => {
+                log::warn!("Could not check QEMU process status: {}", e);
+            }
+        }
+
         {
             let mut guard = self.child.lock().unwrap();
             *guard = Some(child);
         }
 
         // ── Step 1: Wait for VM to boot ──────────────────────────────────────
-        emit(pw, "booting", &format!("Waiting {}s for Alpine to boot…", BOOT_WAIT_SECS), 15, "info", None).await;
-        log::info!("Waiting {}s for VM to boot...", BOOT_WAIT_SECS);
-        sleep(Duration::from_secs(BOOT_WAIT_SECS)).await;
+        // Instead of waiting blindly, try to connect to serial port in a loop
+        emit(pw, "booting", "Waiting for Alpine to boot (checking serial port)…", 15, "info", None).await;
+        log::info!("Waiting for serial console to become available...");
 
-        // ── Step 2: Connect to serial console ────────────────────────────────
-        emit(pw, "booting", &format!("Connecting to serial console (port {})…", self.config.serial_port), 22, "info", None).await;
-        log::info!("Connecting to serial console on port {}...", self.config.serial_port);
+        // Try connecting to serial port — this tells us the VM is alive and QEMU is listening
+        let serial_deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut attempt_count = 0u32;
 
-        let mut serial = SerialConsole::connect(self.config.serial_port, 30).await
-            .context("Failed to connect to QEMU serial console. QEMU may not have started.")?;
+        let mut serial = loop {
+            attempt_count += 1;
+            let addr = format!("127.0.0.1:{}", self.config.serial_port);
+
+            match timeout(Duration::from_secs(2), TcpStream::connect(&addr)).await {
+                Ok(Ok(stream)) => {
+                    emit(pw, "booting", &format!("Serial console connected (took ~{}s)", attempt_count * 2), 25, "success",
+                        Some(format!("Port {}", self.config.serial_port))).await;
+                    log::info!("Serial console connected after ~{}s", attempt_count * 2);
+
+                    let (read_half, write_half) = tokio::io::split(stream);
+                    break SerialConsole {
+                        reader: BufReader::new(read_half),
+                        writer: write_half,
+                        boot_log: String::new(),
+                    };
+                }
+                _ => {}
+            }
+
+            if std::time::Instant::now() > serial_deadline {
+                emit(pw, "error", "Could not connect to QEMU serial console after 60s", 0, "error",
+                    Some("QEMU may be running but serial port is not responding. Check if port 4444 is blocked by firewall.".into())).await;
+                anyhow::bail!(
+                    "Could not connect to QEMU serial console on 127.0.0.1:{} after 60s.\n\n\
+                     QEMU appears to be running but the serial port is not accepting connections.\n\
+                     Possible causes:\n\
+                     - Windows firewall blocking localhost port {}\n\
+                     - Another process using port {}\n\
+                     - QEMU failed to set up the serial device",
+                    self.config.serial_port, self.config.serial_port, self.config.serial_port
+                );
+            }
+
+            if attempt_count % 5 == 0 {
+                emit(pw, "booting", &format!("Still waiting for serial console ({}s)…", attempt_count * 2), 18, "info", None).await;
+
+                // Check if QEMU is still alive
+                let mut guard = self.child.lock().unwrap();
+                if let Some(ref mut c) = *guard {
+                    if let Ok(Some(status)) = c.try_wait() {
+                        drop(guard);
+                        emit(pw, "error", &format!("QEMU process died! Exit: {}", status), 0, "error", None).await;
+                        anyhow::bail!("QEMU process died during boot with exit status: {}. \
+                            The VM failed to start. Check QEMU binary compatibility and paths.", status);
+                    }
+                }
+                drop(guard);
+            }
+
+            sleep(Duration::from_secs(2)).await;
+        };
 
         emit(pw, "booting", "Serial console connected", 25, "success",
             Some(format!("Port {}", self.config.serial_port))).await;
@@ -647,15 +740,8 @@ impl VmLauncher for DeveloperLauncher {
             .spawn()
             .context("Failed to start QEMU. Verify the binary path is correct.")?;
 
-        // Spawn background tasks to log QEMU output
-        if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    log::warn!("[QEMU stderr] {}", line);
-                }
-            });
-        }
+        // Log stdout in background (non-critical). Keep stderr on the child
+        // so bootstrap() can read it if QEMU crashes immediately.
         if let Some(stdout) = child.stdout.take() {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();

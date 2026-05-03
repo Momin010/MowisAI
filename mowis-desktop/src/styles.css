@@ -467,7 +467,7 @@ a { text-decoration: none; color: inherit; }
   display: flex;
   min-height: 0;
   overflow: hidden;
-  padding: 0 8px 8px 8px;
+  padding: 8px 8px 8px 8px;
   gap: 8px;
 }
 
@@ -477,13 +477,18 @@ a { text-decoration: none; color: inherit; }
   flex-shrink: 0;
   display: flex; flex-direction: column;
   padding: 18px 10px 14px;
-  border: 1px solid rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.04);
   border-radius: var(--r);
-  background: rgba(18,18,20,0.55);
+  background: rgba(10,10,11,0.85);
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   overflow: hidden;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+  box-shadow:
+    inset 1px 0 0 rgba(255,255,255,0.03),
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    inset -1px 0 0 rgba(0,0,0,0.3),
+    inset 0 -1px 0 rgba(0,0,0,0.2),
+    0 2px 16px rgba(0,0,0,0.35);
   margin-bottom: 0;
 }
 .sb-brand {
@@ -534,8 +539,8 @@ a { text-decoration: none; color: inherit; }
 .sb-item svg { flex-shrink: 0; opacity: 0.5; transition: opacity 0.1s; }
 .sb-item:hover { color: var(--tx-2); background: rgba(255,255,255,0.025); }
 .sb-item:hover svg { opacity: 0.7; }
-.sb-item.active { color: var(--tx); background: rgba(255,255,255,0.04); }
-.sb-item.active svg { opacity: 1; color: var(--blue); }
+.sb-item.active { color: var(--tx); background: rgba(255,255,255,0.025); box-shadow: inset 3px 0 0 rgba(255,255,255,0.12); }
+.sb-item.active svg { opacity: 1; color: var(--tx-2); }
 .sb-badge {
   margin-left: auto;
   font-family: var(--mono);
@@ -573,9 +578,9 @@ a { text-decoration: none; color: inherit; }
   flex: 1; min-width: 0;
   display: flex; flex-direction: column;
   overflow: hidden;
-  background: rgba(14,14,15,0.6);
-  border: 1px solid rgba(255,255,255,0.04);
-  border-radius: var(--r);
+  background: #000;
+  border: none;
+  border-radius: 0;
 }
 
 /* ── Pages ───────────────────────────────────────────── */
@@ -1837,22 +1842,7 @@ a { text-decoration: none; color: inherit; }
 .about-name { font-family: var(--serif); font-size: 18px; color: var(--tx); margin-bottom: 4px; }
 .about-meta { font-family: var(--mono); font-size: 10px; color: var(--tx-5); }
 
-/* ── Statusbar ───────────────────────────────────────── */
-.statusbar {
-  height: 22px; flex-shrink: 0;
-  display: flex; align-items: center;
-  padding: 0 14px; gap: 0;
-  margin: 0 8px 8px 8px;
-  border: 1px solid rgba(255,255,255,0.04);
-  border-radius: var(--r);
-  background: rgba(18,18,20,0.4);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  font-family: var(--mono); font-size: 9px; color: var(--tx-5);
-  letter-spacing: 0.04em;
-}
-.sb-sep { margin: 0 8px; color: rgba(255,255,255,0.1); }
-.sb-spacer { flex: 1; }
+/* Statusbar removed */
 
 /* ── Empty states ────────────────────────────────────── */
 .empty-state {
