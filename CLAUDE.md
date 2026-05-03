@@ -167,6 +167,29 @@ agentd-protocol is the shared types crate with no circular dependencies.
 
 ## Known Issues and Fixes
 
+### QEMU Serial Bridge Timeout on Windows
+
+**Symptom:** "Timed out waiting for agentd serial bridge on 127.0.0.1:9722" after QEMU process spawns.
+
+**Root Causes:**
+1. **WHPX not enabled** — Windows Hypervisor Platform must be enabled in Windows Features
+2. **Corrupted Alpine image** — The qcow2 disk image may be incomplete or corrupted
+3. **agentd not starting** — The agentd service inside Alpine may be failing
+4. **Serial port misconfiguration** — virtio-serial device not properly configured
+
+**Troubleshooting:**
+1. Enable debug logging: Set environment variable `MOWIS_DEBUG=1` before running
+2. Check WHPX: `Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform` (PowerShell)
+3. Enable if needed: `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform` (requires reboot)
+4. Verify Alpine image exists and is valid qcow2 format
+5. Check Windows Event Viewer → Application logs for Hyper-V errors
+6. Try Developer Mode for automatic Alpine bootstrap
+
+**Debug Logging:**
+QEMU output is normally redirected to null for performance. To see QEMU boot logs, either:
+- Build in debug mode (`cargo build` instead of `cargo build --release`)
+- Set environment variable `MOWIS_DEBUG=1` before launching
+
 ### Pipe Deadlock During Image Setup (FIXED)
 **Symptom:** Orchestration hangs at "Initializing..." during first sandbox creation, never completes.
 

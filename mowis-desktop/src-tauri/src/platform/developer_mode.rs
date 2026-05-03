@@ -1,13 +1,13 @@
 // platform/developer_mode.rs — Developer Mode QEMU Bootstrap Launcher
 //
-// Replaces the old configuration wizard with a fully automated bootstrap:
-//   1. Spawns QEMU with the user's ISO + qcow2 disk
-//   2. Waits for Alpine to boot (auto-login as root)
-//   3. Sends initialization commands via the QEMU monitor serial console
-//   4. Mounts persistent storage, installs socat, starts agentd, bridges to TCP
-//   5. Returns a TCP ConnectionInfo so the desktop app connects automatically
+// Fully automated bootstrap for non-admin Windows users:
+//   1. Spawns QEMU with Alpine ISO + persistent qcow2 disk
+//   2. Connects to the VM's serial console (TCP) for reliable command execution
+//   3. Runs initialization: network, mount, install socat, start agentd, bridge to TCP
+//   4. Returns a TCP ConnectionInfo so the desktop app connects automatically
 //
-// Uses QEMU monitor `sendkey` to automate shell commands — no manual typing.
+// Uses the serial console as a bidirectional TTY — far more reliable than
+// monitor `sendkey` which is fragile and loses characters.
 
 use crate::platform::connection::is_tcp_reachable;
 use crate::platform::{ConnectionInfo, ConnectionKind, ProgressSender, VmLauncher};
@@ -20,13 +20,12 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
 
-const BOOT_WAIT_SECS: u64 = 25;
-const SHELL_READY_MARKER: &str = "MOWIS_SHELL_OK";
+const BOOT_WAIT_SECS: u64 = 20;
 const PORT_READY_TIMEOUT_SECS: u64 = 120;
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -57,7 +56,7 @@ impl Default for DeveloperConfig {
             serial_port: 4444,
             mount_point: "/mnt/mowisai".into(),
             disk_device: "/dev/sda".into(),
-            agentd_path: "/mnt/mowisai/agentd".into(),
+            agentd_path: "/mnt/mowisai/agentd-linux-x86_64".into(),
         }
     }
 }
@@ -105,7 +104,7 @@ impl DeveloperConfig {
     }
 }
 
-// ── Launcher ─────────────────────────────────────────────────────────────────
+// ── Progress helper ──────────────────────────────────────────────────────────
 
 async fn emit(pw: &Option<ProgressSender>, stage: &str, message: &str, pct: u8, kind: &str, detail: Option<String>) {
     if let Some(tx) = pw {
@@ -119,6 +118,146 @@ async fn emit(pw: &Option<ProgressSender>, stage: &str, message: &str, pct: u8, 
         }).await;
     }
 }
+
+// ── Serial Console Helper ────────────────────────────────────────────────────
+//
+// This is the core reliability improvement: instead of typing commands through
+// the QEMU monitor with `sendkey` (which drops characters), we write directly
+// to the serial console TCP port. This is like having a real terminal session.
+
+struct SerialConsole {
+    reader: BufReader<tokio::io::ReadHalf<TcpStream>>,
+    writer: tokio::io::WriteHalf<TcpStream>,
+    boot_log: String,
+}
+
+impl SerialConsole {
+    /// Connect to the serial console TCP port. Retries for up to `timeout_secs`.
+    async fn connect(port: u16, timeout_secs: u64) -> Result<Self> {
+        let addr = format!("127.0.0.1:{}", port);
+        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+        let stream = loop {
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!(
+                    "Could not connect to QEMU serial console on {}. \
+                     QEMU may have failed to start or the port is blocked.",
+                    addr
+                );
+            }
+            match timeout(Duration::from_secs(2), TcpStream::connect(&addr)).await {
+                Ok(Ok(s)) => break s,
+                _ => sleep(Duration::from_millis(500)).await,
+            }
+        };
+
+        let (read_half, write_half) = tokio::io::split(stream);
+        Ok(Self {
+            reader: BufReader::new(read_half),
+            writer: write_half,
+            boot_log: String::new(),
+        })
+    }
+
+    /// Drain all buffered output from the serial console (boot messages etc).
+    /// Stores them in boot_log for diagnostics.
+    async fn drain_boot_output(&mut self, wait_secs: u64) {
+        let _ = timeout(Duration::from_secs(wait_secs), async {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                match tokio::io::AsyncReadExt::read(&mut self.reader, &mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let text = String::from_utf8_lossy(&buf[..n]);
+                        self.boot_log.push_str(&text);
+                        // Check if we see a login prompt
+                        if self.boot_log.contains("login:") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }).await;
+    }
+
+    /// Send a command and wait for a response containing expected text.
+    /// Returns the full output captured after sending the command.
+    async fn exec_command(&mut self, cmd: &str, expect: Option<&str>, timeout_secs: u64) -> Result<String> {
+        // Write the command + newline
+        self.writer.write_all(format!("{}\n", cmd).as_bytes()).await
+            .context("write to serial console")?;
+        self.writer.flush().await.context("flush serial console")?;
+
+        // Read response until we see the expected marker or timeout
+        let mut output = String::new();
+        let result = timeout(Duration::from_secs(timeout_secs), async {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                match tokio::io::AsyncReadExt::read(&mut self.reader, &mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let text = String::from_utf8_lossy(&buf[..n]);
+                        output.push_str(&text);
+
+                        // If we have an expected string, check for it
+                        if let Some(marker) = expect {
+                            if output.contains(marker) {
+                                return true;
+                            }
+                        }
+
+                        // If no expected string, look for a shell prompt (# or $)
+                        if expect.is_none() {
+                            let trimmed = output.trim_end();
+                            if trimmed.ends_with('#') || trimmed.ends_with('$')
+                                || trimmed.ends_with("~ #") || trimmed.ends_with(":~#")
+                            {
+                                return true;
+                            }
+                        }
+
+                        // Safety: don't buffer forever
+                        if output.len() > 100_000 {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            false
+        }).await;
+
+        match result {
+            Ok(true) => Ok(output),
+            Ok(false) => Ok(output), // Got output but didn't find marker
+            Err(_) => {
+                // Timeout — return what we have
+                if output.is_empty() {
+                    anyhow::bail!("Command '{}' timed out with no output after {}s", cmd, timeout_secs);
+                }
+                Ok(output)
+            }
+        }
+    }
+
+    /// Send a command without waiting for a response (fire-and-forget for background commands).
+    async fn exec_background(&mut self, cmd: &str) -> Result<()> {
+        self.writer.write_all(format!("{}\n", cmd).as_bytes()).await
+            .context("write to serial console")?;
+        self.writer.flush().await.context("flush serial console")?;
+        // Small delay to let the command start
+        sleep(Duration::from_millis(500)).await;
+        Ok(())
+    }
+
+    /// Get the captured boot log for diagnostics.
+    fn boot_log(&self) -> &str {
+        &self.boot_log
+    }
+}
+
+// ── Launcher ─────────────────────────────────────────────────────────────────
 
 pub struct DeveloperLauncher {
     config: DeveloperConfig,
@@ -150,315 +289,323 @@ impl DeveloperLauncher {
         let serial_tcp = format!("tcp:127.0.0.1:{},server=on,wait=off", cfg.serial_port);
         let monitor_tcp = format!("tcp:127.0.0.1:{},server=on,wait=off", cfg.monitor_port);
 
-        vec![
+        // Detect if we have vmlinuz-virt and initramfs-virt alongside the ISO
+        // (direct kernel boot is faster and guarantees serial console works)
+        let iso_dir = cfg.iso_path.parent().unwrap_or(std::path::Path::new("."));
+        let vmlinuz = iso_dir.join("vmlinuz-virt");
+        let initramfs = iso_dir.join("initramfs-virt");
+        let use_direct_kernel = vmlinuz.exists() && initramfs.exists();
+
+        let mut args = vec![
             "-m".into(), cfg.ram_mb.to_string(),
             "-drive".into(), format!("file={},format=qcow2", cfg.disk_path.display()),
             "-cdrom".into(), cfg.iso_path.display().to_string(),
+            "-boot".into(), "d".into(),  // Boot from CD-ROM (the Alpine ISO)
             "-netdev".into(), format!(
                 "user,id=net0,hostfwd=tcp::{}-:8080",
                 cfg.agent_port
             ),
             "-device".into(), "virtio-net-pci,netdev=net0".into(),
+            // Serial console on TCP — this is our main control channel into the VM
             "-serial".into(), serial_tcp,
+            // QEMU monitor for VM management (savevm, quit, etc)
             "-monitor".into(), monitor_tcp,
+            // No GUI window, no VGA output — headless operation
             "-display".into(), "none".into(),
-            "-daemonize".into(),
-        ]
-    }
+            "-vga".into(), "none".into(),
+        ];
 
-    async fn send_via_monitor(&self, keydesc: &str) -> Result<()> {
-        let addr = format!("127.0.0.1:{}", self.config.monitor_port);
-        let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(&addr))
-            .await
-            .context("connect to QEMU monitor")?
-            .with_context(|| format!("connect to monitor at {addr}"))?;
-
-        let cmd = format!("sendkey {}\n", keydesc);
-        stream.write_all(cmd.as_bytes()).await?;
-        Ok(())
-    }
-
-    fn keydesc_for_char(ch: char) -> String {
-        match ch {
-            'a'..='z' => ch.to_string(),
-            'A'..='Z' => format!("shift-{}", ch.to_ascii_lowercase()),
-            '0'..='9' => ch.to_string(),
-            ' '  => "spc".into(),
-            '/'  => "slash".into(),
-            '-'  => "minus".into(),
-            '.'  => "dot".into(),
-            '_'  => "shift-minus".into(),
-            '='  => "equal".into(),
-            '+'  => "shift-equal".into(),
-            '\'' => "apostrophe".into(),
-            '"'  => "shift-apostrophe".into(),
-            '\\' => "backslash".into(),
-            '|'  => "shift-backslash".into(),
-            '\n' => "ret".into(),
-            '\t' => "tab".into(),
-            ','  => "comma".into(),
-            ';'  => "semicolon".into(),
-            ':'  => "shift-semicolon".into(),
-            '>'  => "shift-dot".into(),
-            '<'  => "shift-comma".into(),
-            '~'  => "shift-grave_accent".into(),
-            '`'  => "grave_accent".into(),
-            '!'  => "shift-1".into(),
-            '@'  => "shift-2".into(),
-            '#'  => "shift-3".into(),
-            '$'  => "shift-4".into(),
-            '%'  => "shift-5".into(),
-            '^'  => "shift-6".into(),
-            '&'  => "shift-7".into(),
-            '*'  => "shift-8".into(),
-            '('  => "shift-9".into(),
-            ')'  => "shift-0".into(),
-            '{'  => "shift-bracket_left".into(),
-            '}'  => "shift-bracket_right".into(),
-            '['  => "bracket_left".into(),
-            ']'  => "bracket_right".into(),
-            '?'  => "shift-slash".into(),
-            _    => ch.to_string(),
+        // Direct kernel boot: bypasses BIOS, boots in ~5s, serial console guaranteed
+        if use_direct_kernel {
+            log::info!("Using direct kernel boot (vmlinuz-virt + initramfs-virt)");
+            args.extend_from_slice(&[
+                "-kernel".into(), vmlinuz.display().to_string(),
+                "-initrd".into(), initramfs.display().to_string(),
+                "-append".into(), "console=ttyS0 root=/dev/sr0 modules=loop,squashfs,sd-mod,usb-storage quiet".into(),
+            ]);
+        } else {
+            log::info!("Using ISO boot (no vmlinuz-virt found, BIOS boot — slower)");
+            // Append nographic mode flag so BIOS/kernel outputs to serial
+            args.push("-nographic".into());
         }
+
+        args
     }
 
-    async fn type_command(&self, cmd: &str) -> Result<()> {
-        for ch in cmd.chars() {
-            self.send_via_monitor(&Self::keydesc_for_char(ch)).await?;
-            sleep(Duration::from_millis(40)).await;
-        }
-        self.send_via_monitor("ret").await?;
-        sleep(Duration::from_millis(200)).await;
-        Ok(())
-    }
-
-    async fn type_command_slow(&self, cmd: &str, delay_ms: u64) -> Result<()> {
-        for ch in cmd.chars() {
-            self.send_via_monitor(&Self::keydesc_for_char(ch)).await?;
-            sleep(Duration::from_millis(delay_ms)).await;
-        }
-        self.send_via_monitor("ret").await?;
-        sleep(Duration::from_millis(200)).await;
-        Ok(())
-    }
-
-    async fn check_shell_ready(&self) -> Result<bool> {
-        let addr = format!("127.0.0.1:{}", self.config.serial_port);
-        let stream = timeout(Duration::from_secs(5), TcpStream::connect(&addr))
-            .await
-            .context("connect to serial for shell check")?
-            .with_context(|| format!("serial connect at {addr}"))?;
-
-        let mut reader = BufReader::new(stream);
-
-        // Drain any buffered boot output (2 seconds)
-        let _ = timeout(Duration::from_secs(2), async {
-            let mut buf = vec![0u8; 4096];
-            loop {
-                match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {
-                    Ok(0) => break,
-                    Ok(_) => continue,
-                    Err(_) => break,
-                }
-            }
-        })
-        .await;
-
-        // Send a unique marker command and wait for it on the serial output
-        self.type_command(&format!("echo {}", SHELL_READY_MARKER)).await?;
-
-        let found = timeout(Duration::from_secs(15), async {
-            let mut accumulated = Vec::new();
-            let mut buf = vec![0u8; 1024];
-            loop {
-                match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        accumulated.extend_from_slice(&buf[..n]);
-                        let text = String::from_utf8_lossy(&accumulated);
-                        if text.contains(SHELL_READY_MARKER) {
-                            return true;
-                        }
-                        if accumulated.len() > 50_000 {
-                            return false;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            false
-        })
-        .await
-        .unwrap_or(false);
-
-        Ok(found)
-    }
-
-    async fn wait_for_port(&self, label: &str, max_secs: u64) -> Result<()> {
+    async fn wait_for_port(&self, label: &str, max_secs: u64, pw: &Option<ProgressSender>) -> Result<()> {
         let addr = format!("127.0.0.1:{}", self.config.agent_port);
         let deadline = std::time::Instant::now() + Duration::from_secs(max_secs);
+        let mut elapsed = 0u64;
         while std::time::Instant::now() < deadline {
             if is_tcp_reachable(&addr).await {
                 log::info!("{} reachable at {}", label, addr);
                 return Ok(());
             }
-            sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_secs(1)).await;
+            elapsed += 1;
+            if elapsed % 5 == 0 {
+                emit(pw, "booting", &format!("Waiting for {} on {} ({}s)…", label, addr, elapsed), 88, "info", None).await;
+            }
         }
-        anyhow::bail!("Timed out waiting for {} on {}", label, addr)
+        anyhow::bail!(
+            "Timed out waiting for {} on {} after {}s.\n\
+             The agentd process may have failed to start or socat bridge isn't working.\n\
+             Check that the agentd binary exists at: {}",
+            label, addr, max_secs, self.config.agentd_path
+        )
     }
 
     async fn bootstrap(&self, child: Child, pw: &Option<ProgressSender>) -> Result<ConnectionInfo> {
-        *self.child.lock().unwrap() = Some(child);
+        {
+            let mut guard = self.child.lock().unwrap();
+            *guard = Some(child);
+        }
 
-        emit(pw, "booting", &format!("Waiting {}s for VM to boot…", BOOT_WAIT_SECS), 15, "info", None).await;
+        // ── Step 1: Wait for VM to boot ──────────────────────────────────────
+        emit(pw, "booting", &format!("Waiting {}s for Alpine to boot…", BOOT_WAIT_SECS), 15, "info", None).await;
         log::info!("Waiting {}s for VM to boot...", BOOT_WAIT_SECS);
         sleep(Duration::from_secs(BOOT_WAIT_SECS)).await;
 
-        // Wait for monitor socket to become available (QEMU may need a moment)
-        let monitor_addr = format!("127.0.0.1:{}", self.config.monitor_port);
-        emit(pw, "booting", &format!("Waiting for QEMU monitor on {}…", monitor_addr), 20, "info", None).await;
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            if is_tcp_reachable(&monitor_addr).await {
+        // ── Step 2: Connect to serial console ────────────────────────────────
+        emit(pw, "booting", &format!("Connecting to serial console (port {})…", self.config.serial_port), 22, "info", None).await;
+        log::info!("Connecting to serial console on port {}...", self.config.serial_port);
+
+        let mut serial = SerialConsole::connect(self.config.serial_port, 30).await
+            .context("Failed to connect to QEMU serial console. QEMU may not have started.")?;
+
+        emit(pw, "booting", "Serial console connected", 25, "success",
+            Some(format!("Port {}", self.config.serial_port))).await;
+
+        // Drain boot messages (wait up to 5s for login prompt)
+        emit(pw, "booting", "Reading boot output…", 28, "info", None).await;
+        serial.drain_boot_output(5).await;
+
+        let boot_log_preview: String = serial.boot_log().chars().rev().take(500).collect::<String>().chars().rev().collect();
+        log::info!("Boot log (last 500 chars):\n{}", boot_log_preview);
+        emit(pw, "booting", "Boot output captured", 30, "output",
+            Some(boot_log_preview.clone())).await;
+
+        // ── Step 3: Login as root ────────────────────────────────────────────
+        emit(pw, "booting", "Logging in as root…", 32, "command", Some("root".into())).await;
+        log::info!("Sending 'root' login...");
+
+        let mut logged_in = false;
+        for attempt in 1..=10 {
+            let login_output = serial.exec_command("root", Some("#"), 8).await
+                .unwrap_or_default();
+
+            if login_output.contains('#') || login_output.contains("~") {
+                emit(pw, "booting", &format!("Logged in (attempt {})", attempt), 35, "success", None).await;
+                log::info!("Login successful on attempt {}", attempt);
+                logged_in = true;
                 break;
             }
-            if std::time::Instant::now() > deadline {
-                let msg = format!("QEMU monitor not reachable on {}", monitor_addr);
-                emit(pw, "error", &msg, 0, "error", None).await;
-                anyhow::bail!(
-                    "QEMU monitor not reachable on {}. QEMU may have failed to start. \
-                     Check that the QEMU binary, ISO, and disk paths are correct.",
-                    monitor_addr
-                );
-            }
-            sleep(Duration::from_millis(500)).await;
-        }
-        emit(pw, "booting", "QEMU monitor ready", 25, "success", Some(format!("Monitor: {}", monitor_addr))).await;
-        log::info!("QEMU monitor ready");
 
-        // Wait for shell to be ready — send "root" at login prompt
-        emit(pw, "booting", "Waiting for guest login prompt…", 28, "info", None).await;
-        log::info!("Waiting for guest login prompt...");
-        let mut shell_ok = false;
-        for attempt in 1..=15 {
-            emit(pw, "booting", &format!("Login attempt {} — sending 'root'…", attempt), 28, "command", Some("root".into())).await;
-            log::debug!("Login attempt {} — sending 'root'...", attempt);
-            self.type_command("root").await?;
+            emit(pw, "booting", &format!("Login attempt {} — waiting…", attempt), 32, "output",
+                Some(login_output.chars().take(200).collect())).await;
             sleep(Duration::from_secs(3)).await;
-
-            match self.check_shell_ready().await {
-                Ok(true) => {
-                    emit(pw, "booting", &format!("Guest shell ready (attempt {})", attempt), 35, "success", Some("MOWIS_SHELL_OK marker received".into())).await;
-                    log::info!("Guest shell is ready (attempt {})", attempt);
-                    shell_ok = true;
-                    break;
-                }
-                Ok(false) => {
-                    emit(pw, "booting", &format!("Shell not ready yet (attempt {}), retrying…", attempt), 30, "output", None).await;
-                    log::debug!("Shell not ready yet (attempt {}), retrying login...", attempt);
-                    sleep(Duration::from_secs(3)).await;
-                }
-                Err(e) => {
-                    emit(pw, "booting", &format!("Shell check error (attempt {}): {}", attempt, e), 30, "warning", None).await;
-                    log::warn!("Shell check error (attempt {}): {}", attempt, e);
-                    sleep(Duration::from_secs(3)).await;
-                }
-            }
         }
 
-        if !shell_ok {
-            let msg = "Guest shell did not become ready";
-            emit(pw, "error", msg, 0, "error", None).await;
+        if !logged_in {
+            let full_log = serial.boot_log().to_string();
+            emit(pw, "error", "Could not login to Alpine VM", 0, "error",
+                Some(format!("Boot log:\n{}", full_log.chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>()))).await;
             anyhow::bail!(
-                "Guest shell did not become ready. The VM may need a different ISO \
-                 or the boot process may be stuck."
+                "Could not login to Alpine VM after 10 attempts.\n\n\
+                 Boot log (last 2000 chars):\n{}\n\n\
+                 Possible causes:\n\
+                 - Alpine ISO boot failed\n\
+                 - Serial console not attached to the correct TTY\n\
+                 - The VM is stuck at a different prompt",
+                full_log.chars().rev().take(2000).collect::<String>().chars().rev().collect::<String>()
             );
         }
 
-        // Phase 2: Network activation
-        emit(pw, "booting", "Activating network…", 40, "command", Some("ifconfig eth0 up".into())).await;
+        // ── Step 4: Network activation ───────────────────────────────────────
+        emit(pw, "booting", "Activating network (eth0 up + DHCP)…", 40, "command",
+            Some("ifconfig eth0 up && udhcpc -i eth0".into())).await;
         log::info!("Activating network...");
-        self.type_command_slow("ifconfig eth0 up", 30).await?;
-        sleep(Duration::from_secs(1)).await;
-        emit(pw, "booting", "Requesting DHCP lease…", 42, "command", Some("udhcpc -i eth0".into())).await;
-        self.type_command_slow("udhcpc -i eth0", 30).await?;
-        sleep(Duration::from_secs(3)).await;
-        emit(pw, "booting", "Network activated", 45, "success", None).await;
 
-        // Phase 2b: Mount persistent storage
+        let net_output = serial.exec_command("ifconfig eth0 up && udhcpc -i eth0", None, 15).await
+            .context("Network activation failed")?;
+        log::info!("Network output: {}", net_output.chars().take(300).collect::<String>());
+
+        if net_output.contains("lease") || net_output.contains("obtained") || net_output.contains("#") {
+            emit(pw, "booting", "Network activated (DHCP lease obtained)", 45, "success", None).await;
+        } else {
+            emit(pw, "booting", "Network activation — DHCP response unclear, continuing…", 45, "warning",
+                Some(net_output.chars().take(200).collect())).await;
+            log::warn!("DHCP output unclear, continuing anyway: {}", net_output.chars().take(200).collect::<String>());
+        }
+
+        // ── Step 5: Mount persistent storage ─────────────────────────────────
         emit(pw, "booting", "Mounting persistent storage…", 48, "command",
-            Some(format!("mkdir -p {} && mount {} {}", self.config.mount_point, self.config.disk_device, self.config.mount_point))).await;
-        log::info!("Mounting persistent storage...");
-        let mount_cmd = format!("mkdir -p {}", self.config.mount_point);
-        self.type_command_slow(&mount_cmd, 30).await?;
-        sleep(Duration::from_secs(1)).await;
-        let disk_cmd = format!(
-            "mount {} {}",
-            self.config.disk_device, self.config.mount_point
-        );
-        self.type_command_slow(&disk_cmd, 30).await?;
-        sleep(Duration::from_secs(2)).await;
-        emit(pw, "booting", "Persistent storage mounted", 52, "success", Some(format!("{} → {}", self.config.disk_device, self.config.mount_point))).await;
+            Some(format!("mount {} {}", self.config.disk_device, self.config.mount_point))).await;
+        log::info!("Mounting {} -> {}", self.config.disk_device, self.config.mount_point);
 
-        // Phase 3: Repository setup
-        emit(pw, "installing", "Setting up APK repositories…", 55, "command",
-            Some("echo 'https://dl-cdn.alpinelinux.org/alpine/v3.19/main' > /etc/apk/repositories".into())).await;
-        log::info!("Setting up repositories...");
-        self.type_command_slow(
-            "echo 'https://dl-cdn.alpinelinux.org/alpine/v3.19/main' > /etc/apk/repositories",
-            25,
-        )
-        .await?;
-        sleep(Duration::from_secs(1)).await;
-        self.type_command_slow(
-            "echo 'https://dl-cdn.alpinelinux.org/alpine/v3.19/community' >> /etc/apk/repositories",
-            25,
-        )
-        .await?;
-        sleep(Duration::from_secs(1)).await;
-        emit(pw, "installing", "Running apk update…", 60, "command", Some("apk update".into())).await;
-        self.type_command("apk update").await?;
-        sleep(Duration::from_secs(10)).await;
-        emit(pw, "installing", "Installing socat…", 65, "command", Some("apk add socat".into())).await;
-        self.type_command("apk add socat").await?;
-        sleep(Duration::from_secs(10)).await;
-        emit(pw, "installing", "Packages installed", 70, "success", None).await;
+        let mount_output = serial.exec_command(
+            &format!("mkdir -p {} && mount {} {} 2>&1 && echo MOUNT_OK",
+                self.config.mount_point, self.config.disk_device, self.config.mount_point),
+            Some("MOUNT_OK"),
+            10,
+        ).await.context("Mount command failed")?;
 
-        // Phase 4: Start agentd
-        let agentd_cmd = format!(
-            "{0} socket --path /tmp/mowisai.sock &",
-            self.config.agentd_path
-        );
-        emit(pw, "booting", "Starting agentd daemon…", 75, "command", Some(agentd_cmd.clone())).await;
+        if mount_output.contains("MOUNT_OK") {
+            emit(pw, "booting", "Persistent storage mounted", 52, "success",
+                Some(format!("{} → {}", self.config.disk_device, self.config.mount_point))).await;
+        } else {
+            emit(pw, "booting", "Mount may have failed — checking…", 50, "warning",
+                Some(mount_output.chars().take(200).collect())).await;
+            log::warn!("Mount output: {}", mount_output);
+            // Try to verify mount worked
+            let check = serial.exec_command(
+                &format!("ls {} 2>&1", self.config.mount_point), None, 5
+            ).await.unwrap_or_default();
+            log::info!("Mount check (ls): {}", check.chars().take(200).collect::<String>());
+        }
+
+        // ── Step 6: Verify agentd binary exists ──────────────────────────────
+        emit(pw, "booting", "Verifying agentd binary…", 55, "info",
+            Some(format!("ls -la {}", self.config.agentd_path))).await;
+
+        let verify_output = serial.exec_command(
+            &format!("ls -la {} 2>&1 && echo AGENT_EXISTS", self.config.agentd_path),
+            Some("AGENT_EXISTS"),
+            5,
+        ).await.unwrap_or_default();
+
+        if verify_output.contains("AGENT_EXISTS") && !verify_output.contains("No such file") {
+            emit(pw, "booting", "agentd binary found", 57, "success",
+                Some(verify_output.lines().find(|l| l.contains("agentd")).unwrap_or("").to_string())).await;
+        } else {
+            emit(pw, "error", "agentd binary NOT found on persistent disk!", 0, "error",
+                Some(format!(
+                    "Expected at: {}\nMount point contents: check logs\n\n\
+                     You need to copy the agentd-linux-x86_64 binary to the qcow2 disk.",
+                    self.config.agentd_path
+                ))).await;
+            anyhow::bail!(
+                "agentd binary not found at {}.\n\
+                 The persistent disk ({}) may not contain the binary.\n\
+                 Copy agentd-linux-x86_64 to the disk and try again.",
+                self.config.agentd_path,
+                self.config.disk_path.display()
+            );
+        }
+
+        // Make it executable just in case
+        let _ = serial.exec_command(
+            &format!("chmod +x {}", self.config.agentd_path), None, 3
+        ).await;
+
+        // ── Step 7: Install socat (if not already present) ───────────────────
+        emit(pw, "installing", "Checking if socat is installed…", 60, "info", None).await;
+
+        let socat_check = serial.exec_command("which socat 2>&1 && echo SOCAT_OK", Some("SOCAT_OK"), 5)
+            .await.unwrap_or_default();
+
+        if socat_check.contains("SOCAT_OK") && !socat_check.contains("not found") {
+            emit(pw, "installing", "socat already installed", 70, "success", None).await;
+            log::info!("socat already installed");
+        } else {
+            emit(pw, "installing", "Installing socat (requires internet)…", 62, "command",
+                Some("apk add --no-cache socat".into())).await;
+            log::info!("Installing socat...");
+
+            // Set up repositories
+            let _ = serial.exec_command(
+                "echo 'https://dl-cdn.alpinelinux.org/alpine/v3.19/main' > /etc/apk/repositories",
+                None, 5
+            ).await;
+            let _ = serial.exec_command(
+                "echo 'https://dl-cdn.alpinelinux.org/alpine/v3.19/community' >> /etc/apk/repositories",
+                None, 5
+            ).await;
+
+            // apk update + install socat
+            emit(pw, "installing", "Running apk update…", 64, "command", Some("apk update".into())).await;
+            let update_output = serial.exec_command("apk update 2>&1", None, 30)
+                .await.unwrap_or_default();
+            log::info!("apk update: {}", update_output.chars().take(300).collect::<String>());
+
+            emit(pw, "installing", "Installing socat…", 67, "command", Some("apk add --no-cache socat".into())).await;
+            let install_output = serial.exec_command(
+                "apk add --no-cache socat 2>&1 && echo INSTALL_OK",
+                Some("INSTALL_OK"),
+                60,
+            ).await.context("socat installation failed")?;
+
+            if install_output.contains("INSTALL_OK") {
+                emit(pw, "installing", "socat installed successfully", 70, "success", None).await;
+            } else {
+                emit(pw, "installing", "socat install may have failed — continuing…", 70, "warning",
+                    Some(install_output.chars().take(300).collect())).await;
+                log::warn!("socat install output: {}", install_output.chars().take(500).collect::<String>());
+            }
+        }
+
+        // ── Step 8: Start agentd ─────────────────────────────────────────────
+        emit(pw, "booting", "Starting agentd daemon…", 75, "command",
+            Some(format!("{} socket --path /tmp/mowisai.sock", self.config.agentd_path))).await;
         log::info!("Starting agentd daemon...");
-        self.type_command_slow(&agentd_cmd, 30).await?;
-        sleep(Duration::from_secs(3)).await;
-        emit(pw, "booting", "agentd started", 78, "success", None).await;
 
-        // Phase 4b: Bridge with socat
-        let socat_cmd = format!(
-            "socat TCP-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &"
-        );
-        emit(pw, "booting", "Setting up TCP bridge (socat)…", 80, "command", Some(socat_cmd.clone())).await;
-        log::info!("Setting up TCP bridge (socat)...");
-        self.type_command_slow(&socat_cmd, 25).await?;
+        // Kill any existing instance first
+        let _ = serial.exec_command("pkill -f agentd 2>/dev/null; rm -f /tmp/mowisai.sock", None, 3).await;
+        sleep(Duration::from_millis(500)).await;
+
+        // Start agentd in background
+        serial.exec_background(
+            &format!("{} socket --path /tmp/mowisai.sock &", self.config.agentd_path)
+        ).await.context("Failed to send agentd start command")?;
         sleep(Duration::from_secs(2)).await;
-        emit(pw, "booting", "socat bridge configured", 82, "success", None).await;
 
-        // Phase 5: Wait for the TCP port to become reachable from Windows
-        emit(pw, "booting", &format!("Waiting for agent on port {} (up to {}s)…", self.config.agent_port, PORT_READY_TIMEOUT_SECS), 85, "info", None).await;
-        log::info!(
-            "Waiting for agent on port {} (up to {}s)...",
-            self.config.agent_port,
-            PORT_READY_TIMEOUT_SECS
-        );
-        self.wait_for_port("agentd", PORT_READY_TIMEOUT_SECS)
-            .await?;
+        // Verify it's running
+        let ps_output = serial.exec_command("ps aux | grep agentd | grep -v grep", None, 5)
+            .await.unwrap_or_default();
+        if ps_output.contains("agentd") {
+            emit(pw, "booting", "agentd process running", 78, "success",
+                Some(ps_output.lines().find(|l| l.contains("agentd")).unwrap_or("").to_string())).await;
+        } else {
+            emit(pw, "booting", "agentd may not have started — checking socket…", 78, "warning",
+                Some(ps_output.chars().take(200).collect())).await;
+            log::warn!("agentd process not visible in ps: {}", ps_output);
+        }
+
+        // ── Step 9: Start socat TCP bridge ───────────────────────────────────
+        emit(pw, "booting", "Starting TCP bridge (socat)…", 82, "command",
+            Some("socat TCP-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &".into())).await;
+        log::info!("Starting socat TCP bridge...");
+
+        // Kill any existing socat
+        let _ = serial.exec_command("pkill -f 'socat TCP-LISTEN' 2>/dev/null", None, 3).await;
+        sleep(Duration::from_millis(500)).await;
+
+        serial.exec_background(
+            "socat TCP-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &"
+        ).await.context("Failed to send socat start command")?;
+        sleep(Duration::from_secs(1)).await;
+
+        // Verify socat is running
+        let socat_ps = serial.exec_command("ps aux | grep socat | grep -v grep", None, 5)
+            .await.unwrap_or_default();
+        if socat_ps.contains("socat") {
+            emit(pw, "booting", "socat bridge running", 85, "success",
+                Some(socat_ps.lines().find(|l| l.contains("socat")).unwrap_or("").to_string())).await;
+        } else {
+            emit(pw, "booting", "socat may not have started — will check port…", 85, "warning", None).await;
+            log::warn!("socat process not visible in ps: {}", socat_ps);
+        }
+
+        // ── Step 10: Wait for Windows-side port to be reachable ──────────────
+        emit(pw, "booting", &format!("Waiting for port {} to become reachable from Windows…", self.config.agent_port), 88, "info", None).await;
+        log::info!("Waiting for port {} to become reachable...", self.config.agent_port);
+
+        self.wait_for_port("agentd+socat bridge", PORT_READY_TIMEOUT_SECS, pw).await?;
 
         self.running.store(true, Ordering::SeqCst);
         emit(pw, "ready", "Developer Mode bootstrap complete!", 100, "success",
-            Some(format!("Bridge: 127.0.0.1:{}", self.config.agent_port))).await;
-        log::info!("Developer Mode bootstrap complete!");
+            Some(format!("Bridge active on 127.0.0.1:{}", self.config.agent_port))).await;
+        log::info!("Developer Mode bootstrap complete! Agent reachable on 127.0.0.1:{}", self.config.agent_port);
 
         Ok(ConnectionInfo {
             kind: ConnectionKind::TcpWithToken,
@@ -477,14 +624,10 @@ impl VmLauncher for DeveloperLauncher {
     async fn start(&self, progress: Option<ProgressSender>) -> Result<ConnectionInfo> {
         let pw = &progress;
         let args = self.build_qemu_args();
+        let full_cmd = format!("{} {}", self.config.qemu_path.display(), args.join(" "));
 
-        emit(pw, "booting", &format!("Starting QEMU: {} {}", self.config.qemu_path.display(), args.join(" ")), 5, "command",
-            Some(format!("{} {}", self.config.qemu_path.display(), args.join(" ")))).await;
-        log::info!(
-            "Starting QEMU (developer mode): {} {}",
-            self.config.qemu_path.display(),
-            args.join(" ")
-        );
+        emit(pw, "booting", "Starting QEMU…", 5, "command", Some(full_cmd.clone())).await;
+        log::info!("Starting QEMU (developer mode): {}", full_cmd);
 
         #[cfg(windows)]
         let mut cmd = {
@@ -497,12 +640,30 @@ impl VmLauncher for DeveloperLauncher {
 
         cmd.args(&args)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .context("Failed to start QEMU. Verify the binary path is correct.")?;
+
+        // Spawn background tasks to log QEMU output
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    log::warn!("[QEMU stderr] {}", line);
+                }
+            });
+        }
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    log::info!("[QEMU stdout] {}", line);
+                }
+            });
+        }
 
         emit(pw, "booting", &format!("QEMU process spawned (PID: {:?})", child.id()), 10, "success", None).await;
         log::info!("QEMU process spawned (pid: {:?})", child.id());

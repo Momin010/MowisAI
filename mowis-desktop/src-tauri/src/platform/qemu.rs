@@ -124,28 +124,83 @@ impl QemuLauncher {
         let mut cmd = Command::new(&self.config.qemu_bin);
         cmd.args(self.build_args(token, use_snap))
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .kill_on_drop(true);
 
-        cmd.spawn().context("spawning QEMU process")
+        // In debug builds or when MOWIS_DEBUG=1, capture QEMU output for troubleshooting
+        let debug = cfg!(debug_assertions) || std::env::var("MOWIS_DEBUG").is_ok();
+        if debug {
+            log::info!("Debug mode: QEMU output will be logged");
+            cmd.stdout(Stdio::piped())
+               .stderr(Stdio::piped());
+        } else {
+            cmd.stdout(Stdio::null())
+               .stderr(Stdio::null());
+        }
+
+        let mut child = cmd.spawn().context("spawning QEMU process")?;
+
+        // In debug mode, spawn threads to log QEMU output
+        if debug {
+            if let Some(stdout) = child.stdout.take() {
+                std::thread::spawn(move || {
+                    use std::io::{BufRead, BufReader};
+                    for line in BufReader::new(stdout).lines().flatten() {
+                        log::info!("[QEMU stdout] {}", line);
+                    }
+                });
+            }
+            if let Some(stderr) = child.stderr.take() {
+                std::thread::spawn(move || {
+                    use std::io::{BufRead, BufReader};
+                    for line in BufReader::new(stderr).lines().flatten() {
+                        log::warn!("[QEMU stderr] {}", line);
+                    }
+                });
+            }
+        }
+
+        Ok(child)
     }
 
-    /// Wait until the TCP serial bridge is accepting connections (up to 30 s).
+    /// Wait until the TCP serial bridge is accepting connections (up to 90 s).
     pub async fn wait_for_agent(&self) -> Result<()> {
         let addr: SocketAddr = self.config.agent_tcp
             .parse()
             .context("parse agent_tcp address")?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(90);  // Increased from 30 to 90 seconds
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let mut checks = 0u32;
         loop {
             if std::time::Instant::now() > deadline {
-                bail!("Timed out waiting for agentd serial bridge on {}", self.config.agent_tcp);
+                let troubleshooting = format!(
+                    "Timed out waiting for agentd serial bridge on {}.\n\n\
+                     QEMU started but the Alpine VM did not respond on the serial port.\n\n\
+                     Possible causes:\n\
+                     1. Alpine disk image is corrupted or missing\n\
+                     2. WHPX/virtualization is not enabled (check Windows Features)\n\
+                     3. agentd service failed to start inside the VM\n\
+                     4. Serial port configuration mismatch\n\n\
+                     Try:\n\
+                     - Enable Windows Hypervisor Platform in 'Turn Windows features on or off'\n\
+                     - Check QEMU disk image at: {}\n\
+                     - Use Developer Mode for automatic Alpine bootstrap\n\
+                     - Check Windows Event Viewer for virtualization errors",
+                    self.config.agent_tcp,
+                    self.config.image_path.display()
+                );
+                bail!("{}", troubleshooting);
             }
+
+            checks += 1;
+            if checks % 4 == 0 {
+                log::info!("Waiting for QEMU serial bridge... ({}s elapsed)", checks / 2);
+            }
+
             if timeout(Duration::from_secs(1), TcpStream::connect(addr))
                 .await
                 .map(|r| r.is_ok())
                 .unwrap_or(false)
             {
+                log::info!("QEMU serial bridge connected on {}", self.config.agent_tcp);
                 return Ok(());
             }
             sleep(Duration::from_millis(500)).await;
