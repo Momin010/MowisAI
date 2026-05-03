@@ -20,7 +20,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
@@ -510,12 +510,16 @@ impl VmLauncher for DeveloperLauncher {
     }
 
     async fn stop(&self) -> Result<()> {
-        let mut guard = self.child.lock().unwrap();
-        if let Some(ref mut child) = *guard {
+        let mut child_opt = {
+            let mut guard = self.child.lock().unwrap();
+            guard.take()
+        };
+
+        if let Some(ref mut child) = child_opt {
             log::info!("Stopping QEMU developer mode process");
             let _ = child.kill().await;
         }
-        *guard = None;
+
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }

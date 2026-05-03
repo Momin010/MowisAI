@@ -146,8 +146,8 @@ pub async fn run_zero_session(
     workspace: WorkspaceInfo,
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
-    let ws_path = Path::new(&workspace.path).to_path_buf();
-    let original_history = get_session_history(&session_id);
+    let _ws_path = Path::new(&workspace.path).to_path_buf();
+    let _original_history = get_session_history(&session_id);
 
     // Classify intent: Chat or Build
     let intent = classify_intent(&prompt);

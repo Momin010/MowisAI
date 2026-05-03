@@ -298,7 +298,8 @@ impl WindowsLauncher {
             .await;
         if let Ok(ref out) = repo_out {
             if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim();
+                let stderr_raw = String::from_utf8_lossy(&out.stderr);
+                let stderr = stderr_raw.trim();
                 log::warn!("Configuring APK repositories failed: {}", stderr);
             } else {
                 log::info!("APK repositories configured");
@@ -914,7 +915,8 @@ impl WindowsLauncher {
             .await;
         if let Ok(ref out) = repo_out {
             if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim();
+                let stderr_raw = String::from_utf8_lossy(&out.stderr);
+                let stderr = stderr_raw.trim();
                 emit(pw, "installing", "APK repository config failed", 33, "warning", Some(stderr.to_string())).await;
                 log::warn!("Configuring APK repositories failed: {}", stderr);
             } else {
@@ -1106,10 +1108,10 @@ impl VmLauncher for WindowsLauncher {
         }
         let qemu_launcher = QemuLauncher::new(qemu_cfg.clone());
         
-        emit(pw, "booting", "Checking QEMU availability…", 20, "command", Some(format!("{} --version", qemu_cfg.qemu_path.display()))).await;
+        emit(pw, "booting", "Checking QEMU availability…", 20, "command", Some(format!("{} --version", qemu_cfg.qemu_bin.display()))).await;
 
         // Check if QEMU is available before trying to spawn
-        let qemu_check = Command::new(&qemu_cfg.qemu_path)
+        let qemu_check = Command::new(&qemu_cfg.qemu_bin)
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1132,7 +1134,7 @@ impl VmLauncher for WindowsLauncher {
             }
         }
         
-        emit(pw, "booting", "Spawning QEMU/WHPX…", 30, "command", Some(format!("{} {}", qemu_cfg.qemu_path.display(), qemu_cfg.ram_mb))).await;
+        emit(pw, "booting", "Spawning QEMU/WHPX…", 30, "command", Some(format!("{} {}", qemu_cfg.qemu_bin.display(), qemu_cfg.ram_mb))).await;
         let child = qemu_launcher
             .spawn_process(&token, true)
             .await
