@@ -23,7 +23,8 @@ use llm::{LlmMessage, MessageContent, Role, ToolCallRequest};
 use tools::{execute_tool, tool_definitions};
 use workspace::WorkspaceInfo;
 
-use crate::{BridgeEvent, Config, Task, TaskStatus, FileChange, FileAction};
+use crate::types::{BridgeEvent, Config, Task, TaskStatus, FileChange, FileAction};
+use crate::zero_mode::llm::LlmResponse;
 use std::path::Path;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -292,7 +293,7 @@ async fn run_build_mode(
 
         // Execute tool calls sequentially, emit task events.
         let mut tool_results: Vec<(String, String)> = Vec::new();
-        let mut file_changes: Vec<crate::FileChange> = Vec::new();
+        let mut file_changes: Vec<FileChange> = Vec::new();
 
         for tc in &response.tool_calls {
             task_counter += 1;
@@ -356,21 +357,21 @@ async fn run_build_mode(
                     let existed_before = before_snapshot.is_some();
                     let action = match tc.name.as_str() {
                         tools::WRITE_FILE => {
-                            if existed_before { crate::FileAction::Modified } else { crate::FileAction::Created }
+                            if existed_before { FileAction::Modified } else { FileAction::Created }
                         }
-                        tools::APPEND_FILE | tools::REPLACE_IN_FILE | tools::EDIT_FILE_LINES => crate::FileAction::Modified,
-                        tools::DELETE_FILE => crate::FileAction::Deleted,
-                        tools::READ_FILE | tools::READ_FILE_LINES => crate::FileAction::Read,
+                        tools::APPEND_FILE | tools::REPLACE_IN_FILE | tools::EDIT_FILE_LINES => FileAction::Modified,
+                        tools::DELETE_FILE => FileAction::Deleted,
+                        tools::READ_FILE | tools::READ_FILE_LINES => FileAction::Read,
                         _ => continue,
                     };
                     
                     // Count lines and read content for diff view
-                    let (lines_added, lines_deleted, content) = if action != crate::FileAction::Read && action != crate::FileAction::Deleted {
+                    let (lines_added, lines_deleted, content) = if action != FileAction::Read && action != FileAction::Deleted {
                         if let Ok(file_content) = std::fs::read_to_string(&full_path) {
                             let line_count = file_content.lines().count();
                             let (added, deleted) = match action {
-                                crate::FileAction::Created => (line_count, 0),
-                                crate::FileAction::Modified => {
+                                FileAction::Created => (line_count, 0),
+                                FileAction::Modified => {
                                     // For modifications, estimate based on tool args
                                     if tc.name == tools::APPEND_FILE {
                                         if let Some(text) = tc.args["text"].as_str() {
@@ -391,14 +392,14 @@ async fn run_build_mode(
                         } else {
                             (0, 0, None)
                         }
-                    } else if action == crate::FileAction::Deleted {
+                    } else if action == FileAction::Deleted {
                         // For deleted files, we can't read content anymore
                         (0, 0, None)
                     } else {
                         (0, 0, None)
                     };
                     
-                    file_changes.push(crate::FileChange {
+                    file_changes.push(FileChange {
                         path: path.to_string(),
                         action,
                         lines_added,
@@ -408,9 +409,9 @@ async fn run_build_mode(
                     });
                 } else if tc.name == tools::MOVE_FILE {
                     if let Some(to) = tc.args["to"].as_str() {
-                        file_changes.push(crate::FileChange {
+                        file_changes.push(FileChange {
                             path: to.to_string(),
-                            action: crate::FileAction::Moved,
+                            action: FileAction::Moved,
                             lines_added: 0,
                             lines_deleted: 0,
                             before_content: None,
@@ -519,8 +520,8 @@ async fn run_build_mode(
                 if task_ok {
                     if let Some(path) = tc.args["path"].as_str() {
                         let action = match tc.name.as_str() {
-                            tools::WRITE_FILE => crate::FileAction::Created,
-                            tools::APPEND_FILE | tools::REPLACE_IN_FILE | tools::EDIT_FILE_LINES => crate::FileAction::Modified,
+                            tools::WRITE_FILE => FileAction::Created,
+                            tools::APPEND_FILE | tools::REPLACE_IN_FILE | tools::EDIT_FILE_LINES => FileAction::Modified,
                             _ => continue,
                         };
                         
@@ -528,8 +529,8 @@ async fn run_build_mode(
                         let (lines_added, lines_deleted, content) = if let Ok(file_content) = std::fs::read_to_string(&full_path) {
                             let line_count = file_content.lines().count();
                             let (added, deleted) = match action {
-                                crate::FileAction::Created => (line_count, 0),
-                                crate::FileAction::Modified => {
+                                FileAction::Created => (line_count, 0),
+                                FileAction::Modified => {
                                     if tc.name == tools::APPEND_FILE {
                                         if let Some(text) = tc.args["text"].as_str() {
                                             (text.lines().count(), 0)
@@ -547,7 +548,7 @@ async fn run_build_mode(
                             (0, 0, None)
                         };
                         
-                    improvement_changes.push(crate::FileChange {
+                    improvement_changes.push(FileChange {
                             path: path.to_string(),
                             action,
                             lines_added,

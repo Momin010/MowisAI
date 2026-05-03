@@ -3,7 +3,7 @@ use crate::state::*;
 use crate::types::*;
 use crate::zero_mode;
 use std::sync::Arc;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 

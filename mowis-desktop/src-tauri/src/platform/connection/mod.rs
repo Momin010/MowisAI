@@ -8,7 +8,7 @@
 // All variants expose the same send/recv_lines interface so the rest of
 // the codebase never needs to know which transport is active.
 
-use crate::platform::{auth, ConnectionInfo, ConnectionKind};
+use crate::platform::{ConnectionInfo, ConnectionKind};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

@@ -7,10 +7,9 @@
 // call_llm() is the single entry point — dispatches based on config.provider.
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::Config;
+use crate::types::Config;
 
 // ── Common message types ──────────────────────────────────────────────────────
 

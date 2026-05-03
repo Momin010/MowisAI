@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::process::Command;
 use uuid::Uuid;
 

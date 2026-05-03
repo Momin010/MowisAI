@@ -13,7 +13,6 @@
 // (TCP port). On subsequent launches we pass `-loadvm mowis-snap` so the VM
 // resumes in <5 s instead of a full boot.
 
-use crate::platform::{auth, ConnectionInfo, ConnectionKind};
 use anyhow::{bail, Context, Result};
 use std::net::SocketAddr;
 use std::path::PathBuf;
