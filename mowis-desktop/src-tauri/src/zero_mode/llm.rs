@@ -355,17 +355,13 @@ async fn get_token_from_service_account(sa_key_path: &str) -> Result<String> {
 
     // Parse RSA private key (PKCS#8 PEM) and sign.
     use rsa::pkcs8::DecodePrivateKey as _;
+    use rsa::signature::Signer as _;
     let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(private_key_pem)
         .context("parse RSA private key from service account PKCS#8 PEM")?;
 
-    let digest = {
-        use sha2::{Sha256, Digest};
-        Sha256::digest(signing_input.as_bytes())
-    };
-
-    let scheme = rsa::pkcs1v15::SigningScheme::<sha2::Sha256>::new();
-    let signature = scheme.sign(None, &private_key, &digest)
-        .context("RSA-PKCS1v15 sign failed")?;
+    let signing_key = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(private_key);
+    let signature = signing_key
+        .sign(signing_input.as_bytes());
     let signature_b64 = b64.encode(signature.as_bytes());
 
     let jwt = format!("{signing_input}.{signature_b64}");
