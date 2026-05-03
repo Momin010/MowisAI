@@ -139,20 +139,22 @@ impl QemuLauncher {
 
         let mut child = cmd.spawn().context("spawning QEMU process")?;
 
-        // In debug mode, spawn threads to log QEMU output
+        // In debug mode, spawn async tasks to log QEMU output
         if debug {
             if let Some(stdout) = child.stdout.take() {
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader};
-                    for line in BufReader::new(stdout).lines().flatten() {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncBufReadExt, BufReader};
+                    let mut lines = BufReader::new(stdout).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
                         log::info!("[QEMU stdout] {}", line);
                     }
                 });
             }
             if let Some(stderr) = child.stderr.take() {
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader};
-                    for line in BufReader::new(stderr).lines().flatten() {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncBufReadExt, BufReader};
+                    let mut lines = BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
                         log::warn!("[QEMU stderr] {}", line);
                     }
                 });
