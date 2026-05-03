@@ -355,7 +355,7 @@ async fn get_token_from_service_account(sa_key_path: &str) -> Result<String> {
 
     // Parse RSA private key (PKCS#8 PEM) and sign.
     use rsa::pkcs8::DecodePrivateKey as _;
-    use rsa::signature::Signer as _;
+    use rsa::signature::{Signer as _, SignatureEncoding as _};
     let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(private_key_pem)
         .context("parse RSA private key from service account PKCS#8 PEM")?;
 

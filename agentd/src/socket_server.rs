@@ -144,17 +144,33 @@ fn chroot_run_streaming(root: &std::path::Path, cmd: &str) -> Result<()> {
         .spawn()
         .context("chroot spawn failed")?;
 
-    // Stream stdout
-    if let Some(stdout) = child.stdout.take() {
-        for line in BufReader::new(stdout).lines().flatten() {
-            log::info!("[sandbox] {}", line);
-        }
+    // CRITICAL FIX: Read stdout and stderr CONCURRENTLY to prevent deadlock.
+    // Sequential reading causes pipe buffer deadlock when one stream fills up.
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+
+    let stdout_thread = stdout_handle.map(|stdout| {
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().flatten() {
+                log::info!("[sandbox] {}", line);
+            }
+        })
+    });
+
+    let stderr_thread = stderr_handle.map(|stderr| {
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().flatten() {
+                log::warn!("[sandbox] {}", line);
+            }
+        })
+    });
+
+    // Wait for both reader threads to finish
+    if let Some(t) = stdout_thread {
+        let _ = t.join();
     }
-    // Stream stderr
-    if let Some(stderr) = child.stderr.take() {
-        for line in BufReader::new(stderr).lines().flatten() {
-            log::warn!("[sandbox] {}", line);
-        }
+    if let Some(t) = stderr_thread {
+        let _ = t.join();
     }
 
     let status = child.wait().context("chroot wait failed")?;

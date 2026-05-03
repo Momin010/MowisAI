@@ -122,6 +122,7 @@ Orchestration communicates with agentd core via Unix socket at `/tmp/agentd.sock
 - **67 tests must always pass** — never regress
 - **No `unwrap()` in production code paths** — use `?` or proper error handling
 - **agentd core (socket API) is immutable** — orchestration communicates via socket only
+- **Always read stdout/stderr concurrently** — sequential pipe reading causes deadlock when buffers fill
 
 ## AI Backend
 
@@ -163,3 +164,40 @@ runtime → agentd-protocol
 ```
 
 agentd-protocol is the shared types crate with no circular dependencies.
+
+## Known Issues and Fixes
+
+### Pipe Deadlock During Image Setup (FIXED)
+**Symptom:** Orchestration hangs at "Initializing..." during first sandbox creation, never completes.
+
+**Root Cause:** `chroot_run_streaming()` in `socket_server.rs` was reading stdout and stderr **sequentially**. When the child process writes to stderr before finishing stdout, stderr's buffer fills up (typically 64KB), the child blocks waiting for someone to read it, but the parent is still blocked waiting for more stdout. Classic pipe deadlock.
+
+**Fix:** Read both streams **concurrently** using separate threads. Never read process output streams sequentially — always use threads or async I/O to prevent buffer deadlock.
+
+**Code Pattern to Avoid:**
+```rust
+// BAD - Sequential reading causes deadlock
+if let Some(stdout) = child.stdout.take() {
+    for line in BufReader::new(stdout).lines() { /* ... */ }
+}
+if let Some(stderr) = child.stderr.take() {
+    for line in BufReader::new(stderr).lines() { /* ... */ }
+}
+```
+
+**Correct Pattern:**
+```rust
+// GOOD - Concurrent reading prevents deadlock
+let stdout_thread = child.stdout.take().map(|stdout| {
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().flatten() { /* ... */ }
+    })
+});
+let stderr_thread = child.stderr.take().map(|stderr| {
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().flatten() { /* ... */ }
+    })
+});
+if let Some(t) = stdout_thread { let _ = t.join(); }
+if let Some(t) = stderr_thread { let _ = t.join(); }
+```
