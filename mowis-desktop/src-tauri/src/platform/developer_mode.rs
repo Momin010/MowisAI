@@ -450,17 +450,21 @@ impl DeveloperLauncher {
             if attempt_count % 5 == 0 {
                 emit(pw, "booting", &format!("Still waiting for serial console ({}s)…", attempt_count * 2), 18, "info", None).await;
 
-                // Check if QEMU is still alive
-                let mut guard = self.child.lock().unwrap();
-                if let Some(ref mut c) = *guard {
-                    if let Ok(Some(status)) = c.try_wait() {
-                        drop(guard);
-                        emit(pw, "error", &format!("QEMU process died! Exit: {}", status), 0, "error", None).await;
-                        anyhow::bail!("QEMU process died during boot with exit status: {}. \
-                            The VM failed to start. Check QEMU binary compatibility and paths.", status);
+                // Check if QEMU is still alive (drop guard before any await)
+                let qemu_died = {
+                    let mut guard = self.child.lock().unwrap();
+                    if let Some(ref mut c) = *guard {
+                        c.try_wait().ok().flatten()
+                    } else {
+                        None
                     }
+                };
+
+                if let Some(status) = qemu_died {
+                    emit(pw, "error", &format!("QEMU process died! Exit: {}", status), 0, "error", None).await;
+                    anyhow::bail!("QEMU process died during boot with exit status: {}. \
+                        The VM failed to start. Check QEMU binary compatibility and paths.", status);
                 }
-                drop(guard);
             }
 
             sleep(Duration::from_secs(2)).await;
