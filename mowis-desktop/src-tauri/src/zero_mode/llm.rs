@@ -173,7 +173,7 @@ async fn call_gemini(
         "system_instruction": { "parts": [{ "text": system_prompt }] },
         "contents": contents,
         "tools": [{ "function_declarations": func_decls }],
-        "generation_config": { "max_output_tokens": 8192, "temperature": 0.2 }
+        "generation_config": { "max_output_tokens": 16384, "temperature": 0.4 }
     });
 
     let client = reqwest::Client::new();
@@ -271,7 +271,7 @@ async fn call_vertex(
         "system_instruction": { "parts": [{ "text": system_prompt }] },
         "contents": contents,
         "tools": [{ "function_declarations": func_decls }],
-        "generation_config": { "max_output_tokens": 8192, "temperature": 0.2 }
+        "generation_config": { "max_output_tokens": 16384, "temperature": 0.4 }
     });
 
     // Acquire bearer token — prefer service account key file, fall back to ADC.
@@ -510,7 +510,7 @@ async fn call_anthropic(
         "system": system_prompt,
         "messages": anth_messages,
         "tools": tools,
-        "max_tokens": 8096
+        "max_tokens": 16384
     });
 
     let client = reqwest::Client::new();
@@ -664,7 +664,7 @@ async fn call_openai_compat(
         "messages": oai_messages,
         "tools": tools,
         "tool_choice": "auto",
-        "max_tokens": 4096
+        "max_tokens": 16384
     });
 
     let client = reqwest::Client::new();

@@ -37,7 +37,7 @@
   },
   {
     "name": "write_file",
-    "description": "Write (create or overwrite) a file in the workspace.",
+    "description": "Write (create or overwrite) a file in the workspace. CRITICAL: Content MUST be properly formatted with newlines and indentation. NEVER write minified/single-line code. HTML: each tag on its own line. CSS: each property on its own line. JS: each statement on its own line.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -47,7 +47,7 @@
         },
         "content": {
           "type": "string",
-          "description": "Full file content to write."
+          "description": "Full file content to write. MUST be properly formatted with newlines and indentation — NOT minified."
         }
       },
       "required": ["path", "content"]

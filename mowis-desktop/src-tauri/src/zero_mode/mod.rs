@@ -42,23 +42,57 @@ fn is_website_project(prompt: &str) -> bool {
     keywords.iter().any(|kw| lower.contains(kw))
 }
 
-/// Load frontend skill files if they exist
+/// Load frontend skill files if they exist.
+/// Searches in multiple locations: exe directory, home directory, cwd.
 fn load_frontend_skills() -> Option<String> {
-    let skill_files = [
+    let skill_names = [
         "SKILL_FRONTNED (1).md",
         "SKILL_FRONTNED (2).md",
         "SKILL_FRONTEND (1).md",
         "SKILL_FRONTEND (2).md",
     ];
-    let mut skills = Vec::new();
-    
-    for file in &skill_files {
-        if let Ok(content) = std::fs::read_to_string(file) {
-            skills.push(content);
+
+    // Build a list of candidate directories to search.
+    let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // 1. Directory containing the running executable.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            search_dirs.push(dir.to_path_buf());
         }
     }
-    
+
+    // 2. Home directory.
+    if let Some(home) = dirs::home_dir() {
+        search_dirs.push(home.clone());
+        search_dirs.push(home.join("MowisAI"));
+    }
+
+    // 3. Current working directory.
+    if let Ok(cwd) = std::env::current_dir() {
+        search_dirs.push(cwd);
+    }
+
+    // 4. Windows: C:\Users\Public\MowisAI (shared install).
+    #[cfg(windows)]
+    {
+        search_dirs.push(std::path::PathBuf::from("C:\\Users\\Public\\MowisAI"));
+    }
+
+    let mut skills = Vec::new();
+
+    for dir in &search_dirs {
+        for name in &skill_names {
+            let path = dir.join(name);
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                log::info!("Loaded frontend skill from {}", path.display());
+                skills.push(content);
+            }
+        }
+    }
+
     if skills.is_empty() {
+        log::warn!("No frontend skill files found in any search directory");
         None
     } else {
         Some(skills.join("\n\n---\n\n"))
@@ -425,7 +459,20 @@ async fn run_build_mode(
 
             // CRITICAL: Truncate tool results to prevent token explosion
             // Full file contents can be 10KB+, but the LLM only needs a summary
-            let truncated_result = compact_tool_result(&tc.name, result, task_ok);
+            let mut truncated_result = compact_tool_result(&tc.name, result, task_ok);
+
+            // QUALITY GATE: Validate write_file output and give the LLM feedback
+            if task_ok && tc.name == tools::WRITE_FILE {
+                if let (Some(path), Some(content)) = (tc.args["path"].as_str(), tc.args["content"].as_str()) {
+                    if let Err(feedback) = validate_file_quality(path, content) {
+                        log::warn!("Quality issue in {}: {}", path, feedback);
+                        truncated_result = format!(
+                            "{}\n\n⚠ QUALITY ISSUE DETECTED:\n{}\n\nYou MUST fix these issues in your next tool call. Rewrite the file with proper formatting and quality.",
+                            truncated_result, feedback
+                        );
+                    }
+                }
+            }
 
             tool_results.push((tc.id.clone(), truncated_result));
         }
@@ -451,10 +498,15 @@ async fn run_build_mode(
     // Check if this was a build task (not just chat)
     if total_tool_calls > 0 {
         // Force validation: tell the model to review and improve its work
-        let validation_prompt = "Perform one focused quality pass on your latest changes. \
-            Check correctness, missing edge cases, obvious UX issues, and broken imports. \
-            If issues exist, fix them now with tool calls. \
-            Keep edits high-signal and avoid rewriting files unless necessary.";
+        let validation_prompt = "QUALITY REVIEW — Check every file you just created or modified:\n\n\
+            1. Is all HTML/CSS/JS properly formatted with newlines and indentation? (NOT minified/single-line)\n\
+            2. Do CSS media queries close with '}}' not ')'? Fix any syntax errors.\n\
+            3. Is there real, meaningful content? (No placeholders like 'lorem ipsum' or 'Add content here')\n\
+            4. Are HTML pages 50+ lines with proper semantic structure (<header>, <main>, <section>, <footer>)?\n\
+            5. Are CSS files 50+ lines with responsive design, hover states, and CSS variables?\n\
+            6. Does the design look professional? Would a real developer ship this?\n\n\
+            If ANY file fails these checks, rewrite it NOW with proper quality. Use tool calls to fix issues.\n\
+            If everything looks good, say 'Quality check passed' and do nothing.";
         
         messages.push(LlmMessage::user(validation_prompt.to_string()));
         
@@ -582,7 +634,7 @@ async fn run_build_mode(
 
 fn system_prompt_for(ws: &WorkspaceInfo, frontend_skills: Option<&str>) -> String {
     let base_prompt = format!(
-        "You are an AI agent running in Zero-Protection mode on the user's computer.\n\
+        "You are an expert software engineer running in Zero-Protection mode on the user's computer.\n\
          Your workspace directory is: {path}\n\n\
          You have 13 tools available:\n\
          - read_file, read_file_lines — read entire files or specific line ranges\n\
@@ -593,7 +645,43 @@ fn system_prompt_for(ws: &WorkspaceInfo, frontend_skills: Option<&str>) -> Strin
          - run_command — execute shell commands (use sparingly)\n\n\
          All paths you supply must be workspace-relative (e.g. 'src/main.py', not '/home/…').\n\
          Do not reference files outside the workspace.\n\n\
-         Efficiency and quality rules:\n\
+         ═══════════════════════════════════════════════════════════════════════════════\n\
+         CRITICAL CODE QUALITY RULES — VIOLATION = FAILURE\n\
+         ═══════════════════════════════════════════════════════════════════════════════\n\n\
+         1. FORMATTING (MANDATORY):\n\
+            - ALL code MUST be properly indented with newlines — NEVER write minified/single-line code\n\
+            - HTML: each tag on its own line, proper indentation (2 spaces)\n\
+            - CSS: each property on its own line, opening brace on same line, closing brace on own line\n\
+            - JS: proper indentation, semicolons, each statement on its own line\n\
+            - WRONG: '<html><body><h1>Hello</h1></body></html>'\n\
+            - RIGHT: each element on its own line with proper nesting\n\n\
+         2. SUBSTANCE (MANDATORY):\n\
+            - Write REAL, COMPLETE code — NO placeholder text like 'lorem ipsum' or 'Add content here'\n\
+            - Every page needs meaning: real sections, real copy, real functionality\n\
+            - Minimum viable output: 100+ lines per page for web projects\n\
+            - CSS files should be 80+ lines minimum with real styling\n\
+            - Include hover states, transitions, responsive design, and visual polish\n\n\
+         3. CSS SYNTAX (MANDATORY):\n\
+            - Media queries close with '}}' — NEVER with ')'\n\
+            - Always validate: opening '{{' must have matching '}}'\n\
+            - Use CSS custom properties (variables) for colors and spacing\n\
+            - Include responsive breakpoints: @media (max-width: 768px) at minimum\n\n\
+         4. MULTI-FILE STRUCTURE:\n\
+            - Separate concerns: HTML for structure, CSS for style, JS for behavior\n\
+            - Link CSS in <head>: <link rel=\"stylesheet\" href=\"css/style.css\">\n\
+            - Link JS before </body>: <script src=\"js/script.js\"></script>\n\
+            - Use semantic HTML5: <header>, <nav>, <main>, <section>, <footer>\n\n\
+         5. VISUAL QUALITY:\n\
+            - Choose distinctive fonts — NEVER use Arial, Helvetica, or system defaults\n\
+            - Use Google Fonts: <link href=\"https://fonts.googleapis.com/css2?family=...\">\n\
+            - Color scheme: pick 3-5 cohesive colors, use CSS variables\n\
+            - Add visual depth: box-shadows, subtle gradients, border-radius\n\
+            - Responsive: must work on mobile (375px) through desktop (1440px)\n\n\
+         6. SELF-REVIEW BEFORE SUBMITTING:\n\
+            - After writing all files, mentally review: is this production-quality?\n\
+            - Would a real developer be proud of this code?\n\
+            - If not, rewrite it. Quality over speed.\n\n\
+         Efficiency rules:\n\
          - Prefer complete writes over many tiny append operations.\n\
          - Keep tool calls purposeful; avoid repeated reads/writes of the same file.\n\
          - For broad changes, create a short plan, then execute in coherent batches.\n\
@@ -615,11 +703,12 @@ fn system_prompt_for(ws: &WorkspaceInfo, frontend_skills: Option<&str>) -> Strin
              MUST be followed to create distinctive, production-grade interfaces:\n\n\
              {}\n\n\
              ═══════════════════════════════════════════════════════════════════════════════\n\
-             Remember:\n\
-             - NO generic fonts (Inter, Roboto, Arial) - choose distinctive typography\n\
-             - NO emojis as icons - use SVG icons (Heroicons, Lucide, etc.)\n\
-             - NO purple gradients or cookie-cutter SaaS layouts\n\
-             - Commit to a BOLD aesthetic direction and execute it fully\n\
+             REMEMBER — These are NON-NEGOTIABLE:\n\
+             - ALL code must be properly formatted with newlines and indentation\n\
+             - CSS media queries close with '}}' NOT ')'\n\
+             - Minimum 100 lines per HTML page, 80+ lines per CSS file\n\
+             - Real content, real design, real functionality — NO placeholders\n\
+             - Distinctive typography, cohesive color scheme, responsive layout\n\
              - Write complete, production-ready code in single file operations\n\
              ═══════════════════════════════════════════════════════════════════════════════",
             base_prompt, skills
@@ -666,6 +755,77 @@ fn message_size_estimate(msg: &LlmMessage) -> usize {
         MessageContent::ToolResult { content, .. } => content.len(),
         MessageContent::ToolCall(_) => 160,
     }).sum()
+}
+
+/// Validate the quality of a written file and return feedback if issues are found.
+/// Returns Ok(()) if the file passes quality checks, or Err(feedback) with specific issues.
+fn validate_file_quality(path: &str, content: &str) -> Result<(), String> {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let mut issues: Vec<String> = Vec::new();
+
+    match ext.as_str() {
+        "html" | "htm" => {
+            // Check for single-line HTML (minified code)
+            if content.lines().count() < 10 && content.len() > 200 {
+                issues.push("HTML is minified/single-line. Each tag MUST be on its own line with proper indentation.".into());
+            }
+            // Check for placeholder text
+            let lower = content.to_lowercase();
+            if lower.contains("lorem ipsum") || lower.contains("add content here") || lower.contains("placeholder") {
+                issues.push("HTML contains placeholder text. Write REAL, meaningful content.".into());
+            }
+            // Check for semantic HTML5
+            if !content.contains("<header") && !content.contains("<main") && !content.contains("<section") {
+                issues.push("HTML lacks semantic structure. Use <header>, <nav>, <main>, <section>, <footer>.".into());
+            }
+        }
+        "css" => {
+            // Check for single-line CSS
+            if content.lines().count() < 5 && content.len() > 100 {
+                issues.push("CSS is minified/single-line. Each property MUST be on its own line.".into());
+            }
+            // Check for wrong closing braces
+            if content.contains(")\n") || content.ends_with(')') {
+                // Look for media queries that close with ) instead of }
+                let lines: Vec<&str> = content.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed == ")" || trimmed.ends_with(") ") {
+                        // Check if this is closing a media query
+                        if i > 0 && (lines[i-1].contains("@media") || lines[i-1].contains('{')) {
+                            issues.push(format!("Line {}: CSS media query closes with ')' instead of '}}'. This is a syntax error.", i + 1));
+                        }
+                    }
+                }
+            }
+            // Check for responsive design
+            if !content.contains("@media") {
+                issues.push("CSS lacks responsive design. Include @media queries for mobile breakpoints.".into());
+            }
+            // Check for CSS variables
+            if !content.contains("--") && !content.contains("var(") {
+                issues.push("CSS lacks custom properties. Use CSS variables (--color-primary, etc.) for maintainability.".into());
+            }
+        }
+        "js" | "jsx" | "ts" | "tsx" => {
+            // Check for single-line JS
+            if content.lines().count() < 5 && content.len() > 100 {
+                issues.push("JavaScript is minified. Write properly formatted code with newlines.".into());
+            }
+            // Check for console.log only
+            if content.trim() == "console.log('Hello from BSDOOM Flower Company');" || 
+               (content.lines().count() <= 3 && content.contains("console.log")) {
+                issues.push("JavaScript file is too minimal. Add real functionality.".into());
+            }
+        }
+        _ => {}
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(issues.join("\n"))
+    }
 }
 
 fn shrink_context_for_budget(messages: &mut Vec<LlmMessage>) {

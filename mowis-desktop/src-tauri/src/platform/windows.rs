@@ -1157,63 +1157,6 @@ impl VmLauncher for WindowsLauncher {
         })
     }
 
-        // ── QEMU/WHPX fallback ─────────────────────────────────────────────
-        log::warn!("WSL2 not available — falling back to QEMU/WHPX");
-        let dev_cfg = crate::platform::developer_mode::DeveloperConfig::load_or_default();
-        let mut qemu_cfg = QemuConfig::windows_whpx(qemu_image_path());
-        if dev_cfg.qemu_path.exists() {
-            qemu_cfg.qemu_bin = dev_cfg.qemu_path.clone();
-        }
-        if dev_cfg.disk_path.exists() {
-            qemu_cfg.image_path = dev_cfg.disk_path.clone();
-        }
-        if dev_cfg.ram_mb >= 256 {
-            qemu_cfg.ram_mb = dev_cfg.ram_mb;
-        }
-        let qemu_launcher = QemuLauncher::new(qemu_cfg.clone());
-        
-        // Check if QEMU is available before trying to spawn
-        let qemu_check = Command::new(&qemu_cfg.qemu_bin)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
-        
-        if let Err(e) = qemu_check {
-            let err_str = e.to_string().to_lowercase();
-            if err_str.contains("not found") || err_str.contains("cannot find") {
-                anyhow::bail!(
-                    "Neither WSL nor QEMU are available on this system.\n\n\
-                     To use MowisAI with the full engine:\n\
-                     1. Install WSL2: Open PowerShell as Administrator and run 'wsl --install', then reboot\n\
-                     2. OR install QEMU: Download from https://qemu.org/download/\n\n\
-                     You can continue using MowisAI in Zero-Protection mode (no engine required) \
-                     by selecting 'zero' mode in Settings."
-                );
-            }
-        }
-        
-        let child = qemu_launcher
-            .spawn_process(&token, true)
-            .await
-            .context("spawning QEMU/WHPX")?;
-        drop(child);
-
-        qemu_launcher
-            .wait_for_agent()
-            .await
-            .context("waiting for QEMU agentd bridge")?;
-
-        Ok(ConnectionInfo {
-            kind: ConnectionKind::TcpWithToken,
-            socket_path: None,
-            tcp_addr: Some(qemu_launcher.agent_tcp().to_owned()),
-            pipe_name: None,
-            auth_token: Some(token),
-        })
-    }
-
     async fn stop(&self) -> Result<()> {
         for proc in &["agentd", "socat"] {
             let _ = win_cmd("wsl.exe")
