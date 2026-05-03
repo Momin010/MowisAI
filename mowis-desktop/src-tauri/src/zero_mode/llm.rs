@@ -362,7 +362,7 @@ async fn get_token_from_service_account(sa_key_path: &str) -> Result<String> {
     let signing_key = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new_unprefixed(private_key);
     let signature = signing_key
         .sign(signing_input.as_bytes());
-    let signature_b64 = b64.encode(signature.as_bytes());
+    let signature_b64 = b64.encode(signature.to_bytes());
 
     let jwt = format!("{signing_input}.{signature_b64}");
 

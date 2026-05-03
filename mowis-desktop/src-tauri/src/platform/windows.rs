@@ -625,12 +625,14 @@ impl WindowsLauncher {
     // ── Progress-aware WSL2 methods ───────────────────────────────────────────
 
     async fn detect_wsl2_with_progress(&self, pw: &Option<ProgressSender>) -> bool {
-        {
+        let cached_value = {
             let cached = self.wsl2_available.lock().unwrap();
-            if let Some(v) = *cached {
-                emit(pw, "detecting", if v { "WSL2 cached as available" } else { "WSL2 cached as unavailable" }, 12, "info", None).await;
-                return v;
-            }
+            *cached
+        };
+
+        if let Some(v) = cached_value {
+            emit(pw, "detecting", if v { "WSL2 cached as available" } else { "WSL2 cached as unavailable" }, 12, "info", None).await;
+            return v;
         }
 
         emit(pw, "detecting", "Running: wsl.exe --list", 10, "command", Some("wsl.exe --list".into())).await;
