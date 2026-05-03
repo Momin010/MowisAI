@@ -43,11 +43,30 @@ pub struct Task {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatMessage {
-    User    { content: String, ts: u64 },
-    Agent   { content: String, streaming: bool, ts: u64 },
-    System  { content: String, ts: u64 },
-    Plan    { sandboxes: Vec<String>, task_count: usize, agent_count: usize, mode: String, ts: u64 },
-    Error   { content: String, ts: u64 },
+    User {
+        content: String,
+        ts: u64,
+    },
+    Agent {
+        content: String,
+        streaming: bool,
+        ts: u64,
+    },
+    System {
+        content: String,
+        ts: u64,
+    },
+    Plan {
+        sandboxes: Vec<String>,
+        task_count: usize,
+        agent_count: usize,
+        mode: String,
+        ts: u64,
+    },
+    Error {
+        content: String,
+        ts: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +78,12 @@ pub struct SessionSummary {
     pub completed_at: Option<u64>,
     pub task_count: usize,
     pub tasks_done: usize,
+    #[serde(default)]
+    pub tokens_total: u64,
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,14 +98,22 @@ pub struct Config {
     /// Vertex AI region (e.g. "us-central1"). Only used when provider == "vertex".
     #[serde(default = "default_gcp_region")]
     pub gcp_region: String,
+    /// Path to a GCP service account JSON key file for Vertex AI authentication.
+    /// When set, this takes precedence over Application Default Credentials.
+    #[serde(default)]
+    pub gcp_service_account_key_path: String,
     /// When true, agent writes are isolated in a tmpfs-style temp directory.
     /// The original project (lower_dir) is never modified by agents.
     #[serde(default = "default_sandbox_enabled")]
     pub sandbox_enabled: bool,
 }
 
-pub fn default_sandbox_enabled() -> bool { true }
-pub fn default_gcp_region() -> String { "us-central1".to_string() }
+pub fn default_sandbox_enabled() -> bool {
+    true
+}
+pub fn default_gcp_region() -> String {
+    "us-central1".to_string()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -93,6 +126,7 @@ impl Default for Config {
             api_key: String::new(),
             gcp_project: String::new(),
             gcp_region: default_gcp_region(),
+            gcp_service_account_key_path: String::new(),
             sandbox_enabled: true,
         }
     }
@@ -237,13 +271,25 @@ pub enum BridgeEvent {
     DaemonConnected,
     DaemonDisconnected,
     TaskAdded(Task),
-    TaskUpdated { id: String, status: TaskStatus },
+    TaskUpdated {
+        id: String,
+        status: TaskStatus,
+    },
     AgentChunk(String),
     AgentMessage(String),
-    PlanReady { sandboxes: Vec<String>, task_count: usize, agent_count: usize, mode: String },
+    PlanReady {
+        sandboxes: Vec<String>,
+        task_count: usize,
+        agent_count: usize,
+        mode: String,
+    },
     OrchestrationComplete,
     OrchestrationFailed(String),
-    SimulationTick { tasks_done: usize, active_agents: usize, tokens_delta: u64 },
+    SimulationTick {
+        tasks_done: usize,
+        active_agents: usize,
+        tokens_delta: u64,
+    },
     /// Compact file change summary to show in chat (icon + filename)
     FileChanges(Vec<FileChange>),
 }

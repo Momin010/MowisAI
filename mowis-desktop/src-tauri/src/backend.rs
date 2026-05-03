@@ -27,6 +27,22 @@ pub struct SetupProgress {
     pub stage: String,   // "detecting" | "installing" | "booting" | "ready" | "error"
     pub message: String,
     pub pct: u8,         // 0..100
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,  // raw command output / response
+    #[serde(default = "default_kind")]
+    pub kind: String,    // "info" | "command" | "output" | "success" | "error" | "warning"
+    pub timestamp: u64,  // millis since epoch
+}
+
+fn default_kind() -> String { "info".into() }
+
+impl SetupProgress {
+    pub fn now_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
 }
 
 // ── Connection state broadcast ────────────────────────────────────────────────
@@ -62,7 +78,7 @@ impl BackendBridge {
             launcher: "pending".into(),
             addr: String::new(),
         });
-        let (progress_tx, progress_rx) = mpsc::channel(32);
+        let (progress_tx, progress_rx) = mpsc::channel(128);
 
         Arc::new(Self {
             launcher,
@@ -79,19 +95,25 @@ impl BackendBridge {
 
     /// Boot the runtime and connect. Called once on app startup.
     pub async fn start(self: &Arc<Self>) -> Result<()> {
-        self.emit_progress("detecting", "Detecting runtime environment…", 5).await;
+        self.emit_detail("detecting", "Detecting runtime environment…", 5, "info", None).await;
+        self.emit_detail("detecting", &format!("Platform: {} / {}", std::env::consts::OS, std::env::consts::ARCH), 6, "info", None).await;
+        self.emit_detail("detecting", &format!("Launcher: {}", self.launcher.name()), 8, "info", None).await;
 
         let info = match self.connect_with_retry(5).await {
             Ok(info) => info,
             Err(e) => {
                 // Surface the full error chain to the frontend so the user can read it.
                 let msg = format!("{:#}", e);
-                self.emit_progress("error", &msg, 0).await;
+                self.emit_detail("error", &msg, 0, "error", None).await;
                 return Err(e);
             }
         };
 
-        self.emit_progress("ready", "Connected to agentd", 100).await;
+        let addr = info.tcp_addr.as_deref()
+            .or(info.socket_path.as_ref().map(|p| p.to_str().unwrap_or("")))
+            .unwrap_or("");
+        self.emit_detail("ready", "Bridge connected", 95, "success", Some(format!("Address: {}", addr))).await;
+        self.emit_detail("ready", "Connected to agentd", 100, "success", None).await;
 
         *self.conn_info.lock().await = Some(info.clone());
         let _ = self.state_tx.send(ConnectionState {
@@ -118,14 +140,23 @@ impl BackendBridge {
         let mut delay = Duration::from_secs(1);
 
         for attempt in 1..=max_attempts {
-            self.emit_progress(
+            self.emit_detail(
                 "booting",
-                &format!("Starting Linux environment (attempt {attempt}/{max_attempts})…"),
+                &format!("Attempt {attempt}/{max_attempts}: launching {}…", self.launcher.name()),
                 (attempt * 15).min(80) as u8,
+                "info",
+                None,
             ).await;
 
-            match self.launcher.start().await {
+            match self.launcher.start(Some(self.progress_tx.clone())).await {
                 Ok(info) => {
+                    self.emit_detail(
+                        "booting",
+                        "Launcher started, opening connection…",
+                        85,
+                        "info",
+                        None,
+                    ).await;
                     match self.open_stream(&info).await {
                         Ok(stream) => {
                             *self.stream.lock().await = Some(stream);
@@ -133,10 +164,12 @@ impl BackendBridge {
                         }
                         Err(e) => {
                             log::warn!("Connection attempt {attempt} failed: {e}");
-                            self.emit_progress(
+                            self.emit_detail(
                                 "installing",
-                                &format!("Connecting… attempt {attempt}/{max_attempts}: {e}"),
+                                &format!("Connection attempt {attempt} failed"),
                                 (attempt * 10).min(60) as u8,
+                                "error",
+                                Some(format!("{:#}", e)),
                             ).await;
                         }
                     }
@@ -145,15 +178,24 @@ impl BackendBridge {
                     // Use {:#} to include the full anyhow error chain with context.
                     let full = format!("{:#}", e);
                     log::warn!("Launcher start attempt {attempt} failed: {full}");
-                    self.emit_progress(
+                    self.emit_detail(
                         "installing",
-                        &format!("Setup attempt {attempt}/{max_attempts}: {full}"),
+                        &format!("Setup attempt {attempt}/{max_attempts} failed"),
                         (attempt * 10).min(60) as u8,
+                        "error",
+                        Some(full),
                     ).await;
                 }
             }
 
             if attempt < max_attempts {
+                self.emit_detail(
+                    "booting",
+                    &format!("Retrying in {}s…", delay.as_secs()),
+                    (attempt * 10).min(60) as u8,
+                    "warning",
+                    None,
+                ).await;
                 sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(10));
             }
@@ -242,13 +284,28 @@ impl BackendBridge {
         Ok(())
     }
 
-    // ── Progress helper ───────────────────────────────────────────────────────
+    // ── Progress helpers ──────────────────────────────────────────────────────
 
     async fn emit_progress(&self, stage: &str, message: &str, pct: u8) {
         let _ = self.progress_tx.send(SetupProgress {
             stage: stage.into(),
             message: message.into(),
             pct,
+            detail: None,
+            kind: "info".into(),
+            timestamp: SetupProgress::now_millis(),
+        }).await;
+    }
+
+    /// Emit a detailed log line (command, output, success, error, warning, info).
+    pub async fn emit_detail(&self, stage: &str, message: &str, pct: u8, kind: &str, detail: Option<String>) {
+        let _ = self.progress_tx.send(SetupProgress {
+            stage: stage.into(),
+            message: message.into(),
+            pct,
+            detail,
+            kind: kind.into(),
+            timestamp: SetupProgress::now_millis(),
         }).await;
     }
 

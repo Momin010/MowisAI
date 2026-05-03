@@ -58,6 +58,8 @@ fn main() {
             get_developer_config,
             save_developer_config,
             validate_developer_config,
+            start_developer_bootstrap,
+            clear_developer_config,
         ])
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");

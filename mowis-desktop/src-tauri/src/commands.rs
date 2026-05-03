@@ -346,6 +346,9 @@ pub async fn start_session(
         completed_at: None,
         task_count: 0,
         tasks_done: 0,
+        tokens_total: 0,
+        duration_secs: None,
+        mode: Some(resolved_mode.clone()),
     };
     state.sessions.lock().unwrap().insert(session_id.clone(), SessionRecord {
         summary: summary.clone(),
@@ -636,5 +639,43 @@ pub async fn save_developer_config(config: platform::developer_mode::DeveloperCo
 
 #[tauri::command]
 pub async fn validate_developer_config(config: platform::developer_mode::DeveloperConfig) -> Result<Vec<String>, String> {
-    config.validate().map_err(|e| e.to_string())
+    Ok(config.validate())
+}
+
+#[tauri::command]
+pub async fn start_developer_bootstrap(
+    config: platform::developer_mode::DeveloperConfig,
+) -> Result<String, String> {
+    let warnings = config.validate();
+    if !warnings.is_empty() {
+        return Err(format!(
+            "Configuration has issues:\n{}",
+            warnings.join("\n")
+        ));
+    }
+
+    config.save().map_err(|e| format!("Failed to save config: {}", e))?;
+
+    Ok(
+        "Configuration saved. The application will restart and automatically bootstrap \
+         the QEMU VM. This process takes ~60–90 seconds:\n\n\
+         1. QEMU starts with your ISO and disk\n\
+         2. Alpine Linux boots and auto-logs in\n\
+         3. Network is activated (DHCP)\n\
+         4. Persistent disk is mounted\n\
+         5. socat is installed\n\
+         6. agentd starts and bridges to TCP port\n\n\
+         The app will reconnect automatically once the VM is ready."
+            .to_string(),
+    )
+}
+
+#[tauri::command]
+pub async fn clear_developer_config() -> Result<(), String> {
+    let path = platform::developer_mode::DeveloperConfig::config_file_path();
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to remove config: {}", e))?;
+    }
+    Ok(())
 }

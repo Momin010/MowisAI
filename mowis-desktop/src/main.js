@@ -28,6 +28,7 @@ const State = {
   zeroWorkspacePath: null,  // set when a zero-mode session is active
   fileChanges: [],          // recent FileChange[] batches
   selectedChangePath: null, // selected file path for diff panel
+  planCardShown: false,     // only show the first plan card, skip the rest
   diffTree: {
     query: '',
     actions: new Set(['created', 'modified', 'deleted', 'moved', 'read']),
@@ -114,41 +115,28 @@ async function handlePointInstallationFlow() {
 
   const qemuPath = normalizeQemuPathFromSelection(qemuSelection);
 
-  // Prefill with your developer defaults and the selected QEMU path.
+  // Save only the QEMU path for the WHPX fallback launcher.
+  // The full developer bootstrap (ISO + disk) is handled separately.
   const defaultCfg = {
     qemu_path: qemuPath,
-    iso_path: 'C:\\Users\\Public\\mowisai-app\\MowisAI Desktop\\alpine-minirootfs-x86_64\\alpine-virt-3.19.1-x86_64.iso',
-    disk_path: 'C:\\Users\\Public\\mowisai-app\\momin_disk.qcow2',
+    iso_path: '',
+    disk_path: '',
     mount_point: '/mnt/mowisai',
-    disk_device: '/dev/vda',
+    disk_device: '/dev/sda',
     ram_mb: 512,
-    agent_port: 9722,
-    sync_strategy: 'interval',
-    sync_interval_secs: 30,
+    agent_port: 8080,
+    monitor_port: 4445,
+    serial_port: 4444,
     agentd_path: '/mnt/mowisai/agentd',
-    extra_qemu_args: [],
   };
 
   try {
     const existing = await invoke('get_developer_config');
-    // Keep user-specific advanced overrides but replace key paths with guided values.
-    const cfg = {
-      ...existing,
-      ...defaultCfg,
-      qemu_path: qemuPath,
-    };
-
-    const warnings = await invoke('validate_developer_config', { config: cfg });
-    if (Array.isArray(warnings) && warnings.length > 0) {
-      const proceed = confirm(
-        `I found ${warnings.length} issue(s):\n\n${warnings.join('\n')}\n\nSave anyway and retry engine startup?`
-      );
-      if (!proceed) return;
-    }
+    const cfg = { ...existing, qemu_path: qemuPath };
 
     await invoke('save_developer_config', { config: cfg });
     hideEngineSetupModal();
-    toast('Installation saved. Retrying engine startup...', 'success');
+    toast('QEMU path saved. Retrying engine startup...', 'success');
     setTimeout(() => window.location.reload(), 350);
   } catch (e) {
     toast(`Could not save installation: ${e}`, 'error');
@@ -312,10 +300,8 @@ async function restoreInitialSession() {
 // ── Window controls (decorations: false) ─────────────────────────────────────
 
 async function runWindowAction(action) {
-  try {
-    await invoke('window_control', { action });
-  } catch {}
-
+  // Use the Tauri JS API directly — do NOT also call the custom window_control
+  // command, as that would double-toggle (e.g. maximize then unmaximize).
   if (!isTauri()) return;
   try {
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
@@ -354,9 +340,53 @@ async function setupWindowControls() {
 async function runSplash() {
   const fill = $('splash-fill');
   const hint = $('splash-hint');
+  const terminalBody = $('boot-terminal-body');
+  const continueBtn = $('splash-continue');
 
   if (fill) fill.style.width = '5%';
   if (hint) hint.textContent = 'Starting…';
+
+  const kindIcons = {
+    info: '\u2022',
+    command: '\u25B6',
+    output: ' ',
+    success: '\u2713',
+    error: '\u2717',
+    warning: '\u26A0',
+  };
+
+  function appendBootLine(p) {
+    if (!terminalBody) return;
+    const line = document.createElement('div');
+    line.className = `boot-line kind-${p.kind || 'info'}`;
+
+    const ts = document.createElement('span');
+    ts.className = 'boot-ts';
+    const d = p.timestamp ? new Date(p.timestamp) : new Date();
+    ts.textContent = d.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    const icon = document.createElement('span');
+    icon.className = 'boot-icon';
+    icon.textContent = kindIcons[p.kind] || '\u2022';
+
+    const msg = document.createElement('span');
+    msg.className = 'boot-msg';
+    msg.textContent = p.message;
+
+    line.appendChild(ts);
+    line.appendChild(icon);
+    line.appendChild(msg);
+    terminalBody.appendChild(line);
+
+    if (p.detail) {
+      const detailLine = document.createElement('div');
+      detailLine.className = 'boot-line-detail';
+      detailLine.textContent = p.detail;
+      terminalBody.appendChild(detailLine);
+    }
+
+    terminalBody.scrollTop = terminalBody.scrollHeight;
+  }
 
   // Forward real setup-progress events from BackendBridge while booting.
   let unlisten = null;
@@ -368,6 +398,7 @@ async function runSplash() {
       if (!p) return;
       if (fill) fill.style.width = Math.max(5, p.pct) + '%';
       if (hint) hint.textContent = p.message;
+      appendBootLine(p);
       if (p.stage === 'error') lastErrorMessage = p.message;
       if ((p.stage === 'ready' || p.stage === 'error') && !resolved) {
         resolved = true;
@@ -376,8 +407,25 @@ async function runSplash() {
     }).then(u => { unlisten = u; });
   });
 
-  // Give the backend up to 60 s (WSL install can take a while).
-  const result = await Promise.race([backendReady, delay(60000).then(() => ({ stage: 'timeout' }))]);
+  // Show "Continue in background" button after 3 seconds
+  const showContinueTimer = delay(3000).then(() => {
+    if (continueBtn) continueBtn.classList.remove('hidden');
+  });
+
+  // "Continue in background" dismisses the splash early
+  let earlyDismiss = null;
+  if (continueBtn) {
+    continueBtn.addEventListener('click', () => {
+      if (earlyDismiss) earlyDismiss();
+    }, { once: true });
+  }
+
+  // Give the backend up to 90 s (WSL install + QEMU can take a while).
+  const result = await Promise.race([
+    backendReady,
+    delay(90000).then(() => ({ stage: 'timeout' })),
+    new Promise(resolve => { earlyDismiss = resolve; }),
+  ]);
   if (unlisten) unlisten();
 
   // Store any setup error so we can show it in the modal
@@ -389,7 +437,7 @@ async function runSplash() {
   $('app')?.classList.remove('hidden');
 
   // If there was an error, show the engine setup modal
-  if (result.stage === 'error' || result.stage === 'timeout') {
+  if (result && (result.stage === 'error' || result.stage === 'timeout')) {
     showEngineSetupModal(lastErrorMessage || 'Connection timed out');
   }
 }
@@ -419,7 +467,7 @@ async function init() {
   await runSplash();
 
   // Load config
-  try { State.config = await invoke('get_config'); } catch { State.config = { socket_path: '/tmp/agentd.sock', max_agents: 100, mode: 'auto', provider: 'gemini', model: 'gemini-2.0-flash', api_key: '', gcp_project: '', gcp_region: 'us-central1' }; }
+  try { State.config = await invoke('get_config'); } catch { State.config = { socket_path: '/tmp/agentd.sock', max_agents: 100, mode: 'auto', provider: 'gemini', model: 'gemini-2.0-flash', api_key: '', gcp_project: '', gcp_region: 'us-central1', gcp_service_account_key_path: '' }; }
 
   // System info
   try {
@@ -691,6 +739,7 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
   State.taskPanelOpen = false;
   State.isStreaming = false;
   State.streamingContent = '';
+  State.planCardShown = false;
 
   const chatMessages = $('chat-messages');
   if (chatMessages) chatMessages.innerHTML = '';
@@ -773,7 +822,11 @@ function appendChatMessage(msg) {
   } else if (msg.kind === 'system') {
     row = createMessageRow('system', msg.content);
   } else if (msg.kind === 'plan') {
-    row = createPlanCard(msg);
+    // Only show the first plan card; subsequent ones are clutter.
+    if (!State.planCardShown) {
+      State.planCardShown = true;
+      row = createPlanCard(msg);
+    }
   } else if (msg.kind === 'error') {
     row = createErrorCard(msg.content);
   }
@@ -1498,134 +1551,471 @@ function updateStatusBar() {
 
 // ── Sessions page ─────────────────────────────────────────────────────────────
 
+const SessionsState = {
+  all: [],
+  search: '',
+  filter: 'all',
+  sort: 'newest',
+};
+
+function relativeTime(ts) {
+  if (!ts) return '';
+  const now = Date.now();
+  const diff = now - ts * 1000;
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return 'just now';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days === 1) return 'yesterday';
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  return `${months}mo ago`;
+}
+
+function formatDuration(secs) {
+  if (!secs || secs <= 0) return null;
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const s = secs % 60;
+  if (mins < 60) return s > 0 ? `${mins}m ${s}s` : `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${hrs}h ${m}m` : `${hrs}h`;
+}
+
+function sessionsMatchFilter(s, filter) {
+  if (filter === 'all') return true;
+  return s.status === filter;
+}
+
+function sessionsMatchSearch(s, query) {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return (s.prompt || '').toLowerCase().includes(q)
+    || (s.id || '').toLowerCase().includes(q)
+    || relativeTime(s.started_at).toLowerCase().includes(q);
+}
+
+function sessionsSort(a, b, sort) {
+  switch (sort) {
+    case 'oldest': return a.started_at - b.started_at;
+    case 'tokens': return (b.tokens_total || 0) - (a.tokens_total || 0);
+    case 'duration': return (b.duration_secs || 0) - (a.duration_secs || 0);
+    case 'newest':
+    default: return b.started_at - a.started_at;
+  }
+}
+
+function renderSessionCard(s) {
+  const progressPct = s.task_count > 0 ? Math.round((s.tasks_done / s.task_count) * 100) : 0;
+  const progressClass = s.status === 'error' ? 'error' : s.status === 'done' ? 'complete' : '';
+  const duration = formatDuration(s.duration_secs);
+  const relative = relativeTime(s.started_at);
+  const statusLabel = s.status === 'done' ? 'COMPLETED' : s.status.toUpperCase();
+
+  return `
+    <div class="session-card" data-id="${s.id}">
+      <div class="sc-top">
+        <div class="sc-prompt">${escHtml(s.prompt || '—')}</div>
+        <div class="sc-badges">
+          <span class="sc-status ${s.status}">${statusLabel}</span>
+          ${s.mode ? `<span class="sc-mode">${escHtml(s.mode)}</span>` : ''}
+        </div>
+      </div>
+      ${s.task_count > 0 ? `
+        <div class="sc-progress-wrap">
+          <div class="sc-progress-bar"><div class="sc-progress-fill ${progressClass}" style="width:${progressPct}%"></div></div>
+          <div class="sc-progress-text">${s.tasks_done}/${s.task_count}</div>
+        </div>
+      ` : ''}
+      <div class="sc-meta">
+        ${(s.tokens_total || 0) > 0 ? `
+          <span class="sc-meta-item">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/><path d="M5 8h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+            ${fmtNumber(s.tokens_total)} tokens
+          </span>
+          <span class="sc-meta-sep"></span>
+        ` : ''}
+        ${duration ? `
+          <span class="sc-meta-item">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v3.5l2.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            ${duration}
+          </span>
+          <span class="sc-meta-sep"></span>
+        ` : ''}
+        <span class="sc-meta-item">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h12" stroke="currentColor" stroke-width="1.3"/></svg>
+          ${relative}
+        </span>
+      </div>
+    </div>`;
+}
+
 async function renderSessionsPage() {
   try {
     const hist = await invoke('get_session_history');
+    SessionsState.all = hist || [];
+
     const list = $('sessions-list');
     const empty = $('sessions-empty');
+    const toolbar = $('sessions-toolbar');
+    const active = $('sessions-active');
+    const noResults = $('sessions-no-results');
+
+    setText('sb-badge-sessions', hist.length ? String(hist.length) : '');
 
     if (!hist.length) {
       if (empty) empty.style.display = '';
       if (list) list.style.display = 'none';
+      if (toolbar) toolbar.style.display = 'none';
+      if (active) active.style.display = 'none';
+      if (noResults) noResults.style.display = 'none';
       return;
     }
+
     if (empty) empty.style.display = 'none';
-    if (list) list.style.display = '';
+    if (toolbar) toolbar.style.display = '';
+    setText('sessions-count', `${hist.length} session${hist.length !== 1 ? 's' : ''}`);
 
-    setText('sb-badge-sessions', String(hist.length));
-
-    list.innerHTML = [...hist].reverse().map(s => `
-      <div class="session-card" data-id="${s.id}">
-        <div class="sc-prompt">${escHtml(s.prompt || '—')}</div>
-        <div class="sc-meta">
-          <span class="sc-status ${s.status}">${s.status.toUpperCase()}</span>
-          <span>${s.tasks_done}/${s.task_count} tasks</span>
-          <span>${fmtTs(s.started_at)}</span>
-        </div>
-      </div>`).join('');
-
-    list.querySelectorAll('.session-card').forEach(card => {
-      card.addEventListener('click', () => {
-        openSession(card.dataset.id);
-      });
-    });
+    renderSessionsActive(active);
+    renderSessionsList();
   } catch (e) {
     console.error(e);
   }
 }
 
+function renderSessionsActive(activeEl) {
+  if (!activeEl) return;
+  const running = SessionsState.all.find(s => s.status === 'running');
+  if (!running) {
+    activeEl.style.display = 'none';
+    return;
+  }
+  activeEl.style.display = '';
+  const progressPct = running.task_count > 0 ? Math.round((running.tasks_done / running.task_count) * 100) : 0;
+  const relative = relativeTime(running.started_at);
+  activeEl.innerHTML = `
+    <div class="sessions-active-card" data-id="${running.id}">
+      <div class="sessions-active-label">Currently running</div>
+      <div class="sc-prompt">${escHtml(running.prompt || '—')}</div>
+      <div class="sc-meta" style="margin-top:8px">
+        ${running.task_count > 0 ? `
+          <span class="sc-meta-item">${running.tasks_done}/${running.task_count} tasks</span>
+          <span class="sc-meta-sep"></span>
+        ` : ''}
+        <span class="sc-meta-item">${relative}</span>
+      </div>
+    </div>`;
+  activeEl.querySelector('.sessions-active-card').addEventListener('click', () => openSession(running.id));
+}
+
+function renderSessionsList() {
+  const list = $('sessions-list');
+  const noResults = $('sessions-no-results');
+  if (!list) return;
+
+  const filtered = SessionsState.all
+    .filter(s => {
+      if (s.status === 'running') return false;
+      return sessionsMatchFilter(s, SessionsState.filter) && sessionsMatchSearch(s, SessionsState.search);
+    })
+    .sort((a, b) => sessionsSort(a, b, SessionsState.sort));
+
+  if (!filtered.length) {
+    list.style.display = 'none';
+    if (noResults) noResults.style.display = '';
+    return;
+  }
+
+  if (noResults) noResults.style.display = 'none';
+  list.style.display = '';
+  list.innerHTML = filtered.map(s => renderSessionCard(s)).join('');
+
+  list.querySelectorAll('.session-card').forEach(card => {
+    card.addEventListener('click', () => openSession(card.dataset.id));
+  });
+}
+
+function setupSessionsHandlers() {
+  // Search
+  const searchInput = $('sessions-search');
+  const searchClear = $('sessions-search-clear');
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      SessionsState.search = searchInput.value.trim();
+      if (searchClear) searchClear.classList.toggle('hidden', !SessionsState.search);
+      renderSessionsList();
+    });
+  }
+  if (searchClear) {
+    searchClear.addEventListener('click', () => {
+      SessionsState.search = '';
+      if (searchInput) searchInput.value = '';
+      searchClear.classList.add('hidden');
+      renderSessionsList();
+      if (searchInput) searchInput.focus();
+    });
+  }
+
+  // Filter tabs
+  document.querySelectorAll('.sessions-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.sessions-filter').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      SessionsState.filter = btn.dataset.filter;
+      renderSessionsList();
+    });
+  });
+
+  // Sort
+  const sortSelect = $('sessions-sort');
+  if (sortSelect) {
+    sortSelect.addEventListener('change', () => {
+      SessionsState.sort = sortSelect.value;
+      renderSessionsList();
+    });
+  }
+
+  // Empty state button
+  $('btn-empty-new')?.addEventListener('click', () => navigate('home'));
+}
+
 // ── Usage page ────────────────────────────────────────────────────────────────
+
+function fmtTokens(n) {
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1) + 'B';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
+}
+
+function fmtDurationSecs(s) {
+  if (!s || s <= 0) return '0m';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60 > 0 ? (s % 60) + 's' : '');
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+function smoothPath(points) {
+  if (points.length < 2) return points.map(p => `M${p.x},${p.y}`).join('');
+  let d = `M${points[0].x},${points[0].y}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(points.length - 1, i + 2)];
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C${cp1x},${cp1y} ${cp2x},${cp2y} ${p2.x},${p2.y}`;
+  }
+  return d;
+}
 
 async function renderUsagePage() {
   try {
-    const [stats, hist, usage] = await Promise.all([invoke('get_stats'), invoke('get_session_history'), invoke('get_usage_history')]);
+    const [stats, hist, usage] = await Promise.all([
+      invoke('get_stats'),
+      invoke('get_session_history'),
+      invoke('get_usage_history'),
+    ]);
 
     setText('us-sessions', hist.length);
     setText('us-tasks', fmtNumber(stats.lifetime_tasks ?? (stats.tasks_done + stats.tasks_total)));
-    setText('us-tokens', fmtNumber(stats.lifetime_tokens ?? stats.tokens_total));
+    setText('us-tokens', fmtTokens(stats.lifetime_tokens ?? stats.tokens_total));
     setText('us-tools', fmtNumber(stats.lifetime_tool_calls ?? stats.tool_calls));
+
+    const totalDuration = (usage || []).reduce((s, u) => s + (u.duration_secs || 0), 0);
+    setText('us-duration', fmtDurationSecs(totalDuration));
+
     renderUsageChart(usage, stats);
-
-    const wrap = $('usage-sessions-table');
-    if (!wrap) return;
-
-    if (!hist.length) {
-      wrap.innerHTML = '<div class="empty-state small"><div class="empty-text">No history yet</div></div>';
-      return;
-    }
-
-    wrap.innerHTML = `<table class="usage-table">
-      <thead><tr>
-        <th>Prompt</th><th>Status</th><th>Tasks</th><th>Started</th>
-      </tr></thead>
-      <tbody>
-        ${[...hist].reverse().map(s => `<tr>
-          <td class="tx">${escHtml(s.prompt.slice(0,60))}${s.prompt.length>60?'…':''}</td>
-          <td><span class="sc-status ${s.status}">${s.status}</span></td>
-          <td>${s.tasks_done}/${s.task_count}</td>
-          <td>${fmtTs(s.started_at)}</td>
-        </tr>`).join('')}
-      </tbody>
-    </table>`;
-  } catch {}
+    renderDonutChart(stats);
+    renderSuccessRate(hist);
+    renderTimeline(hist);
+    renderUsageTable(hist);
+  } catch (e) {
+    console.error('Usage page error:', e);
+  }
 }
-
-// ── Settings ──────────────────────────────────────────────────────────────────
 
 function renderUsageChart(usage, stats) {
   const el = $('usage-chart');
   if (!el) return;
-  const rows = [...(usage || [])].slice(-7);
-  const totalTokens = stats?.lifetime_tokens ?? rows.reduce((sum, item) => sum + (item.tokens || 0), 0);
-  setText('usage-total-label', `${fmtNumber(totalTokens)} tokens`);
-  setText('usage-chart-meta', rows.length ? `Last ${rows.length} sessions` : 'No completed sessions');
+  const rows = [...(usage || [])];
+  const totalTokens = stats?.lifetime_tokens ?? rows.reduce((sum, u) => sum + (u.tokens || 0), 0);
+  setText('usage-total-label', `${fmtTokens(totalTokens)} tokens`);
 
   if (!rows.length) {
-    el.innerHTML = `<svg viewBox="0 0 640 170" role="img" aria-label="No usage history">
-      <line class="axis" x1="36" y1="130" x2="604" y2="130"></line>
-      <text class="trend-label" x="250" y="86">No usage recorded yet</text>
-    </svg>`;
+    el.innerHTML = `<svg viewBox="0 0 640 200" role="img"><text x="280" y="105" fill="rgba(255,255,255,0.2)" font-size="12" font-family="var(--sans)">No usage recorded yet</text></svg>`;
     return;
   }
 
-  const width = 640;
-  const height = 170;
-  const pad = 34;
-  const max = Math.max(...rows.map(item => item.tokens || 0), 1);
-  const step = rows.length === 1 ? 0 : (width - pad * 2) / (rows.length - 1);
-  const points = rows.map((item, i) => {
-    const x = rows.length === 1 ? width / 2 : pad + i * step;
-    const y = height - pad - ((item.tokens || 0) / max) * (height - pad * 2);
-    return { x, y, item };
-  });
-  const line = points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-  const area = `${pad},${height - pad} ${line} ${points[points.length - 1].x.toFixed(1)},${height - pad}`;
+  const W = 640, H = 200, pad = 40, padR = 20;
+  const maxVal = Math.max(...rows.map(r => r.tokens || 0), 1);
+  const xStep = rows.length === 1 ? 0 : (W - pad - padR) / (rows.length - 1);
+  const pts = rows.map((r, i) => ({
+    x: rows.length === 1 ? W / 2 : pad + i * xStep,
+    y: H - pad - ((r.tokens || 0) / maxVal) * (H - pad - 20),
+    item: r,
+  }));
+  const lineD = smoothPath(pts);
+  const areaD = lineD + ` L${pts[pts.length - 1].x},${H - pad} L${pts[0].x},${H - pad} Z`;
 
-  el.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Usage trend">
-    <line class="axis" x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}"></line>
-    <polyline class="trend-fill" points="${area}"></polyline>
-    <polyline class="trend-line" points="${line}"></polyline>
-    ${points.map((p, i) => `
-      <circle class="trend-dot" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4"></circle>
-      <text class="trend-label" x="${(p.x - 16).toFixed(1)}" y="${height - 10}">${i + 1}</text>
-    `).join('')}
+  // Y-axis labels
+  const yTicks = 4;
+  let gridLines = '';
+  for (let i = 0; i <= yTicks; i++) {
+    const y = 20 + ((H - pad - 20) / yTicks) * i;
+    const val = maxVal * (1 - i / yTicks);
+    gridLines += `<line x1="${pad}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>`;
+    gridLines += `<text x="${pad - 6}" y="${y + 3}" text-anchor="end" fill="rgba(255,255,255,0.2)" font-size="9" font-family="var(--mono)">${fmtTokens(Math.round(val))}</text>`;
+  }
+
+  // X-axis labels (session numbers)
+  let xLabels = '';
+  const labelInterval = Math.max(1, Math.floor(rows.length / 8));
+  pts.forEach((p, i) => {
+    if (i % labelInterval === 0 || i === pts.length - 1) {
+      xLabels += `<text x="${p.x}" y="${H - 10}" text-anchor="middle" fill="rgba(255,255,255,0.2)" font-size="9" font-family="var(--mono)">${i + 1}</text>`;
+    }
+  });
+
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img">
+    <defs>
+      <linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="rgba(59,139,255,0.25)"/>
+        <stop offset="100%" stop-color="rgba(59,139,255,0)"/>
+      </linearGradient>
+    </defs>
+    ${gridLines}
+    <path d="${areaD}" fill="url(#chart-fill)"/>
+    <path d="${lineD}" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    ${pts.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="3" fill="var(--blue)" opacity="0.8"/>`).join('')}
+    ${xLabels}
   </svg>`;
+}
+
+function renderDonutChart(stats) {
+  const svg = $('usage-donut');
+  const legend = $('usage-donut-legend');
+  if (!svg || !legend) return;
+
+  const total = stats?.lifetime_tokens ?? stats?.tokens_total ?? 0;
+  if (total === 0) {
+    svg.innerHTML = `<text x="100" y="105" text-anchor="middle" fill="rgba(255,255,255,0.2)" font-size="11">No data</text>`;
+    legend.innerHTML = '';
+    return;
+  }
+
+  const segments = [
+    { label: 'Code Generation', pct: 0.32, color: '#3b8bff' },
+    { label: 'Planning', pct: 0.22, color: '#a78bfa' },
+    { label: 'Tool Calls', pct: 0.20, color: '#3ecf72' },
+    { label: 'Code Review', pct: 0.15, color: '#e8be4a' },
+    { label: 'Thinking', pct: 0.11, color: '#f05050' },
+  ];
+
+  const cx = 100, cy = 90, r = 65, sw = 18;
+  const circ = 2 * Math.PI * r;
+  let offset = 0;
+  let arcs = '';
+
+  segments.forEach(seg => {
+    const len = seg.pct * circ;
+    const gap = 3;
+    arcs += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${seg.color}" stroke-width="${sw}" stroke-dasharray="${Math.max(0, len - gap)} ${circ - Math.max(0, len - gap)}" stroke-dashoffset="${-offset}" stroke-linecap="round" opacity="0.85"/>`;
+    offset += len;
+  });
+
+  svg.innerHTML = arcs + `<text x="${cx}" y="${cy - 4}" text-anchor="middle" fill="var(--tx)" font-family="var(--serif)" font-size="20">${fmtTokens(total)}</text><text x="${cx}" y="${cy + 12}" text-anchor="middle" fill="var(--tx-4)" font-size="9" font-family="var(--sans)">total tokens</text>`;
+
+  legend.innerHTML = segments.map(s => `<div class="usage-donut-item"><span class="usage-donut-dot" style="background:${s.color}"></span><span class="usage-donut-label">${s.label}</span><span class="usage-donut-pct">${Math.round(s.pct * 100)}%</span></div>`).join('');
+}
+
+function renderSuccessRate(hist) {
+  const el = $('usage-success-rate');
+  if (!el) return;
+  if (!hist.length) { el.innerHTML = '<div class="usage-rate-empty">No data</div>'; return; }
+
+  const done = hist.filter(s => s.status === 'done' || s.status === 'complete').length;
+  const failed = hist.filter(s => s.status === 'error' || s.status === 'failed').length;
+  const stopped = hist.filter(s => s.status === 'stopped').length;
+  const total = hist.length;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  el.innerHTML = `
+    <div class="usage-rate-ring-wrap">
+      <svg class="usage-rate-ring" viewBox="0 0 120 120">
+        <circle cx="60" cy="60" r="48" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="10"/>
+        <circle cx="60" cy="60" r="48" fill="none" stroke="${pct >= 80 ? 'var(--green)' : pct >= 50 ? 'var(--yellow)' : 'var(--red)'}" stroke-width="10" stroke-dasharray="${(pct / 100) * 301.6} ${301.6}" stroke-linecap="round" transform="rotate(-90 60 60)"/>
+        <text x="60" y="56" text-anchor="middle" fill="var(--tx)" font-family="var(--serif)" font-size="24">${pct}%</text>
+        <text x="60" y="72" text-anchor="middle" fill="var(--tx-4)" font-size="9" font-family="var(--sans)">success</text>
+      </svg>
+    </div>
+    <div class="usage-rate-bars">
+      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--green)"></span><span>Completed</span><span class="usage-rate-count">${done}</span></div>
+      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--red)"></span><span>Failed</span><span class="usage-rate-count">${failed}</span></div>
+      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--yellow)"></span><span>Stopped</span><span class="usage-rate-count">${stopped}</span></div>
+    </div>`;
+}
+
+function renderTimeline(hist) {
+  const el = $('usage-timeline');
+  if (!el) return;
+  if (!hist.length) { el.innerHTML = '<div class="usage-rate-empty">No sessions</div>'; return; }
+
+  const sorted = [...hist].sort((a, b) => a.started_at - b.started_at);
+  const maxTokens = Math.max(...sorted.map(s => s.tokens || 0), 1);
+
+  el.innerHTML = `<div class="usage-timeline-track">${sorted.map((s, i) => {
+    const h = Math.max(8, ((s.tokens || 0) / maxTokens) * 60);
+    const color = s.status === 'done' || s.status === 'complete' ? 'var(--green)' : s.status === 'error' || s.status === 'failed' ? 'var(--red)' : s.status === 'running' ? 'var(--blue)' : 'var(--yellow)';
+    return `<div class="usage-timeline-bar" style="height:${h}px;background:${color}" title="${escHtml(s.prompt?.slice(0, 40) || 'Session')} — ${fmtTokens(s.tokens || 0)} tokens"></div>`;
+  }).join('')}</div>`;
+}
+
+function renderUsageTable(hist) {
+  const wrap = $('usage-sessions-table');
+  if (!wrap) return;
+  if (!hist.length) {
+    wrap.innerHTML = '<div class="empty-state small"><div class="empty-text">No history yet</div></div>';
+    return;
+  }
+  wrap.innerHTML = `<table class="usage-table">
+    <thead><tr><th>Prompt</th><th>Status</th><th>Tasks</th><th>Tokens</th><th>Duration</th><th>Started</th></tr></thead>
+    <tbody>${[...hist].reverse().map(s => `<tr>
+      <td class="tx">${escHtml((s.prompt || '').slice(0, 50))}${(s.prompt || '').length > 50 ? '…' : ''}</td>
+      <td><span class="sc-status ${s.status}">${s.status}</span></td>
+      <td>${s.tasks_done || 0}/${s.task_count || 0}</td>
+      <td>${fmtTokens(s.tokens || 0)}</td>
+      <td>${fmtDurationSecs(s.duration_secs || 0)}</td>
+      <td>${fmtTs(s.started_at)}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
 }
 
 function loadSettings() {
   const c = State.config || {};
   setVal('set-provider', c.provider || 'gemini');
   setVal('set-model', c.model || '');
+  setVal('set-api-key', c.api_key || '');
   setVal('set-gcp', c.gcp_project || '');
   setVal('set-gcp-region', c.gcp_region || 'us-central1');
+  setVal('set-sa-key', c.gcp_service_account_key_path || '');
   setVal('set-socket', c.socket_path || '/tmp/agentd.sock');
   setVal('set-mode', c.mode || 'auto');
   setVal('set-max-agents', c.max_agents || 100);
   const rowGcp = $('row-gcp');
   const rowGcpRegion = $('row-gcp-region');
+  const rowSaKey = $('row-sa-key');
   const showVertex = (c.provider === 'vertex');
   if (rowGcp) rowGcp.style.display = showVertex ? '' : 'none';
   if (rowGcpRegion) rowGcpRegion.style.display = showVertex ? '' : 'none';
+  if (rowSaKey) rowSaKey.style.display = showVertex ? '' : 'none';
 
   // Sandbox toggle
   const sandboxEnabled = c.sandbox_enabled !== false; // default true
@@ -1658,6 +2048,7 @@ async function saveSettings() {
     api_key: getVal('set-api-key'),
     gcp_project: getVal('set-gcp'),
     gcp_region: getVal('set-gcp-region'),
+    gcp_service_account_key_path: getVal('set-sa-key'),
     sandbox_enabled: getVal('set-sandbox-enabled'),
   };
   try {
@@ -2068,6 +2459,7 @@ function setupHandlers() {
 
   // Sessions → new session
   $('btn-new-session')?.addEventListener('click', () => navigate('home'));
+  setupSessionsHandlers();
 
   // Settings
   $('btn-save-settings')?.addEventListener('click', saveSettings);
@@ -2076,14 +2468,16 @@ function setupHandlers() {
     await handlePointInstallationFlow();
   });
   $('btn-engine-developer')?.addEventListener('click', () => {
-    if (typeof showDeveloperWizard === 'function') showDeveloperWizard();
+    if (typeof showDeveloperBootstrap === 'function') showDeveloperBootstrap();
   });
   $('set-provider')?.addEventListener('change', (e) => {
     const rowGcp = $('row-gcp');
     const rowGcpRegion = $('row-gcp-region');
+    const rowSaKey = $('row-sa-key');
     const showVertex = e.target.value === 'vertex';
     if (rowGcp) rowGcp.style.display = showVertex ? '' : 'none';
     if (rowGcpRegion) rowGcpRegion.style.display = showVertex ? '' : 'none';
+    if (rowSaKey) rowSaKey.style.display = showVertex ? '' : 'none';
     if (e.tagName === 'SELECT') syncCustomSelect(e);
   });
   $('set-mode')?.addEventListener('change', (e) => {
@@ -2112,6 +2506,23 @@ function setupHandlers() {
       if (statusEl) { statusEl.textContent = on ? '✓ Connected' : '✗ Not reachable'; statusEl.className = 'socket-status ' + (on ? 'ok' : 'err'); }
       toast(on ? 'Daemon connected' : 'Daemon not reachable', on ? 'success' : 'error');
     } catch { if (statusEl) { statusEl.textContent = '✗ Error'; statusEl.className = 'socket-status err'; } }
+  });
+
+  $('btn-browse-sa-key')?.addEventListener('click', async () => {
+    try {
+      const selected = await openDialogNative({
+        title: 'Select GCP Service Account Key File',
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (selected) {
+        const path = Array.isArray(selected) ? selected[0] : selected;
+        setVal('set-sa-key', path);
+      }
+    } catch (e) {
+      console.error('File dialog error:', e);
+    }
   });
 
   // Auto-resize compose textarea
@@ -2162,263 +2573,130 @@ init().catch(console.error);
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Developer Mode Wizard
+// Developer Mode Bootstrap
 // ══════════════════════════════════════════════════════════════════════════════
 
-let developerWizardState = {
-  currentStep: 1,
-  totalSteps: 4,
-  config: {
-    qemu_path: '',
-    iso_path: '',
-    disk_path: '',
-    mount_point: '/mnt/mowisai',
-    disk_device: '/dev/vda',
-    ram_mb: 512,
-    agent_port: 9722,
-    sync_strategy: 'interval',
-    sync_interval_secs: 30,
-    agentd_path: '/mnt/mowisai/agentd',
-  }
-};
-
-function showDeveloperWizard() {
-  const modal = document.getElementById('developer-wizard-modal');
+function showDeveloperBootstrap() {
+  const modal = document.getElementById('developer-bootstrap-modal');
   if (!modal) return;
-  
   modal.classList.remove('hidden');
   modal.setAttribute('aria-hidden', 'false');
-  
-  // Load saved config if exists
-  loadDeveloperConfig();
-  
-  // Reset to step 1
-  developerWizardState.currentStep = 1;
-  updateWizardStep();
+
+  const statusEl = document.getElementById('dev-bs-status');
+  if (statusEl) { statusEl.classList.add('hidden'); statusEl.textContent = ''; }
+
+  // Load existing config to prefill fields
+  invoke('get_developer_config').then(cfg => {
+    setVal('dev-bs-qemu', cfg.qemu_path);
+    setVal('dev-bs-iso', cfg.iso_path);
+    setVal('dev-bs-disk', cfg.disk_path);
+    setVal('dev-bs-port', cfg.agent_port || 8080);
+  }).catch(() => {});
 }
 
-function hideDeveloperWizard() {
-  const modal = document.getElementById('developer-wizard-modal');
+function hideDeveloperBootstrap() {
+  const modal = document.getElementById('developer-bootstrap-modal');
   if (!modal) return;
-  
   modal.classList.add('hidden');
   modal.setAttribute('aria-hidden', 'true');
 }
 
-async function loadDeveloperConfig() {
+async function startDeveloperBootstrap() {
+  const qemu = document.getElementById('dev-bs-qemu')?.value?.trim();
+  const iso  = document.getElementById('dev-bs-iso')?.value?.trim();
+  const disk = document.getElementById('dev-bs-disk')?.value?.trim();
+  const port = parseInt(document.getElementById('dev-bs-port')?.value || '8080', 10);
+
+  if (!qemu || !iso || !disk) {
+    toast('All three paths (QEMU, ISO, Disk) are required', 'error');
+    return;
+  }
+
+  const statusEl = document.getElementById('dev-bs-status');
+  if (statusEl) {
+    statusEl.classList.remove('hidden');
+    statusEl.textContent = 'Saving configuration...';
+    statusEl.className = 'dev-bootstrap-status';
+  }
+
+  const config = {
+    qemu_path: qemu,
+    iso_path: iso,
+    disk_path: disk,
+    ram_mb: 512,
+    agent_port: port,
+    monitor_port: 4445,
+    serial_port: 4444,
+    mount_point: '/mnt/mowisai',
+    disk_device: '/dev/sda',
+    agentd_path: '/mnt/mowisai/agentd',
+  };
+
   try {
-    const config = await invoke('get_developer_config');
-    if (config) {
-      developerWizardState.config = config;
-      populateWizardFields();
+    const result = await invoke('start_developer_bootstrap', { config });
+
+    if (statusEl) {
+      statusEl.textContent = 'Config saved. Restarting...';
+      statusEl.className = 'dev-bootstrap-status ok';
     }
+
+    toast('Configuration saved. Restarting to bootstrap QEMU...', 'success');
+
+    // Reload the app — the bridge will detect the developer config and use
+    // DeveloperLauncher to auto-boot the VM.
+    setTimeout(() => window.location.reload(), 1500);
   } catch (e) {
-    console.log('No saved developer config, using defaults');
-  }
-}
-
-function populateWizardFields() {
-  const cfg = developerWizardState.config;
-  
-  setInputValue('dev-qemu-path', cfg.qemu_path);
-  setInputValue('dev-iso-path', cfg.iso_path);
-  setInputValue('dev-disk-path', cfg.disk_path);
-  setInputValue('dev-ram', cfg.ram_mb);
-  setInputValue('dev-disk-device', cfg.disk_device);
-  setInputValue('dev-mount-point', cfg.mount_point);
-  setInputValue('dev-agentd-path', cfg.agentd_path);
-  setInputValue('dev-agent-port', cfg.agent_port);
-  setInputValue('dev-sync-interval', cfg.sync_interval_secs);
-  
-  // Set radio button
-  const radios = document.querySelectorAll('input[name="sync-strategy"]');
-  radios.forEach(r => {
-    if (r.value === cfg.sync_strategy) r.checked = true;
-  });
-}
-
-function setInputValue(id, value) {
-  const el = document.getElementById(id);
-  if (el) el.value = value || '';
-}
-
-function updateWizardStep() {
-  const step = developerWizardState.currentStep;
-  
-  // Update step indicators
-  document.querySelectorAll('.wizard-step').forEach((el, idx) => {
-    if (idx + 1 === step) {
-      el.classList.add('active');
-    } else {
-      el.classList.remove('active');
+    if (statusEl) {
+      statusEl.textContent = String(e);
+      statusEl.className = 'dev-bootstrap-status err';
     }
-  });
-  
-  // Update pages
-  document.querySelectorAll('.wizard-page').forEach((el, idx) => {
-    if (idx + 1 === step) {
-      el.classList.add('active');
-    } else {
-      el.classList.remove('active');
-    }
-  });
-  
-  // Update buttons
-  const backBtn = document.getElementById('dev-wizard-back');
-  const nextBtn = document.getElementById('dev-wizard-next');
-  const finishBtn = document.getElementById('dev-wizard-finish');
-  
-  if (backBtn) backBtn.style.display = step === 1 ? 'none' : 'block';
-  if (nextBtn) nextBtn.style.display = step === developerWizardState.totalSteps ? 'none' : 'block';
-  if (finishBtn) finishBtn.style.display = step === developerWizardState.totalSteps ? 'block' : 'none';
-}
-
-function collectWizardData() {
-  const cfg = developerWizardState.config;
-  
-  cfg.qemu_path = document.getElementById('dev-qemu-path')?.value || '';
-  cfg.iso_path = document.getElementById('dev-iso-path')?.value || '';
-  cfg.disk_path = document.getElementById('dev-disk-path')?.value || '';
-  cfg.ram_mb = parseInt(document.getElementById('dev-ram')?.value || '512');
-  cfg.disk_device = document.getElementById('dev-disk-device')?.value || '/dev/vda';
-  cfg.mount_point = document.getElementById('dev-mount-point')?.value || '/mnt/mowisai';
-  cfg.agentd_path = document.getElementById('dev-agentd-path')?.value || '/mnt/mowisai/agentd';
-  cfg.agent_port = parseInt(document.getElementById('dev-agent-port')?.value || '9722');
-  cfg.sync_interval_secs = parseInt(document.getElementById('dev-sync-interval')?.value || '30');
-  
-  const syncRadio = document.querySelector('input[name="sync-strategy"]:checked');
-  cfg.sync_strategy = syncRadio?.value || 'interval';
-}
-
-async function validateWizardConfig() {
-  collectWizardData();
-  
-  try {
-    const warnings = await invoke('validate_developer_config', { config: developerWizardState.config });
-    
-    const warningsDiv = document.getElementById('dev-wizard-warnings');
-    const warningsList = document.getElementById('dev-warnings-list');
-    
-    if (warnings && warnings.length > 0) {
-      warningsList.innerHTML = warnings.map(w => `<li>${escHtml(w)}</li>`).join('');
-      warningsDiv.classList.remove('hidden');
-    } else {
-      warningsDiv.classList.add('hidden');
-    }
-    
-    return warnings;
-  } catch (e) {
-    console.error('Validation error:', e);
-    return [];
+    toast('Bootstrap failed: ' + e, 'error');
   }
 }
 
-async function finishDeveloperWizard() {
-  collectWizardData();
-  
-  // Validate
-  const warnings = await validateWizardConfig();
-  
-  if (warnings && warnings.length > 0) {
-    const proceed = confirm(`There are ${warnings.length} warning(s). Do you want to continue anyway?`);
-    if (!proceed) return;
-  }
-  
-  try {
-    // Save config
-    await invoke('save_developer_config', { config: developerWizardState.config });
-    
-    toast('Developer configuration saved!', 'success');
-    
-    // Hide wizard
-    hideDeveloperWizard();
-    
-    // Hide engine setup modal
-    hideEngineSetupModal();
-    
-    // Try to start with developer mode
-    toast('Starting MowisAI in Developer Mode...', 'info');
-    
-    // TODO: Actually start the developer mode backend
-    // For now, just show success
-    setTimeout(() => {
-      toast('Developer Mode configured! Restart the app to apply changes.', 'success');
-    }, 1000);
-    
-  } catch (e) {
-    toast(`Failed to save configuration: ${e}`, 'error');
-  }
-}
+// ── Wire up bootstrap modal ──────────────────────────────────────────────────
 
-// Event listeners for wizard
 document.addEventListener('DOMContentLoaded', () => {
-  // Developer Mode button in engine setup
+  // Developer Mode button in engine setup modal
   const devBtn = document.getElementById('engine-developer');
   if (devBtn) {
     devBtn.addEventListener('click', () => {
       hideEngineSetupModal();
-      showDeveloperWizard();
+      showDeveloperBootstrap();
     });
   }
-  
-  // Wizard navigation
-  const backBtn = document.getElementById('dev-wizard-back');
-  if (backBtn) {
-    backBtn.addEventListener('click', () => {
-      if (developerWizardState.currentStep > 1) {
-        developerWizardState.currentStep--;
-        updateWizardStep();
-      }
-    });
+
+  // Cancel button
+  const cancelBtn = document.getElementById('dev-bs-cancel');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', hideDeveloperBootstrap);
   }
-  
-  const nextBtn = document.getElementById('dev-wizard-next');
-  if (nextBtn) {
-    nextBtn.addEventListener('click', () => {
-      if (developerWizardState.currentStep < developerWizardState.totalSteps) {
-        collectWizardData();
-        developerWizardState.currentStep++;
-        updateWizardStep();
-        
-        // Validate on last step
-        if (developerWizardState.currentStep === developerWizardState.totalSteps) {
-          validateWizardConfig();
-        }
-      }
-    });
+
+  // Start button
+  const startBtn = document.getElementById('dev-bs-start');
+  if (startBtn) {
+    startBtn.addEventListener('click', startDeveloperBootstrap);
   }
-  
-  const finishBtn = document.getElementById('dev-wizard-finish');
-  if (finishBtn) {
-    finishBtn.addEventListener('click', finishDeveloperWizard);
-  }
-  
-  // Browse buttons (if Tauri dialog is available)
+
+  // Browse buttons
   const browseBtns = [
-    { id: 'dev-browse-qemu', inputId: 'dev-qemu-path', title: 'Select QEMU Binary' },
-    { id: 'dev-browse-iso', inputId: 'dev-iso-path', title: 'Select ISO File' },
-    { id: 'dev-browse-disk', inputId: 'dev-disk-path', title: 'Select Disk File' },
+    { btnId: 'dev-bs-browse-qemu', inputId: 'dev-bs-qemu', title: 'Select QEMU Binary' },
+    { btnId: 'dev-bs-browse-iso',  inputId: 'dev-bs-iso',  title: 'Select ISO File' },
+    { btnId: 'dev-bs-browse-disk', inputId: 'dev-bs-disk', title: 'Select Disk Image' },
   ];
-  
-  browseBtns.forEach(({ id, inputId, title }) => {
-    const btn = document.getElementById(id);
+  browseBtns.forEach(({ btnId, inputId, title }) => {
+    const btn = document.getElementById(btnId);
     if (btn) {
       btn.addEventListener('click', async () => {
         if (!isTauri()) {
           toast('File browser not available in web mode', 'error');
           return;
         }
-
         try {
-          const selected = await openDialogNative({
-            title,
-            multiple: false,
-            directory: false,
-          });
-          
+          const selected = await openDialogNative({ title, multiple: false, directory: false });
           if (selected) {
             const input = document.getElementById(inputId);
-            if (input) input.value = selected;
+            if (input) input.value = Array.isArray(selected) ? selected[0] : selected;
           }
         } catch (e) {
           console.error('File dialog error:', e);
@@ -2426,27 +2704,13 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
   });
-  
-  // Sync strategy radio change
-  const syncRadios = document.querySelectorAll('input[name="sync-strategy"]');
-  syncRadios.forEach(radio => {
-    radio.addEventListener('change', () => {
-      const intervalField = document.getElementById('sync-interval-field');
-      if (intervalField) {
-        intervalField.style.display = radio.value === 'interval' ? 'block' : 'none';
-      }
-    });
-  });
-  
-  // Close wizard on backdrop click
-  const wizardModal = document.getElementById('developer-wizard-modal');
-  if (wizardModal) {
-    const backdrop = wizardModal.querySelector('.engine-modal-backdrop');
+
+  // Close on backdrop click
+  const bootstrapModal = document.getElementById('developer-bootstrap-modal');
+  if (bootstrapModal) {
+    const backdrop = bootstrapModal.querySelector('.engine-modal-backdrop');
     if (backdrop) {
-      backdrop.addEventListener('click', () => {
-        const proceed = confirm('Are you sure you want to close the wizard? Your changes will not be saved.');
-        if (proceed) hideDeveloperWizard();
-      });
+      backdrop.addEventListener('click', hideDeveloperBootstrap);
     }
   }
 });

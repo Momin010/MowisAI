@@ -203,8 +203,6 @@ async fn call_vertex(
     messages: &[LlmMessage],
     tool_defs: &[Value],
 ) -> Result<LlmResponse> {
-    // For Vertex, we authenticate via Application Default Credentials (gcloud, service account, metadata).
-    // api_key is ignored.
     let project = config.gcp_project.trim();
     if project.is_empty() {
         bail!("Vertex AI requires a GCP Project — set it in Settings");
@@ -276,17 +274,24 @@ async fn call_vertex(
         "generation_config": { "max_output_tokens": 8192, "temperature": 0.2 }
     });
 
-    // Acquire bearer token
-    let provider = gcp_auth::provider().await.context("initialize GCP auth provider")?;
-    let token = provider
-        .token(&["https://www.googleapis.com/auth/cloud-platform"])
-        .await
-        .context("get GCP access token")?;
+    // Acquire bearer token — prefer service account key file, fall back to ADC.
+    let sa_key_path = config.gcp_service_account_key_path.trim();
+    let access_token = if !sa_key_path.is_empty() {
+        get_token_from_service_account(sa_key_path).await
+            .context("get access token from service account key file")?
+    } else {
+        let provider = gcp_auth::provider().await.context("initialize GCP auth provider")?;
+        let token = provider
+            .token(&["https://www.googleapis.com/auth/cloud-platform"])
+            .await
+            .context("get GCP access token")?;
+        token.as_str().to_owned()
+    };
 
     let client = reqwest::Client::new();
     let resp = client
         .post(&url)
-        .bearer_auth(token.as_str())
+        .bearer_auth(&access_token)
         .json(&body)
         .send()
         .await
@@ -301,6 +306,97 @@ async fn call_vertex(
 
     // Vertex generateContent returns the same candidate structure we already parse for Gemini.
     parse_gemini_response(&json)
+}
+
+// ── Service Account OAuth2 ───────────────────────────────────────────────────
+
+/// Read a GCP service account JSON key file and obtain an access token via
+/// the Google OAuth2 service-account flow (JWT → access token).
+async fn get_token_from_service_account(sa_key_path: &str) -> Result<String> {
+    let sa_json = tokio::fs::read_to_string(sa_key_path)
+        .await
+        .with_context(|| format!("read service account key file: {sa_key_path}"))?;
+
+    let sa: Value = serde_json::from_str(&sa_json)
+        .context("parse service account JSON")?;
+
+    let sa_type = sa["type"].as_str().unwrap_or("");
+    if sa_type != "service_account" {
+        bail!(
+            "Expected service account key file (type: \"service_account\"), got \"{sa_type}\""
+        );
+    }
+
+    let private_key_pem = sa["private_key"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("service account JSON missing \"private_key\" field"))?;
+    let client_email = sa["client_email"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("service account JSON missing \"client_email\" field"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock before UNIX epoch")?
+        .as_secs();
+
+    // Build JWT claims.
+    let claims = json!({
+        "iss": client_email,
+        "scope": "https://www.googleapis.com/auth/cloud-platform",
+        "aud": "https://oauth2.googleapis.com/token",
+        "iat": now,
+        "exp": now + 3600,
+    });
+
+    // Encode header + claims as base64url.
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header_b64 = b64.encode(r#"{"alg":"RS256","typ":"JWT"}"#.as_bytes());
+    let claims_b64 = b64.encode(serde_json::to_string(&claims)?.as_bytes());
+    let signing_input = format!("{header_b64}.{claims_b64}");
+
+    // Parse RSA private key (PKCS#8 PEM) and sign.
+    use rsa::pkcs8::DecodePrivateKey as _;
+    let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(private_key_pem)
+        .context("parse RSA private key from service account PKCS#8 PEM")?;
+
+    let digest = {
+        use sha2::{Sha256, Digest};
+        Sha256::digest(signing_input.as_bytes())
+    };
+
+    let scheme = rsa::pkcs1v15::SigningScheme::<sha2::Sha256>::new();
+    let signature = scheme.sign(None, &private_key, &digest)
+        .context("RSA-PKCS1v15 sign failed")?;
+    let signature_b64 = b64.encode(signature.as_bytes());
+
+    let jwt = format!("{signing_input}.{signature_b64}");
+
+    // Exchange JWT for access token.
+    let client = reqwest::Client::new();
+    let token_resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&serde_json::json!({
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": jwt,
+        }))
+        .send()
+        .await
+        .context("OAuth2 token exchange request failed")?;
+
+    let status = token_resp.status();
+    let token_json: Value = token_resp.json().await.context("decode OAuth2 token response")?;
+
+    if !status.is_success() {
+        let msg = token_json["error_description"].as_str()
+            .or_else(|| token_json["error"].as_str())
+            .unwrap_or("unknown error");
+        bail!("OAuth2 token exchange failed ({status}): {msg}");
+    }
+
+    let access_token = token_json["access_token"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("OAuth2 response missing access_token"))?
+        .to_owned();
+
+    Ok(access_token)
 }
 
 fn parse_gemini_response(json: &Value) -> Result<LlmResponse> {

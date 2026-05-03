@@ -8,7 +8,7 @@
 // agentd before launching the desktop app. The desktop detects it and
 // connects; if it's not running we surface a "start daemon" button in the UI.
 
-use crate::platform::{ConnectionInfo, ConnectionKind, VmLauncher};
+use crate::platform::{ConnectionInfo, ConnectionKind, ProgressSender, VmLauncher};
 use crate::platform::connection::is_unix_reachable;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -32,7 +32,7 @@ impl LinuxDirectLauncher {
 impl VmLauncher for LinuxDirectLauncher {
     fn name(&self) -> &str { "Linux direct" }
 
-    async fn start(&self) -> Result<ConnectionInfo> {
+    async fn start(&self, _progress: Option<ProgressSender>) -> Result<ConnectionInfo> {
         // Verify the socket is up (agentd must already be running).
         if !is_unix_reachable(&self.socket_path).await {
             bail!(

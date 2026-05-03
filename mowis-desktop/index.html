@@ -16,6 +16,16 @@
   <div class="splash-logo">Mowis<span>AI</span></div>
   <div class="splash-loader"><div class="splash-track"><div class="splash-fill" id="splash-fill"></div></div></div>
   <div class="splash-hint" id="splash-hint">Initializing…</div>
+  <div class="boot-terminal" id="boot-terminal">
+    <div class="boot-terminal-header">
+      <span class="boot-terminal-dot red"></span>
+      <span class="boot-terminal-dot yellow"></span>
+      <span class="boot-terminal-dot green"></span>
+      <span class="boot-terminal-title">boot log</span>
+    </div>
+    <div class="boot-terminal-body" id="boot-terminal-body"></div>
+  </div>
+  <button class="splash-continue hidden" id="splash-continue">Continue in background</button>
 </div>
 
 <!-- ══════════════════ ENGINE SETUP MODAL ══════════════════ -->
@@ -90,7 +100,7 @@
           </div>
           <div>
             <div class="engine-option-label">Developer Mode</div>
-            <div class="engine-option-desc">Custom QEMU setup (for advanced users with custom ISO/disk)</div>
+            <div class="engine-option-desc">One-click QEMU bootstrap: boots Alpine, installs agentd, bridges to TCP automatically</div>
           </div>
         </button>
       </div>
@@ -278,16 +288,61 @@
       <!-- ══ SESSIONS ══ -->
       <div id="page-sessions" class="page">
         <div class="page-head">
-          <h1>Sessions</h1>
-          <button class="btn-outline" id="btn-new-session">New session</button>
+          <div class="page-head-left">
+            <h1>Sessions</h1>
+            <span class="sessions-count" id="sessions-count"></span>
+          </div>
+          <div class="page-head-actions">
+            <button class="btn-send" id="btn-new-session">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              New session
+            </button>
+          </div>
         </div>
-        <div class="page-body">
+        <div class="page-body sessions-page-body">
+          <!-- Search + filters bar -->
+          <div class="sessions-toolbar" id="sessions-toolbar" style="display:none">
+            <div class="sessions-search-wrap">
+              <svg class="sessions-search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5L14.5 14.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+              <input type="text" class="sessions-search" id="sessions-search" placeholder="Search sessions…" />
+              <button class="sessions-search-clear hidden" id="sessions-search-clear">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+            <div class="sessions-filters">
+              <button class="sessions-filter active" data-filter="all">All</button>
+              <button class="sessions-filter" data-filter="running">Running</button>
+              <button class="sessions-filter" data-filter="done">Completed</button>
+              <button class="sessions-filter" data-filter="stopped">Stopped</button>
+              <button class="sessions-filter" data-filter="error">Failed</button>
+            </div>
+            <div class="sessions-sort-wrap">
+              <label class="sessions-sort-label">Sort</label>
+              <select class="sessions-sort" id="sessions-sort">
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="tokens">Most tokens</option>
+                <option value="duration">Longest duration</option>
+              </select>
+            </div>
+          </div>
+          <!-- Active session highlight -->
+          <div id="sessions-active" class="sessions-active" style="display:none"></div>
+          <!-- Session list -->
           <div id="sessions-empty" class="empty-state">
-            <div class="empty-icon">◻</div>
+            <div class="empty-icon">
+              <svg width="48" height="48" viewBox="0 0 48 48" fill="none"><rect x="8" y="8" width="32" height="32" rx="6" stroke="currentColor" stroke-width="1.5" opacity="0.3"/><path d="M17 18h14M17 24h10M17 30h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.2"/></svg>
+            </div>
             <div class="empty-text">No sessions yet</div>
-            <div class="empty-sub">Run your first session from the Home tab</div>
+            <div class="empty-sub">Start a session from the Home tab to see your history here</div>
+            <button class="btn-outline empty-action" id="btn-empty-new">Start a session</button>
           </div>
           <div id="sessions-list" class="sessions-list" style="display:none"></div>
+          <!-- No results for search/filter -->
+          <div id="sessions-no-results" class="empty-state small" style="display:none">
+            <div class="empty-text">No sessions match your search</div>
+            <div class="empty-sub">Try a different query or clear filters</div>
+          </div>
         </div>
       </div>
 
@@ -296,36 +351,68 @@
         <div class="page-head">
           <h1>Usage</h1>
         </div>
-        <div class="page-body">
+        <div class="page-body usage-page-body">
+          <!-- Summary stats -->
           <div class="usage-stats" id="usage-stats">
             <div class="usage-stat">
               <div class="us-value" id="us-sessions">0</div>
-              <div class="us-label">Total sessions</div>
+              <div class="us-label">Sessions</div>
             </div>
             <div class="usage-stat">
               <div class="us-value" id="us-tasks">0</div>
-              <div class="us-label">Tasks executed</div>
+              <div class="us-label">Tasks</div>
             </div>
             <div class="usage-stat">
               <div class="us-value" id="us-tokens">0</div>
-              <div class="us-label">Tokens used</div>
+              <div class="us-label">Tokens</div>
             </div>
             <div class="usage-stat">
               <div class="us-value" id="us-tools">0</div>
               <div class="us-label">Tool calls</div>
             </div>
-          </div>
-          <div class="usage-dashboard">
-            <div class="usage-chart-head">
-              <div>
-                <div class="usage-section-label">Usage trend</div>
-                <div class="usage-chart-total" id="usage-total-label">0 tokens</div>
-              </div>
-              <div class="usage-chart-meta" id="usage-chart-meta">Last 7 sessions</div>
+            <div class="usage-stat">
+              <div class="us-value" id="us-duration">0m</div>
+              <div class="us-label">Total time</div>
             </div>
-            <div class="usage-chart" id="usage-chart"></div>
           </div>
-          <div class="usage-section-label">Recent sessions</div>
+
+          <!-- Charts row -->
+          <div class="usage-charts-row">
+            <!-- Main area chart -->
+            <div class="usage-chart-card usage-chart-main">
+              <div class="usage-chart-head">
+                <div>
+                  <div class="usage-section-label">Token usage over time</div>
+                  <div class="usage-chart-total" id="usage-total-label">0 tokens</div>
+                </div>
+              </div>
+              <div class="usage-chart" id="usage-chart"></div>
+            </div>
+
+            <!-- Donut breakdown -->
+            <div class="usage-chart-card usage-chart-donut-card">
+              <div class="usage-section-label">Token breakdown</div>
+              <div class="usage-donut-wrap">
+                <svg class="usage-donut" id="usage-donut" viewBox="0 0 200 200"></svg>
+                <div class="usage-donut-legend" id="usage-donut-legend"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Task success rate + Session timeline -->
+          <div class="usage-charts-row">
+            <div class="usage-chart-card">
+              <div class="usage-section-label">Task success rate</div>
+              <div class="usage-success-rate" id="usage-success-rate"></div>
+            </div>
+            <div class="usage-chart-card usage-timeline-card">
+              <div class="usage-section-label">Session timeline</div>
+              <div class="usage-timeline" id="usage-timeline"></div>
+            </div>
+          </div>
+
+          <!-- Recent sessions table -->
+          <div class="usage-section-label">All sessions</div>
           <div id="usage-sessions-table" class="usage-table-wrap">
             <div class="empty-state small">
               <div class="empty-text">No history yet</div>
@@ -372,6 +459,15 @@
             <label class="form-label">GCP Region<span class="form-hint">Vertex endpoint region (e.g. us-central1)</span></label>
             <div class="form-ctrl"><input type="text" id="set-gcp-region" class="form-input" placeholder="us-central1" /></div>
           </div>
+          <div class="form-row" id="row-sa-key">
+            <label class="form-label">Service Account Key<span class="form-hint">JSON key file for Vertex AI auth (optional, uses ADC if empty)</span></label>
+            <div class="form-ctrl">
+              <div class="form-input-group">
+                <input type="text" id="set-sa-key" class="form-input" placeholder="path/to/service-account-key.json" readonly />
+                <button class="btn-outline sm" id="btn-browse-sa-key">Browse</button>
+              </div>
+            </div>
+          </div>
 
           <div class="settings-section">Runtime</div>
           <div class="form-row">
@@ -406,7 +502,7 @@
             <div class="form-ctrl">
               <div class="form-actions">
                 <button class="btn-outline sm" id="btn-engine-point">Add QEMU/WSL path</button>
-                <button class="btn-outline sm" id="btn-engine-developer">Developer wizard</button>
+                <button class="btn-outline sm" id="btn-engine-developer">Developer bootstrap</button>
               </div>
               <div class="form-hint">After saving, the app will restart and retry the engine automatically.</div>
             </div>
@@ -534,155 +630,61 @@
 </html>
 
 
-<!-- ══════════════════ DEVELOPER MODE WIZARD ══════════════════ -->
-<div id="developer-wizard-modal" class="engine-modal hidden" aria-hidden="true">
+<!-- ══════════════════ DEVELOPER MODE BOOTSTRAP ══════════════════ -->
+<div id="developer-bootstrap-modal" class="engine-modal hidden" aria-hidden="true">
   <div class="engine-modal-backdrop"></div>
   <div class="engine-modal-dialog developer-wizard-dialog" role="dialog" aria-modal="true">
     <div class="engine-modal-head">
-      <div class="engine-modal-icon">🛠️</div>
+      <div class="engine-modal-icon">&#9881;</div>
       <div>
-        <div class="engine-modal-title">Developer Mode Configuration</div>
-        <div class="engine-modal-subtitle">Let's configure MowisAI for your custom QEMU setup</div>
+        <div class="engine-modal-title">Developer Mode Bootstrap</div>
+        <div class="engine-modal-subtitle">One-click QEMU setup: boot Alpine, install agentd, bridge to TCP</div>
       </div>
     </div>
-    
+
     <div class="engine-modal-body">
-      <!-- Step indicator -->
-      <div class="wizard-steps">
-        <div class="wizard-step active" data-step="1">
-          <div class="wizard-step-number">1</div>
-          <div class="wizard-step-label">QEMU Path</div>
-        </div>
-        <div class="wizard-step" data-step="2">
-          <div class="wizard-step-number">2</div>
-          <div class="wizard-step-label">ISO & Disk</div>
-        </div>
-        <div class="wizard-step" data-step="3">
-          <div class="wizard-step-number">3</div>
-          <div class="wizard-step-label">Mount Config</div>
-        </div>
-        <div class="wizard-step" data-step="4">
-          <div class="wizard-step-number">4</div>
-          <div class="wizard-step-label">Sync Strategy</div>
-        </div>
+      <div class="dev-bootstrap-explain">
+        <div class="dev-bootstrap-step"><span class="dev-step-num">1</span> Start QEMU with your Alpine ISO + disk</div>
+        <div class="dev-bootstrap-step"><span class="dev-step-num">2</span> Auto-login, activate network, mount storage</div>
+        <div class="dev-bootstrap-step"><span class="dev-step-num">3</span> Install socat, start agentd, bridge to TCP</div>
+        <div class="dev-bootstrap-step"><span class="dev-step-num">4</span> App connects automatically via localhost</div>
       </div>
-      
-      <!-- Step 1: QEMU Path -->
-      <div class="wizard-page active" data-page="1">
-        <div class="wizard-question">Where is your QEMU binary located?</div>
-        <div class="wizard-hint">This is usually in C:\Program Files\qemu\ or a custom folder</div>
+
+      <div class="wizard-field">
+        <label class="wizard-label">QEMU Binary</label>
         <div class="wizard-input-group">
-          <input type="text" class="wizard-input" id="dev-qemu-path" placeholder="C:\Users\Public\qemu\qemu-system-x86_64.exe" />
-          <button class="wizard-browse-btn" id="dev-browse-qemu">Browse</button>
-        </div>
-        <div class="wizard-example">Example: C:\Users\Public\qemu\qemu-system-x86_64.exe</div>
-      </div>
-      
-      <!-- Step 2: ISO & Disk -->
-      <div class="wizard-page" data-page="2">
-        <div class="wizard-question">Where are your ISO and disk files?</div>
-        
-        <div class="wizard-field">
-          <label class="wizard-label">ISO File (Alpine Linux)</label>
-          <div class="wizard-input-group">
-            <input type="text" class="wizard-input" id="dev-iso-path" placeholder="alpine-virt-3.19.1-x86_64.iso" />
-            <button class="wizard-browse-btn" id="dev-browse-iso">Browse</button>
-          </div>
-          <div class="wizard-example">Example: C:\Users\Public\mowisai-app\MowisAI Desktop\alpine-minirootfs-x86_64\alpine-virt-3.19.1-x86_64.iso</div>
-        </div>
-        
-        <div class="wizard-field">
-          <label class="wizard-label">Persistent Disk (qcow2)</label>
-          <div class="wizard-input-group">
-            <input type="text" class="wizard-input" id="dev-disk-path" placeholder="momin_disk.qcow2" />
-            <button class="wizard-browse-btn" id="dev-browse-disk">Browse</button>
-          </div>
-          <div class="wizard-example">Example: C:\Users\Public\mowisai-app\momin_disk.qcow2</div>
-        </div>
-        
-        <div class="wizard-field">
-          <label class="wizard-label">RAM (MB)</label>
-          <input type="number" class="wizard-input" id="dev-ram" value="512" min="256" max="4096" />
+          <input type="text" class="wizard-input" id="dev-bs-qemu" placeholder="qemu-system-x86_64.exe" />
+          <button class="wizard-browse-btn" id="dev-bs-browse-qemu">Browse</button>
         </div>
       </div>
-      
-      <!-- Step 3: Mount Config -->
-      <div class="wizard-page" data-page="3">
-        <div class="wizard-question">How is your disk mounted inside the VM?</div>
-        
-        <div class="wizard-field">
-          <label class="wizard-label">Device Name</label>
-          <input type="text" class="wizard-input" id="dev-disk-device" value="/dev/vda" />
-          <div class="wizard-hint">Usually /dev/vda, /dev/sda, or /dev/hda</div>
-        </div>
-        
-        <div class="wizard-field">
-          <label class="wizard-label">Mount Point</label>
-          <input type="text" class="wizard-input" id="dev-mount-point" value="/mnt/mowisai" />
-          <div class="wizard-hint">Where the disk is mounted (e.g., /mnt/mowisai)</div>
-        </div>
-        
-        <div class="wizard-field">
-          <label class="wizard-label">agentd Location</label>
-          <input type="text" class="wizard-input" id="dev-agentd-path" value="/mnt/mowisai/agentd" />
-          <div class="wizard-hint">Where agentd binary will be stored on the persistent disk</div>
-        </div>
-        
-        <div class="wizard-field">
-          <label class="wizard-label">TCP Port</label>
-          <input type="number" class="wizard-input" id="dev-agent-port" value="9722" min="1024" max="65535" />
-          <div class="wizard-hint">Port for agentd communication (forwarded to Windows)</div>
+
+      <div class="wizard-field">
+        <label class="wizard-label">Alpine Linux ISO</label>
+        <div class="wizard-input-group">
+          <input type="text" class="wizard-input" id="dev-bs-iso" placeholder="alpine-virt-3.19.1-x86_64.iso" />
+          <button class="wizard-browse-btn" id="dev-bs-browse-iso">Browse</button>
         </div>
       </div>
-      
-      <!-- Step 4: Sync Strategy -->
-      <div class="wizard-page" data-page="4">
-        <div class="wizard-question">How should file changes be synced to disk?</div>
-        <div class="wizard-hint">Since your system runs in RAM, changes need to be synced to the persistent disk</div>
-        
-        <div class="wizard-radio-group">
-          <label class="wizard-radio">
-            <input type="radio" name="sync-strategy" value="interval" checked />
-            <div class="wizard-radio-content">
-              <div class="wizard-radio-title">⏱️ Auto-sync (Interval)</div>
-              <div class="wizard-radio-desc">Automatically run 'sync' every N seconds (recommended)</div>
-            </div>
-          </label>
-          
-          <div class="wizard-field wizard-sub-field" id="sync-interval-field">
-            <label class="wizard-label">Sync every (seconds)</label>
-            <input type="number" class="wizard-input" id="dev-sync-interval" value="30" min="5" max="300" />
-          </div>
-          
-          <label class="wizard-radio">
-            <input type="radio" name="sync-strategy" value="always" />
-            <div class="wizard-radio-content">
-              <div class="wizard-radio-title">⚡ Auto-sync (Always)</div>
-              <div class="wizard-radio-desc">Sync after every file write (safest but slower)</div>
-            </div>
-          </label>
-          
-          <label class="wizard-radio">
-            <input type="radio" name="sync-strategy" value="manual" />
-            <div class="wizard-radio-content">
-              <div class="wizard-radio-title">🖐️ Manual Sync</div>
-              <div class="wizard-radio-desc">You run 'sync' command yourself when needed</div>
-            </div>
-          </label>
+
+      <div class="wizard-field">
+        <label class="wizard-label">Persistent Disk (qcow2)</label>
+        <div class="wizard-input-group">
+          <input type="text" class="wizard-input" id="dev-bs-disk" placeholder="momin_disk.qcow2" />
+          <button class="wizard-browse-btn" id="dev-bs-browse-disk">Browse</button>
         </div>
       </div>
-      
-      <!-- Navigation -->
+
+      <div class="wizard-field">
+        <label class="wizard-label">TCP Port</label>
+        <input type="number" class="wizard-input" id="dev-bs-port" value="8080" min="1024" max="65535" />
+        <div class="wizard-hint">Host port forwarded into the VM (default 8080)</div>
+      </div>
+
+      <div id="dev-bs-status" class="dev-bootstrap-status hidden"></div>
+
       <div class="wizard-nav">
-        <button class="wizard-btn wizard-btn-secondary" id="dev-wizard-back">Back</button>
-        <button class="wizard-btn wizard-btn-primary" id="dev-wizard-next">Next</button>
-        <button class="wizard-btn wizard-btn-primary hidden" id="dev-wizard-finish">Finish & Save</button>
-      </div>
-      
-      <!-- Validation warnings -->
-      <div class="wizard-warnings hidden" id="dev-wizard-warnings">
-        <div class="wizard-warnings-title">⚠️ Configuration Warnings</div>
-        <ul id="dev-warnings-list"></ul>
+        <button class="wizard-btn wizard-btn-secondary" id="dev-bs-cancel">Cancel</button>
+        <button class="wizard-btn wizard-btn-primary" id="dev-bs-start">Save &amp; Restart to Bootstrap</button>
       </div>
     </div>
   </div>

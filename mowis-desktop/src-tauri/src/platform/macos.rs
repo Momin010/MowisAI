@@ -15,7 +15,7 @@
 use crate::platform::auth;
 use crate::platform::connection::is_tcp_reachable;
 use crate::platform::qemu::{QemuConfig, QemuLauncher};
-use crate::platform::{ConnectionInfo, ConnectionKind, VmLauncher};
+use crate::platform::{ConnectionInfo, ConnectionKind, ProgressSender, VmLauncher};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -91,7 +91,7 @@ impl MacOSLauncher {
 impl VmLauncher for MacOSLauncher {
     fn name(&self) -> &str { "macOS/QEMU+HVF" }
 
-    async fn start(&self) -> Result<ConnectionInfo> {
+    async fn start(&self, _progress: Option<ProgressSender>) -> Result<ConnectionInfo> {
         self.ensure_image().await?;
 
         let token = auth::load_or_create().context("load/create auth token")?;

@@ -23,6 +23,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tokio::sync::mpsc;
 
 // ── Connection descriptor returned by VmLauncher::start() ────────────────────
 
@@ -51,10 +52,14 @@ pub enum ConnectionKind {
 
 // ── Platform launcher trait ───────────────────────────────────────────────────
 
+/// Type alias for the progress event sender used by launchers.
+pub type ProgressSender = mpsc::Sender<crate::backend::SetupProgress>;
+
 #[async_trait]
 pub trait VmLauncher: Send + Sync {
     /// Boot (or locate) the Linux environment and return connection details.
-    async fn start(&self) -> Result<ConnectionInfo>;
+    /// `progress` is an optional sender for detailed boot log events.
+    async fn start(&self, progress: Option<ProgressSender>) -> Result<ConnectionInfo>;
     /// Gracefully stop the environment (save snapshot if applicable).
     async fn stop(&self) -> Result<()>;
     /// Return true if the environment is reachable right now.
@@ -80,7 +85,16 @@ pub fn create_launcher() -> Box<dyn VmLauncher> {
     }
     #[cfg(windows)]
     {
-        Box::new(windows::WindowsLauncher::new())
+        // Developer mode takes priority when a valid config exists.
+        // This lets users with custom QEMU setups (ISO + qcow2) bootstrap
+        // automatically instead of going through the WSL2 path.
+        if developer_mode::DeveloperLauncher::is_configured() {
+            let config = developer_mode::DeveloperConfig::load_or_default();
+            log::info!("Developer mode configured — using QEMU bootstrap launcher");
+            Box::new(developer_mode::DeveloperLauncher::new(config))
+        } else {
+            Box::new(windows::WindowsLauncher::new())
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
