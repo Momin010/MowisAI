@@ -31,12 +31,28 @@ pub fn start_bridge(
                 }
             });
 
+            // Small yield to let the progress listener task acquire the mutex
+            // and start receiving before we emit any events.
+            sleep(Duration::from_millis(10)).await;
+
             match bridge_clone.start().await {
                 Ok(()) => {
                     let _ = evt_tx_clone.send(BridgeEvent::DaemonConnected).await;
                 }
                 Err(e) => {
-                    log::error!("Backend harness failed to start: {e}");
+                    let msg = format!("{:#}", e);
+                    log::error!("Backend harness failed to start: {msg}");
+                    // The frontend splash screen listens for setup_progress, not
+                    // bridge events. If start() failed before emitting any terminal
+                    // progress event (ready/error), emit the error now so the boot
+                    // terminal shows what went wrong instead of staying blank.
+                    let _ = bridge_clone.emit_detail(
+                        "error",
+                        &msg,
+                        0,
+                        "error",
+                        None,
+                    ).await;
                     let _ = evt_tx_clone.send(BridgeEvent::DaemonDisconnected).await;
                 }
             }

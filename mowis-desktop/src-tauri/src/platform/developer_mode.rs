@@ -9,6 +9,7 @@
 // Uses the serial console as a bidirectional TTY — far more reliable than
 // monitor `sendkey` which is fragile and loses characters.
 
+use crate::platform::auth;
 use crate::platform::connection::is_tcp_reachable;
 use crate::platform::{ConnectionInfo, ConnectionKind, ProgressSender, VmLauncher};
 use crate::backend::SetupProgress;
@@ -25,8 +26,40 @@ use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
 
-const BOOT_WAIT_SECS: u64 = 20;
 const PORT_READY_TIMEOUT_SECS: u64 = 120;
+const ALPINE_ISO: &str = "alpine-virt-3.19.1-x86_64.iso";
+
+// ── Path helpers ──────────────────────────────────────────────────────────────
+
+/// Strip the \\?\ extended-length path prefix that some Windows APIs add.
+fn strip_unc(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        PathBuf::from(s[4..].to_string())
+    } else {
+        path
+    }
+}
+
+/// Locate a bundled file by filename.
+/// Searches: next to the exe, a "resources/" sub-dir, and the Cargo workspace root.
+fn find_bundled_file(name: &str) -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        let exe = strip_unc(exe);
+        if let Some(dir) = exe.parent() {
+            let p = dir.join(name);
+            if p.exists() { return Some(p); }
+            let p2 = dir.join("resources").join(name);
+            if p2.exists() { return Some(p2); }
+        }
+    }
+    // Workspace root during `cargo tauri dev`
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let p = PathBuf::from(&manifest).join("..").join("..").join(name);
+        if p.exists() { return Some(p); }
+    }
+    None
+}
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -46,9 +79,11 @@ pub struct DeveloperConfig {
 
 impl Default for DeveloperConfig {
     fn default() -> Self {
+        let iso_path = find_bundled_file(ALPINE_ISO)
+            .unwrap_or_else(|| PathBuf::from(ALPINE_ISO));
         Self {
             qemu_path: PathBuf::from("qemu-system-x86_64"),
-            iso_path: PathBuf::from("alpine-virt-3.19.1-x86_64.iso"),
+            iso_path,
             disk_path: PathBuf::from("momin_disk.qcow2"),
             ram_mb: 512,
             agent_port: 8080,
@@ -92,7 +127,20 @@ impl DeveloperConfig {
             warnings.push(format!("QEMU binary not found: {}", self.qemu_path.display()));
         }
         if !self.iso_path.exists() {
-            warnings.push(format!("ISO not found: {}", self.iso_path.display()));
+            // Try to find the ISO in bundled locations
+            if let Some(found) = find_bundled_file(ALPINE_ISO) {
+                warnings.push(format!(
+                    "ISO not found at configured path: {}\n  \
+                     But found at: {} — update your config to use this path.",
+                    self.iso_path.display(), found.display()
+                ));
+            } else {
+                warnings.push(format!(
+                    "ISO not found: {}\n  \
+                     Download from https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/{}",
+                    self.iso_path.display(), ALPINE_ISO
+                ));
+            }
         }
         if !self.disk_path.exists() {
             warnings.push(format!("Disk image not found: {}", self.disk_path.display()));
@@ -358,7 +406,7 @@ impl DeveloperLauncher {
         )
     }
 
-    async fn bootstrap(&self, mut child: Child, pw: &Option<ProgressSender>) -> Result<ConnectionInfo> {
+    async fn bootstrap(&self, mut child: Child, token: &str, pw: &Option<ProgressSender>) -> Result<ConnectionInfo> {
         // ── Step 0: Verify QEMU didn't crash immediately ─────────────────────
         // Give QEMU 2 seconds to start, then check if it's still alive
         sleep(Duration::from_secs(2)).await;
@@ -699,6 +747,15 @@ impl DeveloperLauncher {
 
         self.wait_for_port("agentd+socat bridge", PORT_READY_TIMEOUT_SECS, pw).await?;
 
+        // ── Step 11: Write auth token into VM ──────────────────────────────
+        emit(pw, "booting", "Writing auth token into VM…", 92, "command",
+            Some("mkdir -p /root/.mowisai && write token".into())).await;
+        let token_cmd = format!(
+            "mkdir -p /root/.mowisai && printf '%s' '{}' > /root/.mowisai/token && chmod 600 /root/.mowisai/token",
+            token.replace('\'', "\\'")
+        );
+        let _ = serial.exec_command(&token_cmd, None, 5).await;
+
         self.running.store(true, Ordering::SeqCst);
         emit(pw, "ready", "Developer Mode bootstrap complete!", 100, "success",
             Some(format!("Bridge active on 127.0.0.1:{}", self.config.agent_port))).await;
@@ -709,7 +766,7 @@ impl DeveloperLauncher {
             socket_path: None,
             tcp_addr: Some(format!("127.0.0.1:{}", self.config.agent_port)),
             pipe_name: None,
-            auth_token: None,
+            auth_token: Some(token.to_owned()),
         })
     }
 }
@@ -720,6 +777,7 @@ impl DeveloperLauncher {
 impl VmLauncher for DeveloperLauncher {
     async fn start(&self, progress: Option<ProgressSender>) -> Result<ConnectionInfo> {
         let pw = &progress;
+        let token = auth::load_or_create().context("load/create auth token")?;
         let args = self.build_qemu_args();
         let full_cmd = format!("{} {}", self.config.qemu_path.display(), args.join(" "));
 
@@ -757,7 +815,7 @@ impl VmLauncher for DeveloperLauncher {
 
         emit(pw, "booting", &format!("QEMU process spawned (PID: {:?})", child.id()), 10, "success", None).await;
         log::info!("QEMU process spawned (pid: {:?})", child.id());
-        self.bootstrap(child, pw).await
+        self.bootstrap(child, &token, pw).await
     }
 
     async fn stop(&self) -> Result<()> {

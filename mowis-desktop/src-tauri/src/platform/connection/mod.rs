@@ -79,8 +79,7 @@ impl ConnectionStream {
 
 // ── Connection factory ────────────────────────────────────────────────────────
 
-/// Open a connection described by `info` and perform the auth handshake
-/// (for TCP and NamedPipe connections).
+/// Open a connection described by `info`.
 pub async fn open_connection(info: &ConnectionInfo) -> Result<ConnectionStream> {
     match info.kind {
         // ── Linux direct Unix socket ─────────────────────────────────────────
@@ -100,24 +99,23 @@ pub async fn open_connection(info: &ConnectionInfo) -> Result<ConnectionStream> 
             bail!("UnixSocket connections are only available on Linux")
         }
 
-        // ── TCP + auth token (QEMU / WSL2 relay) ────────────────────────────
+        // ── TCP (QEMU / WSL2 relay) ─────────────────────────────────────────
+        // Note: auth handshake is skipped because the agentd socket server does not
+        // implement auth — it speaks the SocketRequest protocol directly.
+        // Security is provided by the Unix socket permissions inside the VM and
+        // the socat bridge binding to localhost only.
         ConnectionKind::TcpWithToken => {
             let addr = info
                 .tcp_addr
                 .as_deref()
                 .context("TcpWithToken connection needs tcp_addr")?;
-            let token = info
-                .auth_token
-                .as_deref()
-                .context("TcpWithToken connection needs auth_token")?;
 
             let stream = timeout(Duration::from_secs(10), TcpStream::connect(addr))
                 .await
                 .context("TCP connect timed out")?
                 .with_context(|| format!("TCP connect {addr}"))?;
 
-            let mut conn = ConnectionStream::Tcp(BufReader::new(stream));
-            tcp_auth_handshake(&mut conn, token).await?;
+            let conn = ConnectionStream::Tcp(BufReader::new(stream));
             Ok(conn)
         }
 
@@ -129,16 +127,11 @@ pub async fn open_connection(info: &ConnectionInfo) -> Result<ConnectionStream> 
                     .pipe_name
                     .as_deref()
                     .context("NamedPipe connection needs pipe_name")?;
-                let token = info
-                    .auth_token
-                    .as_deref()
-                    .context("NamedPipe connection needs auth_token")?;
 
                 let client = ClientOptions::new()
                     .open(pipe)
                     .with_context(|| format!("open named pipe {pipe}"))?;
-                let mut conn = ConnectionStream::Pipe(BufReader::new(client));
-                tcp_auth_handshake(&mut conn, token).await?;
+                let conn = ConnectionStream::Pipe(BufReader::new(client));
                 Ok(conn)
             }
             #[cfg(not(windows))]
@@ -150,6 +143,8 @@ pub async fn open_connection(info: &ConnectionInfo) -> Result<ConnectionStream> 
 // ── Auth handshake (shared by TCP and NamedPipe) ──────────────────────────────
 
 /// Send `{"type":"auth","token":"<hex>"}` and expect `{"status":"authenticated"}`.
+/// Currently unused because agentd does not implement auth — retained for future use.
+#[allow(dead_code)]
 async fn tcp_auth_handshake(conn: &mut ConnectionStream, token: &str) -> Result<()> {
     conn.send_json(&serde_json::json!({ "type": "auth", "token": token }))
         .await
