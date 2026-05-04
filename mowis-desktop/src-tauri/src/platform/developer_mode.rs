@@ -347,7 +347,7 @@ impl DeveloperLauncher {
         let mut args = vec![
             "-m".into(), cfg.ram_mb.to_string(),
             "-drive".into(), format!("file={},format=qcow2", cfg.disk_path.display()),
-            "-cdrom".into(), cfg.iso_path.display().to_string(),
+            "-cdrom".into(), cfg.iso_path.to_string_lossy().to_string(),
             "-boot".into(), "d".into(),  // Boot from CD-ROM (the Alpine ISO)
             "-netdev".into(), format!(
                 "user,id=net0,hostfwd=tcp::{}-:8080",
@@ -368,9 +368,9 @@ impl DeveloperLauncher {
             log::info!("Using direct kernel boot: kernel={}, initrd={}",
                 vmlinuz.display(), initramfs.display());
             args.push("-kernel".into());
-            args.push(vmlinuz.display().to_string());
+            args.push(vmlinuz.to_string_lossy().to_string());
             args.push("-initrd".into());
-            args.push(initramfs.display().to_string());
+            args.push(initramfs.to_string_lossy().to_string());
             args.push("-append".into());
             // IMPORTANT: This must be a SINGLE argument string — spaces are part of the value
             args.push("console=ttyS0 root=/dev/sr0 modules=loop,squashfs,sd-mod,usb-storage quiet".into());
@@ -406,7 +406,7 @@ impl DeveloperLauncher {
         )
     }
 
-    async fn bootstrap(&self, mut child: Child, token: &str, pw: &Option<ProgressSender>) -> Result<ConnectionInfo> {
+    async fn bootstrap(&self, mut child: Child, token: &str, args_log: &[String], pw: &Option<ProgressSender>) -> Result<ConnectionInfo> {
         // ── Step 0: Verify QEMU didn't crash immediately ─────────────────────
         // Give QEMU 2 seconds to start, then check if it's still alive
         sleep(Duration::from_secs(2)).await;
@@ -423,15 +423,50 @@ impl DeveloperLauncher {
                     "(stderr not captured)".into()
                 };
 
-                let msg = format!(
-                    "QEMU exited immediately with status: {}\n\nQEMU stderr:\n{}\n\n\
-                     Common causes:\n\
-                     - Paths with spaces not handled correctly\n\
-                     - WHPX/acceleration not available (try without -accel)\n\
-                     - Kernel or initrd file not found\n\
-                     - Disk image corrupted or locked by another process",
+                // Also capture stdout
+                let stdout_output = if let Some(mut stdout) = child.stdout.take() {
+                    let mut buf = String::new();
+                    let _ = tokio::io::AsyncReadExt::read_to_string(&mut stdout, &mut buf).await;
+                    buf
+                } else {
+                    String::new()
+                };
+
+                // Write crash log to a file so the user can ALWAYS find it
+                let log_path = dirs::data_local_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("MowisAI")
+                    .join("qemu-crash.log");
+                let _ = std::fs::create_dir_all(log_path.parent().unwrap());
+                let crash_report = format!(
+                    "=== QEMU CRASH REPORT ===\n\
+                     Timestamp: {:?}\n\
+                     Exit status: {}\n\
+                     Command: {} {}\n\n\
+                     === STDERR ===\n{}\n\n\
+                     === STDOUT ===\n{}\n",
+                    std::time::SystemTime::now(),
                     exit_status,
-                    if stderr_output.is_empty() { "(empty)" } else { &stderr_output }
+                    self.config.qemu_path.display(),
+                    args_log.join(" "),
+                    if stderr_output.is_empty() { "(empty)" } else { &stderr_output },
+                    if stdout_output.is_empty() { "(empty)" } else { &stdout_output },
+                );
+                let _ = std::fs::write(&log_path, &crash_report);
+                log::error!("Crash report written to: {}", log_path.display());
+
+                let msg = format!(
+                    "QEMU exited immediately with status: {}\n\n\
+                     FULL STDERR:\n{}\n\n\
+                     Log saved to: {}\n\n\
+                     Common causes:\n\
+                     - Paths with spaces (check QEMU args above)\n\
+                     - WHPX/acceleration not available\n\
+                     - Kernel or initrd file not found\n\
+                     - Disk image corrupted or locked",
+                    exit_status,
+                    if stderr_output.is_empty() { "(empty)" } else { &stderr_output },
+                    log_path.display()
                 );
                 emit(pw, "error", "QEMU crashed on startup!", 0, "error", Some(msg.clone())).await;
                 log::error!("QEMU died immediately: {}", msg);
@@ -815,7 +850,7 @@ impl VmLauncher for DeveloperLauncher {
 
         emit(pw, "booting", &format!("QEMU process spawned (PID: {:?})", child.id()), 10, "success", None).await;
         log::info!("QEMU process spawned (pid: {:?})", child.id());
-        self.bootstrap(child, &token, pw).await
+        self.bootstrap(child, &token, &args, pw).await
     }
 
     async fn stop(&self) -> Result<()> {

@@ -392,6 +392,7 @@ async function runSplash() {
   let unlisten = null;
   let resolved = false;
   let lastErrorMessage = null;
+  let lastErrorDetail = null;
   const backendReady = new Promise(resolve => {
     listen('setup_progress', (e) => {
       const p = e.payload;
@@ -399,7 +400,10 @@ async function runSplash() {
       if (fill) fill.style.width = Math.max(5, p.pct) + '%';
       if (hint) hint.textContent = p.message;
       appendBootLine(p);
-      if (p.stage === 'error') lastErrorMessage = p.message;
+      if (p.stage === 'error') {
+        lastErrorMessage = p.message;
+        lastErrorDetail = p.detail || null;
+      }
       if ((p.stage === 'ready' || p.stage === 'error') && !resolved) {
         resolved = true;
         resolve(p);
@@ -438,7 +442,10 @@ async function runSplash() {
 
   // If there was an error, show the engine setup modal
   if (result && (result.stage === 'error' || result.stage === 'timeout')) {
-    showEngineSetupModal(lastErrorMessage || 'Connection timed out');
+    const fullError = lastErrorDetail
+      ? `${lastErrorMessage || 'Connection failed'}\n\n${lastErrorDetail}`
+      : (lastErrorMessage || 'Connection timed out');
+    showEngineSetupModal(fullError);
   }
 }
 
