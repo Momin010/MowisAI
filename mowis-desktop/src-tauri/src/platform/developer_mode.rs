@@ -813,11 +813,44 @@ impl VmLauncher for DeveloperLauncher {
     async fn start(&self, progress: Option<ProgressSender>) -> Result<ConnectionInfo> {
         let pw = &progress;
         let token = auth::load_or_create().context("load/create auth token")?;
+
+        // ── Kill any zombie QEMU processes from previous attempts ───────────
+        emit(pw, "detecting", "Cleaning up any previous QEMU instances…", 2, "info", None).await;
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/IM", "qemu-system-x86_64.exe", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            // Wait for ports to be released
+            sleep(Duration::from_millis(500)).await;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "qemu-system"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            sleep(Duration::from_millis(500)).await;
+        }
+
         let args = self.build_qemu_args();
         let full_cmd = format!("{} {}", self.config.qemu_path.display(), args.join(" "));
 
         emit(pw, "booting", "Starting QEMU…", 5, "command", Some(full_cmd.clone())).await;
         log::info!("Starting QEMU (developer mode): {}", full_cmd);
+
+        // Verify critical ports are free
+        for port in [self.config.serial_port, self.config.monitor_port, self.config.agent_port] {
+            let addr = format!("127.0.0.1:{}", port);
+            if is_tcp_reachable(&addr).await {
+                emit(pw, "error", &format!("Port {} is already in use!", port), 0, "error",
+                    Some(format!("Another process is listening on {}.\nKill it or change the port in Developer config.", addr))).await;
+                anyhow::bail!("Port {} is already in use. Kill the process or change the port.", port);
+            }
+        }
 
         #[cfg(windows)]
         let mut cmd = {
