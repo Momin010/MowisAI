@@ -248,7 +248,13 @@ impl AgentExecutor {
                     log::info!("\n  💬 Agent says: {}", final_text);
                 }
 
-                let git_diff = self.capture_git_diff(agent).await.ok();
+                let git_diff = match self.capture_git_diff(agent).await {
+                    Ok(diff) => Some(diff),
+                    Err(e) => {
+                        log::warn!("Failed to capture git diff (non-fatal): {}", e);
+                        None
+                    }
+                };
 
                 if is_verbose() {
                     if let Some(ref diff) = git_diff {
@@ -300,22 +306,30 @@ impl AgentExecutor {
                     )
                     .await?;
 
-                // Checkpoint after every successful tool call
+                // Checkpoint after every successful tool call (best-effort - don't abort on failure)
                 let checkpoint_id = checkpoint_log.checkpoints.len() as u64;
-                let snapshot_path = self.checkpoint_manager.create_snapshot(
+                let snapshot_path = match self.checkpoint_manager.create_snapshot(
                     &agent.agent_id,
                     checkpoint_id,
                     &agent.sandbox_name,
                     &agent.container_id,
-                )?;
+                ).await {
+                    Ok(p) => p.to_string_lossy().to_string(),
+                    Err(e) => {
+                        log::warn!("Checkpoint snapshot failed (non-fatal): {}", e);
+                        String::new()
+                    }
+                };
 
                 let checkpoint = Checkpoint {
                     id: checkpoint_id,
                     tool_call: tool_call.name.clone(),
                     tool_args: tool_call.args.clone(),
-                    tool_result: serde_json::to_string(&tool_result)?,
+                    tool_result: serde_json::Value::String(
+                        serde_json::to_string(&tool_result).unwrap_or_default()
+                    ),
                     timestamp: current_timestamp(),
-                    layer_snapshot_path: snapshot_path.to_string_lossy().to_string(),
+                    layer_snapshot_path: snapshot_path,
                 };
 
                 checkpoint_log.add_checkpoint(checkpoint)?;

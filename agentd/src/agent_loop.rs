@@ -99,7 +99,7 @@ impl AgentLoop {
                     output: result.clone(),
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or_default()
                         .as_secs(),
                     success: true,
                 };
@@ -311,7 +311,12 @@ impl AgentCoordinator {
         agent_id
     }
 
-    pub fn run_agent(&self, agent_id: u64, prompt: &str, available_tools: &[Box<dyn Tool>]) -> anyhow::Result<Option<String>> {
+    pub fn run_agent(
+        &self,
+        agent_id: u64,
+        prompt: &str,
+        available_tools: &[Box<dyn Tool>],
+    ) -> anyhow::Result<Option<String>> {
         match self.agents.get(&agent_id) {
             Some(agent) => {
                 let mut locked = agent.lock().unwrap();
@@ -323,7 +328,9 @@ impl AgentCoordinator {
     }
 
     pub fn get_agent_status(&self, agent_id: u64) -> Option<Value> {
-        self.agents.get(&agent_id).map(|agent| agent.lock().unwrap().status())
+        self.agents
+            .get(&agent_id)
+            .map(|agent| agent.lock().unwrap().status())
     }
 
     pub fn remove_agent(&self, agent_id: u64) -> Option<AgentLoop> {

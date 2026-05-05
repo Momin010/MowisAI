@@ -206,17 +206,46 @@ async fn merge_two_diffs(
 
     #[cfg(not(target_os = "linux"))]
     {
-        // Windows fallback - simple concatenation (no conflict detection)
+        // Windows fallback - try to detect basic conflicts
+        let has_overlap = detect_diff_overlap(diff1, diff2);
         let merged = format!("{}\n{}", diff1, diff2);
         std::fs::remove_dir_all(&merge_dir).ok();
 
-        Ok(MergeResult {
-            success: true,
-            merged_diff: merged,
-            conflicts_resolved: 0,
-            unresolved_conflicts: Vec::new(),
-        })
+        if has_overlap {
+            Ok(MergeResult {
+                success: false,
+                merged_diff: merged,
+                conflicts_resolved: 0,
+                unresolved_conflicts: vec![MergeConflict {
+                    file_path: String::new(),
+                    description: "Potential overlapping hunks detected in cross-platform fallback".to_string(),
+                    severity: ConflictSeverity::Medium,
+                    resolved: false,
+                    resolution: None,
+                }],
+            })
+        } else {
+            Ok(MergeResult {
+                success: true,
+                merged_diff: merged,
+                conflicts_resolved: 0,
+                unresolved_conflicts: Vec::new(),
+            })
+        }
     }
+}
+
+/// Simple heuristic to detect if two diffs might overlap
+fn detect_diff_overlap(diff1: &str, diff2: &str) -> bool {
+    let files1: std::collections::HashSet<&str> = diff1.lines()
+        .filter(|l| l.starts_with("+++ b/"))
+        .map(|l| &l[6..])
+        .collect();
+    let files2: std::collections::HashSet<&str> = diff2.lines()
+        .filter(|l| l.starts_with("+++ b/"))
+        .map(|l| &l[6..])
+        .collect();
+    !files1.is_disjoint(&files2)
 }
 
 #[cfg(target_os = "linux")]
