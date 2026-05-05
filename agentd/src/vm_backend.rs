@@ -347,6 +347,10 @@ fn ssh_exec(handle: &VmHandle, cmd: &str) -> Result<std::process::Output> {
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=10",
+            "-o",
+            "ServerAliveInterval=10",
+            "-o",
+            "ServerAliveCountMax=3",
             "-i",
             handle.ssh_key.to_str().unwrap_or("/dev/null"),
             "-p",
@@ -362,35 +366,43 @@ fn ssh_exec(handle: &VmHandle, cmd: &str) -> Result<std::process::Output> {
 
 /// Map a tool name and input to an SSH command
 fn map_tool_to_ssh(tool_name: &str, input: Value) -> String {
+    // SECURITY: Use printf with %s format specifier to safely pass strings
+    // This prevents shell injection through paths or content
     match tool_name {
         "read_file" => {
             let path = input["path"].as_str().unwrap_or("/workspace/.");
-            // Use base64 encoding to handle binary files and special characters
-            format!("cat '{}' | base64", path)
+            // Use printf %s to safely pass path, then cat
+            format!("cat -- $(printf '%s' '{}') | base64", shell_escape(path))
         }
         "write_file" => {
             let path = input["path"].as_str().unwrap_or("");
             let content = input["content"].as_str().unwrap_or("");
-            // Use base64 to safely transfer content
+            // Write content via base64 to avoid shell metachar issues
             let encoded = base64_encode(content);
-            format!("echo '{}' | base64 -d > '{}'", encoded, path)
+            format!(
+                "printf '%s' '{}' | base64 -d > $(printf '%s' '{}')",
+                shell_escape(&encoded),
+                shell_escape(path)
+            )
         }
         "run_command" => {
             let cmd = input["cmd"].as_str().unwrap_or("echo 'no command'");
             let cwd = input["cwd"].as_str().unwrap_or("/workspace");
-            format!("cd '{}' && {}", cwd, cmd)
+            // For run_command, the user WANTS to execute a shell command
+            // But we still need to safely pass the cwd
+            format!("cd $(printf '%s' '{}') && {}", shell_escape(cwd), cmd)
         }
         "list_files" => {
             let path = input["path"].as_str().unwrap_or("/workspace");
-            format!("ls -la '{}'", path)
+            format!("ls -la -- $(printf '%s' '{}')", shell_escape(path))
         }
         "delete_file" => {
             let path = input["path"].as_str().unwrap_or("");
-            format!("rm -f '{}'", path)
+            format!("rm -f -- $(printf '%s' '{}')", shell_escape(path))
         }
         "create_directory" => {
             let path = input["path"].as_str().unwrap_or("");
-            format!("mkdir -p '{}'", path)
+            format!("mkdir -p -- $(printf '%s' '{}')", shell_escape(path))
         }
         "run_script" => {
             if let Some(script) = input["script"].as_str() {
@@ -401,15 +413,27 @@ fn map_tool_to_ssh(tool_name: &str, input: Value) -> String {
                     "node" | "js" => "node",
                     _ => "sh",
                 };
-                format!("echo '{}' | base64 -d | {}", encoded, interpreter)
+                // Pass script via base64 to avoid any shell injection
+                format!(
+                    "printf '%s' '{}' | base64 -d | {}",
+                    shell_escape(&encoded),
+                    interpreter
+                )
             } else {
                 "echo 'no script provided'".to_string()
             }
         }
         _ => {
-            format!("echo 'Unsupported tool: {}'", tool_name)
+            format!("echo 'Unsupported tool: {}'", shell_escape(tool_name))
         }
     }
+}
+
+/// Shell-escape a string for safe use in SSH commands
+fn shell_escape(s: &str) -> String {
+    // Replace single quotes with '\'' (end quote, escaped quote, start quote)
+    // This is the standard POSIX shell escaping technique
+    s.replace('\'', "'\\''")
 }
 
 /// Simple base64 encoding (for SSH command safety)

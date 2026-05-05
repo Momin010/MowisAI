@@ -2,6 +2,9 @@ use crate::tools::common::{resolve_path, Tool, ToolContext};
 use serde_json::{json, Value};
 use std::process::Command;
 
+/// Timeout for package installation (120 seconds)
+const INSTALL_TIMEOUT: &str = "120";
+
 pub struct NpmInstallTool;
 impl Tool for NpmInstallTool {
     fn name(&self) -> &'static str {
@@ -15,10 +18,11 @@ impl Tool for NpmInstallTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let cwd = resolve_path(ctx, cwd_str);
+        let cwd = resolve_path(ctx, cwd_str)?;
 
-        let mut cmd = Command::new("npm");
-        cmd.current_dir(&cwd).arg("install");
+        let mut cmd = Command::new("timeout");
+        cmd.arg(INSTALL_TIMEOUT).arg("npm").arg("install");
+        cmd.current_dir(&cwd);
         if let Some(pkg) = package {
             cmd.arg(pkg);
         }
@@ -30,7 +34,9 @@ impl Tool for NpmInstallTool {
 
         Ok(json!({
             "success": output.status.success(),
-            "stdout": String::from_utf8_lossy(&output.stdout).to_string()
+            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+            "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            "timed_out": output.status.code().is_none() || output.status.code() == Some(124)
         }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -53,8 +59,13 @@ impl Tool for PipInstallTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let mut cmd = Command::new("pip");
-        cmd.arg("install");
+        // SECURITY: Validate package name
+        if package.contains('\0') || package.contains(';') || package.contains('&') {
+            return Err(anyhow::anyhow!("pip_install: invalid package name"));
+        }
+
+        let mut cmd = Command::new("timeout");
+        cmd.arg(INSTALL_TIMEOUT).arg("pip").arg("install");
 
         if let Some(v) = version {
             cmd.arg(&format!("{}=={}", package, v));
@@ -70,7 +81,9 @@ impl Tool for PipInstallTool {
 
         Ok(json!({
             "success": output.status.success(),
-            "stdout": String::from_utf8_lossy(&output.stdout).to_string()
+            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+            "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            "timed_out": output.status.code().is_none() || output.status.code() == Some(124)
         }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -92,7 +105,7 @@ impl Tool for CargoAddTool {
 
         let cwd = resolve_path(ctx, cwd_str)?;
 
-        // SECURITY: Validate package name (alphanumeric, dash, underscore, @, /)
+        // SECURITY: Validate package name
         let valid_pkg = package.chars().all(|c| {
             c.is_alphanumeric() || c == '-' || c == '_' || c == '@' || c == '/' || c == '.'
         });
@@ -103,7 +116,7 @@ impl Tool for CargoAddTool {
             ));
         }
 
-        // Check cargo availability using Command args
+        // Check cargo availability
         let check = Command::new("which").arg("cargo").output();
         if check.map(|o| !o.status.success()).unwrap_or(true) {
             return Ok(json!({
@@ -113,9 +126,7 @@ impl Tool for CargoAddTool {
             }));
         }
 
-        // SECURITY: Use Command args instead of shell string interpolation
         let pkg_spec = if let Some(v) = version {
-            // Validate version string too
             let valid_ver = v.chars().all(|c| {
                 c.is_alphanumeric()
                     || c == '.'
@@ -136,7 +147,7 @@ impl Tool for CargoAddTool {
         };
 
         let output = Command::new("timeout")
-            .arg("5")
+            .arg(INSTALL_TIMEOUT)
             .arg("cargo")
             .arg("add")
             .arg(&pkg_spec)
@@ -147,6 +158,7 @@ impl Tool for CargoAddTool {
             Ok(out) => Ok(json!({
                 "success": out.status.success(),
                 "stdout": String::from_utf8_lossy(&out.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&out.stderr).to_string(),
                 "skipped": !out.status.success(),
             })),
             Err(_e) => Ok(json!({ "success": false, "skipped": true })),
@@ -156,5 +168,3 @@ impl Tool for CargoAddTool {
         Box::new(CargoAddTool)
     }
 }
-
-// ============== WEB TOOLS (3) ==============

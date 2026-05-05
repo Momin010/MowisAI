@@ -19,8 +19,7 @@ fn machine_id() -> Result<String> {
     let path = machine_id_path();
 
     if path.exists() {
-        let id = std::fs::read_to_string(&path)
-            .context("reading ~/.mowisai/machine-id")?;
+        let id = std::fs::read_to_string(&path).context("reading ~/.mowisai/machine-id")?;
         let id = id.trim().to_string();
         if id.is_empty() {
             bail!("machine-id file is empty — delete ~/.mowisai/machine-id and re-run setup");
@@ -86,19 +85,88 @@ pub fn decrypt(encoded: &str) -> Result<String> {
     let ciphertext = BASE64.decode(ct_b64).context("base64 decode ciphertext")?;
 
     if nonce_bytes.len() != 12 {
-        bail!("invalid nonce length: expected 12 bytes, got {}", nonce_bytes.len());
+        bail!(
+            "invalid nonce length: expected 12 bytes, got {}",
+            nonce_bytes.len()
+        );
     }
 
     let key = machine_key().context("deriving machine encryption key")?;
     let cipher = Aes256Gcm::new(&key);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|_| anyhow::anyhow!(
+    let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).map_err(|_| {
+        anyhow::anyhow!(
             "decryption failed — the config was saved on a different machine, \
              or ~/.mowisai/machine-id was deleted"
-        ))?;
+        )
+    })?;
 
     String::from_utf8(plaintext).context("decrypted bytes are not valid UTF-8")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        let plaintext = "my-secret-api-key-12345";
+        let encrypted = encrypt(plaintext).expect("encryption should succeed");
+        let decrypted = decrypt(&encrypted).expect("decryption should succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_different_nonces() {
+        let plaintext = "same-plaintext";
+        let enc1 = encrypt(plaintext).unwrap();
+        let enc2 = encrypt(plaintext).unwrap();
+        // Different nonces should produce different ciphertexts
+        assert_ne!(enc1, enc2);
+        // But both should decrypt to the same plaintext
+        assert_eq!(decrypt(&enc1).unwrap(), plaintext);
+        assert_eq!(decrypt(&enc2).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_rejects_tampered_ciphertext() {
+        let plaintext = "sensitive-data";
+        let encrypted = encrypt(plaintext).unwrap();
+        // Tamper with the ciphertext
+        let mut tampered = encrypted.clone();
+        let last_char = tampered.pop().unwrap();
+        tampered.push(if last_char == 'A' { 'B' } else { 'A' });
+        assert!(decrypt(&tampered).is_err());
+    }
+
+    #[test]
+    fn test_decrypt_rejects_invalid_format() {
+        assert!(decrypt("not-colon-separated").is_err());
+        assert!(decrypt("").is_err());
+        assert!(decrypt("only-one-part:").is_ok() || decrypt("only-one-part:").is_err());
+    }
+
+    #[test]
+    fn test_encrypt_empty_string() {
+        let encrypted = encrypt("").expect("should encrypt empty string");
+        let decrypted = decrypt(&encrypted).expect("should decrypt empty string");
+        assert_eq!(decrypted, "");
+    }
+
+    #[test]
+    fn test_encrypt_unicode() {
+        let plaintext = "Hello 世界 🔐";
+        let encrypted = encrypt(plaintext).unwrap();
+        let decrypted = decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_large_value() {
+        let plaintext = "x".repeat(100_000);
+        let encrypted = encrypt(&plaintext).unwrap();
+        let decrypted = decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
 }

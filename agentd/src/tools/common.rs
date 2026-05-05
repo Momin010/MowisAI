@@ -326,3 +326,71 @@ pub fn cleanup_sandbox_stores(sandbox_id: &str) {
         ch.retain(|k, _| !k.starts_with(&prefix));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_safe_url_blocks_private_ips() {
+        assert!(is_safe_url("http://127.0.0.1/admin").is_err());
+        assert!(is_safe_url("http://localhost:8080/api").is_err());
+        assert!(is_safe_url("http://::1/").is_err());
+        assert!(is_safe_url("http://0.0.0.0/").is_err());
+        assert!(is_safe_url("http://10.0.0.1/secret").is_err());
+        assert!(is_safe_url("http://192.168.1.1/").is_err());
+        assert!(is_safe_url("http://172.16.0.1/").is_err());
+        assert!(is_safe_url("http://169.254.169.254/latest/meta-data/").is_err());
+    }
+
+    #[test]
+    fn test_is_safe_url_blocks_metadata_services() {
+        assert!(is_safe_url("http://metadata.google.internal/").is_err());
+        assert!(is_safe_url("http://100.100.100.200/").is_err());
+    }
+
+    #[test]
+    fn test_is_safe_url_blocks_dangerous_schemes() {
+        assert!(is_safe_url("file:///etc/passwd").is_err());
+        assert!(is_safe_url("ftp://server/file").is_err());
+        assert!(is_safe_url("gopher://server/").is_err());
+    }
+
+    #[test]
+    fn test_is_safe_url_allows_https() {
+        assert!(is_safe_url("https://api.example.com/v1").is_ok());
+        assert!(is_safe_url("https://generativelanguage.googleapis.com/v1beta").is_ok());
+    }
+
+    #[test]
+    fn test_is_safe_url_blocks_internal_hostnames() {
+        assert!(is_safe_url("http://my-service.internal/").is_err());
+        assert!(is_safe_url("http://my-pc.local/").is_err());
+    }
+
+    #[test]
+    fn test_validate_cwd_blocks_injection() {
+        assert!(validate_cwd("/workspace").is_ok());
+        assert!(validate_cwd("/tmp/test").is_ok());
+        assert!(validate_cwd("/; rm -rf /").is_err());
+        assert!(validate_cwd("/$(whoami)").is_err());
+        assert!(validate_cwd("/`id`").is_err());
+        assert!(validate_cwd("/\nmalicious").is_err());
+    }
+
+    #[test]
+    fn test_resolve_path_blocks_traversal() {
+        let ctx = ToolContext::new(1, Some(std::path::PathBuf::from("/tmp/test-root")));
+
+        // Normal paths should work (even if they don't exist)
+        let result = resolve_path(&ctx, "file.txt");
+        assert!(result.is_ok());
+
+        // Path traversal should be blocked
+        let result = resolve_path(&ctx, "../../etc/passwd");
+        // This should either error or stay within the root
+        if let Ok(path) = result {
+            assert!(path.starts_with("/tmp/test-root"));
+        }
+    }
+}

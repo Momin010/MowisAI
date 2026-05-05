@@ -15,11 +15,19 @@ impl Tool for GitCloneTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("git_clone: missing path"))?;
 
+        // SECURITY: Validate repo doesn't start with - (flag injection)
+        if repo.starts_with('-') {
+            return Err(anyhow::anyhow!("git_clone: repo URL cannot start with '-'"));
+        }
+
         let output = if let Some(root) = &ctx.root_path {
-            Command::new("chroot")
+            Command::new("timeout")
+                .arg("120")
+                .arg("chroot")
                 .arg(root)
                 .arg("git")
                 .arg("clone")
+                .arg("--")
                 .arg(repo)
                 .arg(path_str)
                 .env("GIT_AUTHOR_NAME", "agentd")
@@ -28,9 +36,12 @@ impl Tool for GitCloneTool {
                 .env("GIT_COMMITTER_EMAIL", "agentd@mowisai.com")
                 .output()?
         } else {
-            let path = resolve_path(ctx, path_str);
-            Command::new("git")
+            let path = resolve_path(ctx, path_str)?;
+            Command::new("timeout")
+                .arg("120")
+                .arg("git")
                 .arg("clone")
+                .arg("--")
                 .arg(repo)
                 .arg(&path)
                 .env("GIT_AUTHOR_NAME", "agentd")
