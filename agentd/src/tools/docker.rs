@@ -53,10 +53,29 @@ impl Tool for DockerRunTool {
         let cmd = input.get("cmd").and_then(|v| v.as_str());
         let name = input.get("name").and_then(|v| v.as_str());
 
+        // SECURITY: Validate image doesn't contain special characters
+        if image.contains('\0') || image.contains(';') || image.contains('&') || image.contains('|')
+        {
+            return Err(anyhow::anyhow!("docker_run: invalid image name"));
+        }
+
         let mut command = Command::new("docker");
         command.arg("run").arg("-d");
 
+        // SECURITY: Add default resource limits
+        command.arg("--memory").arg("512m");
+        command.arg("--cpus").arg("1.0");
+        command.arg("--pids-limit").arg("256");
+        command.arg("--network").arg("bridge");
+
+        // Auto-remove on exit to prevent container leaks
+        command.arg("--rm");
+
         if let Some(n) = name {
+            // SECURITY: Validate container name
+            if n.starts_with('-') || n.contains('\0') || n.contains('/') {
+                return Err(anyhow::anyhow!("docker_run: invalid container name"));
+            }
             command.arg("--name").arg(n);
         }
 
@@ -85,7 +104,8 @@ impl Tool for DockerRunTool {
 
         Ok(json!({
             "success": output.status.success(),
-            "stdout": String::from_utf8_lossy(&output.stdout).to_string()
+            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+            "stderr": String::from_utf8_lossy(&output.stderr).to_string()
         }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -174,8 +194,26 @@ impl Tool for DockerExecTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("docker_exec: missing cmd"))?;
 
+        // SECURITY: Validate container name (no flag injection)
+        if container.starts_with('-') || container.contains('\0') {
+            return Err(anyhow::anyhow!("docker_exec: invalid container name"));
+        }
+
+        // SECURITY: Block dangerous commands
+        let dangerous = ["rm -rf /", "mkfs", "dd if=", "> /dev/"];
+        for pat in &dangerous {
+            if cmd.contains(pat) {
+                return Err(anyhow::anyhow!(
+                    "docker_exec: blocked dangerous command pattern '{}'",
+                    pat
+                ));
+            }
+        }
+
         let output = Command::new("docker")
             .arg("exec")
+            .arg("--timeout")
+            .arg("30")
             .arg(container)
             .arg("sh")
             .arg("-c")
@@ -184,7 +222,9 @@ impl Tool for DockerExecTool {
 
         Ok(json!({
             "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-            "stderr": String::from_utf8_lossy(&output.stderr).to_string()
+            "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            "exit_code": output.status.code().unwrap_or(-1),
+            "success": output.status.success()
         }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {

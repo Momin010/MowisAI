@@ -307,7 +307,7 @@ impl AgentExecutor {
                     .await?;
 
                 // Checkpoint after every successful tool call (best-effort - don't abort on failure)
-                let checkpoint_id = checkpoint_log.checkpoints.len() as u64;
+                let checkpoint_id = checkpoint_log.next_checkpoint_id();
                 let snapshot_path = match self.checkpoint_manager.create_snapshot(
                     &agent.agent_id,
                     checkpoint_id,
@@ -333,7 +333,7 @@ impl AgentExecutor {
                 };
 
                 checkpoint_log.add_checkpoint(checkpoint)?;
-                checkpoint_log.prune(5)?;
+                checkpoint_log.prune(50)?;
 
                 if is_verbose() {
                     let result_str =
@@ -353,7 +353,15 @@ impl AgentExecutor {
             conversation.push_tool_results(round_results);
         }
 
-        Err(anyhow!("Max tool rounds exceeded"))
+        // Max rounds exceeded is a permanent failure, not a retryable error
+        Ok(AgentResult {
+            task_id: agent.task_id.clone().unwrap_or_default(),
+            success: false,
+            git_diff: None,
+            error: Some("Max tool rounds exceeded (permanent failure)".to_string()),
+            checkpoint_log: checkpoint_log.checkpoints.clone(),
+            timestamp: current_timestamp(),
+        })
     }
 
     /// Execute tool with tier 1 retry support

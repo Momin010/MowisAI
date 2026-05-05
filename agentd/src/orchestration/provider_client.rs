@@ -266,7 +266,12 @@ async fn generate_text_gemini(
         .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS));
 
     if let Some(header) = auth_header {
-        req = req.header("Authorization", header);
+        if header.starts_with("goog:") {
+            // Gemini uses x-goog-api-key header, not Authorization
+            req = req.header("x-goog-api-key", &header[5..]);
+        } else {
+            req = req.header("Authorization", header);
+        }
     }
 
     let response = req
@@ -523,7 +528,12 @@ async fn call_agent_round_gemini(
         .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS));
 
     if let Some(header) = auth_header {
-        req = req.header("Authorization", header);
+        if header.starts_with("goog:") {
+            // Gemini uses x-goog-api-key header, not Authorization
+            req = req.header("x-goog-api-key", &header[5..]);
+        } else {
+            req = req.header("Authorization", header);
+        }
     }
 
     let response = req
@@ -975,11 +985,13 @@ fn gemini_url_and_auth(llm_config: &LlmConfig) -> Result<(String, Option<String>
                 .api_key
                 .as_deref()
                 .ok_or_else(|| anyhow!("Gemini: no API key configured"))?;
+            // SECURITY: Use header instead of URL query parameter for API key
             let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-                llm_config.model, api_key
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                llm_config.model
             );
-            Ok((url, None))
+            // Prefix with "goog:" to signal caller to use x-goog-api-key header
+            Ok((url, Some(format!("goog:{}", api_key))))
         }
         _ => Err(anyhow!(
             "gemini_url_and_auth called for non-Gemini provider: {}",

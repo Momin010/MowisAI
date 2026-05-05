@@ -15,14 +15,25 @@ impl Tool for MemorySetTool {
     fn name(&self) -> &'static str {
         "memory_set"
     }
-    fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
+    fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
         let key = input["key"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("memory_set: missing key"))?;
         let value = input["value"].clone();
 
+        // Enforce per-value size limit (1MB)
+        let value_size = serde_json::to_string(&value).map(|s| s.len()).unwrap_or(0);
+        if value_size > 1024 * 1024 {
+            return Err(anyhow::anyhow!(
+                "memory_set: value size {} exceeds 1MB limit",
+                value_size
+            ));
+        }
+
+        // Scope to sandbox
+        let scoped_key = format!("{}:{}", ctx.sandbox_id, key);
         let mut store = lock_store!(MEMORY_STORE);
-        store.insert(key.to_string(), value);
+        store.insert(scoped_key, value);
 
         Ok(json!({ "success": true, "key": key }))
     }
@@ -36,13 +47,14 @@ impl Tool for MemoryGetTool {
     fn name(&self) -> &'static str {
         "memory_get"
     }
-    fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
+    fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
         let key = input["key"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("memory_get: missing key"))?;
 
+        let scoped_key = format!("{}:{}", ctx.sandbox_id, key);
         let store = lock_store!(MEMORY_STORE);
-        let value = store.get(key).cloned().unwrap_or(Value::Null);
+        let value = store.get(&scoped_key).cloned().unwrap_or(Value::Null);
 
         Ok(json!({ "value": value, "found": value != Value::Null }))
     }
@@ -56,13 +68,14 @@ impl Tool for MemoryDeleteTool {
     fn name(&self) -> &'static str {
         "memory_delete"
     }
-    fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
+    fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
         let key = input["key"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("memory_delete: missing key"))?;
 
+        let scoped_key = format!("{}:{}", ctx.sandbox_id, key);
         let mut store = lock_store!(MEMORY_STORE);
-        let existed = store.remove(key).is_some();
+        let existed = store.remove(&scoped_key).is_some();
 
         Ok(json!({ "success": true, "existed": existed }))
     }
@@ -76,9 +89,14 @@ impl Tool for MemoryListTool {
     fn name(&self) -> &'static str {
         "memory_list"
     }
-    fn invoke(&self, _ctx: &ToolContext, _input: Value) -> anyhow::Result<Value> {
+    fn invoke(&self, ctx: &ToolContext, _input: Value) -> anyhow::Result<Value> {
+        let prefix = format!("{}:", ctx.sandbox_id);
         let store = lock_store!(MEMORY_STORE);
-        let keys: Vec<String> = store.keys().cloned().collect();
+        let keys: Vec<String> = store
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .map(|k| k[prefix.len()..].to_string())
+            .collect();
 
         Ok(json!({ "keys": keys, "count": keys.len() }))
     }
@@ -151,7 +169,7 @@ impl Tool for SecretSetTool {
     fn name(&self) -> &'static str {
         "secret_set"
     }
-    fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
+    fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
         // Accept "key" (preferred by tests) or "name" (legacy)
         let name = input["key"]
             .as_str()
@@ -161,8 +179,10 @@ impl Tool for SecretSetTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("secret_set: missing value"))?;
 
+        // SECURITY: Scope secret to sandbox to prevent cross-sandbox leakage
+        let scoped_key = format!("{}:{}", ctx.sandbox_id, name);
         let mut store = lock_store!(SECRET_STORE);
-        store.insert(name.to_string(), value.to_string());
+        store.insert(scoped_key, value.to_string());
 
         Ok(json!({ "success": true }))
     }
@@ -176,15 +196,17 @@ impl Tool for SecretGetTool {
     fn name(&self) -> &'static str {
         "secret_get"
     }
-    fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
+    fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
         // Accept "key" (preferred by tests) or "name" (legacy)
         let name = input["key"]
             .as_str()
             .or_else(|| input["name"].as_str())
             .ok_or_else(|| anyhow::anyhow!("secret_get: missing key"))?;
 
+        // SECURITY: Scope secret lookup to sandbox
+        let scoped_key = format!("{}:{}", ctx.sandbox_id, name);
         let store = lock_store!(SECRET_STORE);
-        match store.get(name) {
+        match store.get(&scoped_key) {
             Some(value) => Ok(json!({ "value": value })),
             None => Err(anyhow::anyhow!("secret not found: {}", name)),
         }

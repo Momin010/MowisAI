@@ -312,7 +312,7 @@ impl NewOrchestrator {
                                 8. Use best practices for the language/framework\n\
                                 9. When done, verify all files have actual content (not just placeholders)\n\n\
                                 Write production-quality code that could be deployed immediately.",
-                                sandbox.name
+                                task_description
                             );
 
                             let result = match executor_clone
