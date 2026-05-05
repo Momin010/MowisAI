@@ -1289,6 +1289,136 @@ a { text-decoration: none; color: inherit; }
   letter-spacing: 0.04em;
 }
 
+/* ── Attach & Mic buttons ────────────────────────────── */
+.btn-icon {
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  width: 32px; height: 32px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r);
+  color: var(--tx-4);
+  cursor: pointer;
+  transition: color 0.15s;
+  flex-shrink: 0;
+  position: relative;
+}
+.btn-icon:hover { color: var(--tx-2); }
+.btn-icon .material-symbols-outlined { font-size: 20px; }
+
+/* Mic button — icon + canvas overlay */
+.btn-mic { 
+  position: relative; 
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.btn-mic .mic-icon { 
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
+}
+.btn-mic .mic-bars {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.btn-mic.recording .mic-icon { opacity: 0; }
+.btn-mic.recording .mic-bars { opacity: 1; }
+.btn-mic.recording { 
+  color: var(--blue);
+  background: rgba(59, 139, 255, 0.08);
+  border-color: rgba(59, 139, 255, 0.3);
+}
+
+/* Waveform overlay when recording */
+.waveform-overlay {
+  position: fixed;
+  left: 50%;
+  bottom: 100px;
+  transform: translateX(-50%);
+  width: 90%;
+  max-width: 700px;
+  height: 52px;
+  background: rgba(18, 18, 20, 0.92);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 26px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 0 20px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  z-index: 1000;
+}
+.waveform-overlay.active {
+  opacity: 1;
+  pointer-events: all;
+}
+.waveform-canvas {
+  flex: 1;
+  height: 32px;
+  min-width: 0;
+}
+.waveform-overlay .waveform-actions {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+.waveform-overlay .waveform-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+  color: var(--tx-3);
+}
+.waveform-overlay .waveform-btn:hover {
+  opacity: 0.6;
+}
+.waveform-overlay .waveform-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* ── Attachment preview strip ────────────────────────── */
+.compose-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-2);
+  margin-bottom: 4px;
+}
+.compose-attachments.hidden { display: none; }
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-family: var(--mono); font-size: 10px; color: var(--tx-3);
+  max-width: 180px;
+}
+.attach-chip img {
+  width: 20px; height: 20px; border-radius: 3px; object-fit: cover;
+}
+.attach-chip .attach-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.attach-chip .attach-remove {
+  cursor: pointer; color: var(--tx-5); margin-left: 2px;
+  font-size: 12px; line-height: 1;
+}
+.attach-chip .attach-remove:hover { color: var(--red); }
+
 /* ── Sessions page ───────────────────────────────────── */
 .sessions-page-body {
   padding: 20px 28px 40px;

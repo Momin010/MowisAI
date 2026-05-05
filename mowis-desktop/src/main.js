@@ -495,6 +495,8 @@ async function init() {
   // Setup UI handlers
   setupHandlers();
   initCustomSelects();
+  initSpeechRecognition();
+  initFileUpload();
   setSidebarCollapsed(State.sidebarCollapsed);
   await restoreInitialSession();
 
@@ -734,7 +736,21 @@ async function setupListeners() {
 // ── Session start ─────────────────────────────────────────────────────────────
 
 async function startSession(prompt, mode, repo = State.selectedRepo) {
-  if (!prompt.trim()) { toast('Enter a task description', 'error'); return; }
+  if (!prompt.trim() && pendingAttachments.length === 0) { toast('Enter a task description', 'error'); return; }
+
+  // Prepend attachment info to prompt
+  let fullPrompt = prompt.trim();
+  if (pendingAttachments.length > 0) {
+    const attachInfo = pendingAttachments.map(f => {
+      if (f.type.startsWith('image/') && f.dataUrl) {
+        return `[Attached image: ${f.name}]\n${f.dataUrl}`;
+      }
+      return `[Attached file: ${f.name} (${f.type || 'unknown'}, ${Math.round(f.size/1024)}KB)]`;
+    }).join('\n');
+    fullPrompt = attachInfo + '\n\n' + fullPrompt;
+    pendingAttachments.length = 0;
+    renderAttachments();
+  }
 
   // Reset chat
   State.tasks = {};
@@ -755,7 +771,7 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
   setSessionActive(true);
 
   // Show user message immediately
-  appendChatMessage({ kind: 'user', content: prompt, ts: nowTs() });
+  appendChatMessage({ kind: 'user', content: fullPrompt, ts: nowTs() });
   if (repo?.path) {
     appendChatMessage({
       kind: 'system',
@@ -769,7 +785,7 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
 
   try {
     const id = await invoke('start_session', {
-      prompt,
+      prompt: fullPrompt,
       mode: mode || 'auto',
       projectPath: repo?.path || null,
       repoUrl: repo?.repo_url || repo?.remote_url || null,
@@ -2531,16 +2547,30 @@ async function sendChatMessage() {
   const input = $('chat-input');
   if (!input) return;
   const text = input.value.trim();
-  if (!text) return;
-  
+  if (!text && pendingAttachments.length === 0) return;
+
+  // Prepend attachment info
+  let fullText = text;
+  if (pendingAttachments.length > 0) {
+    const attachInfo = pendingAttachments.map(f => {
+      if (f.type.startsWith('image/') && f.dataUrl) {
+        return `[Attached image: ${f.name}]\n${f.dataUrl}`;
+      }
+      return `[Attached file: ${f.name} (${f.type || 'unknown'}, ${Math.round(f.size/1024)}KB)]`;
+    }).join('\n');
+    fullText = attachInfo + '\n\n' + text;
+    pendingAttachments.length = 0;
+    renderAttachments();
+  }
+
   // Add user message to UI immediately
-  appendChatMessage({ kind: 'user', content: text, ts: nowTs() });
+  appendChatMessage({ kind: 'user', content: fullText, ts: nowTs() });
   input.value = '';
   autoResize.call(input);
-  
+
   // Send to backend
   try {
-    await invoke('send_message', { message: text });
+    await invoke('send_message', { message: fullText });
   } catch (err) {
     appendChatMessage({ kind: 'error', content: `Failed to send message: ${err}`, ts: nowTs() });
   }
@@ -2549,6 +2579,326 @@ async function sendChatMessage() {
 function autoResize() {
   this.style.height = 'auto';
   this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+}
+
+// ── Speech Recognition (Mic button) ──────────────────────────────────────────
+
+function initSpeechRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    console.warn('Speech recognition not available');
+    document.querySelectorAll('.btn-mic').forEach(b => b.style.display = 'none');
+    return;
+  }
+
+  const recognition = new SR();
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.lang = 'en-US';
+
+  let activeBtn = null;
+  let activeTextarea = null;
+  let isRecording = false;
+  let finalTranscript = '';
+  let audioCtx = null;
+  let analyser = null;
+  let micStream = null;
+  let animFrame = null;
+
+  const waveformOverlay = $('waveform-overlay');
+  const waveformCanvas = $('waveform-canvas');
+  const waveformCancel = $('waveform-cancel');
+  const waveformDone = $('waveform-done');
+
+  function drawWaveform(canvas, analyserNode) {
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const data = new Uint8Array(analyserNode.frequencyBinCount);
+
+    function frame() {
+      if (!isRecording) {
+        ctx.clearRect(0, 0, W, H);
+        return;
+      }
+      animFrame = requestAnimationFrame(frame);
+      analyserNode.getByteFrequencyData(data);
+
+      ctx.clearRect(0, 0, W, H);
+      
+      // Minimal waveform bars - clean and elegant
+      const barCount = 80;
+      const barW = 2;
+      const gap = 4;
+      const totalW = barCount * (barW + gap) - gap;
+      const startX = (W - totalW) / 2;
+      
+      // Simple white/gray color
+      ctx.fillStyle = 'rgba(235, 235, 236, 0.7)';
+
+      for (let i = 0; i < barCount; i++) {
+        const idx = Math.floor((i + 1) * data.length / (barCount + 1));
+        const val = data[idx] / 255;
+        
+        // Smooth, minimal heights
+        const barH = Math.max(2, val * (H * 0.85));
+        const x = startX + i * (barW + gap);
+        const y = (H - barH) / 2;
+        
+        ctx.fillRect(x, y, barW, barH);
+      }
+    }
+    frame();
+  }
+
+  function drawBars(canvas, analyserNode) {
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const data = new Uint8Array(analyserNode.frequencyBinCount);
+
+    function frame() {
+      if (!isRecording) {
+        ctx.clearRect(0, 0, W, H);
+        return;
+      }
+      animFrame = requestAnimationFrame(frame);
+      analyserNode.getByteFrequencyData(data);
+
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--blue').trim() || '#4a9eff';
+
+      const barCount = 5;
+      const barW = 2;
+      const gap = 2;
+      const totalW = barCount * barW + (barCount - 1) * gap;
+      const startX = (W - totalW) / 2;
+
+      for (let i = 0; i < barCount; i++) {
+        // Sample different frequency bands for each bar
+        const idx = Math.floor((i + 1) * data.length / (barCount + 1));
+        const val = data[idx] / 255;
+        const barH = Math.max(3, val * (H - 2));
+        const x = startX + i * (barW + gap);
+        const y = (H - barH) / 2;
+        ctx.fillRect(x, y, barW, barH);
+      }
+    }
+    frame();
+  }
+
+  async function startAudioViz(btn) {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(micStream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 128;
+      source.connect(analyser);
+
+      // Draw on both button canvas and overlay canvas
+      const canvas = btn.querySelector('.mic-bars');
+      if (canvas) drawBars(canvas, analyser);
+      
+      if (waveformCanvas) {
+        drawWaveform(waveformCanvas, analyser);
+      }
+    } catch (e) {
+      console.warn('Mic access denied:', e);
+    }
+  }
+
+  function stopAudioViz() {
+    if (animFrame) cancelAnimationFrame(animFrame);
+    animFrame = null;
+    if (micStream) {
+      micStream.getTracks().forEach(t => t.stop());
+      micStream = null;
+    }
+    if (audioCtx) {
+      audioCtx.close();
+      audioCtx = null;
+    }
+    analyser = null;
+    // Clear canvases
+    document.querySelectorAll('.mic-bars').forEach(c => {
+      c.getContext('2d').clearRect(0, 0, c.width, c.height);
+    });
+    if (waveformCanvas) {
+      waveformCanvas.getContext('2d').clearRect(0, 0, waveformCanvas.width, waveformCanvas.height);
+    }
+  }
+
+  function showWaveformOverlay() {
+    if (waveformOverlay) {
+      waveformOverlay.classList.add('active');
+      waveformOverlay.setAttribute('aria-hidden', 'false');
+    }
+  }
+
+  function hideWaveformOverlay() {
+    if (waveformOverlay) {
+      waveformOverlay.classList.remove('active');
+      waveformOverlay.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  recognition.onresult = (event) => {
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      if (event.results[i].isFinal) {
+        finalTranscript += event.results[i][0].transcript;
+      } else {
+        interim += event.results[i][0].transcript;
+      }
+    }
+    if (activeTextarea) {
+      const base = activeTextarea.dataset.preSpeech || '';
+      activeTextarea.value = base + finalTranscript + interim;
+    }
+  };
+
+  recognition.onend = () => {
+    isRecording = false;
+    stopAudioViz();
+    hideWaveformOverlay();
+    if (activeBtn) activeBtn.classList.remove('recording');
+    if (activeTextarea) {
+      const base = activeTextarea.dataset.preSpeech || '';
+      activeTextarea.value = base + finalTranscript;
+      delete activeTextarea.dataset.preSpeech;
+    }
+    activeBtn = null;
+    activeTextarea = null;
+    finalTranscript = '';
+  };
+
+  recognition.onerror = (e) => {
+    console.error('Speech recognition error:', e.error);
+    isRecording = false;
+    stopAudioViz();
+    hideWaveformOverlay();
+    if (activeBtn) activeBtn.classList.remove('recording');
+    activeBtn = null;
+    activeTextarea = null;
+    finalTranscript = '';
+  };
+
+  async function toggleMic(btn, textarea) {
+    if (isRecording) {
+      recognition.stop();
+    } else {
+      activeBtn = btn;
+      activeTextarea = textarea;
+      finalTranscript = '';
+      textarea.dataset.preSpeech = textarea.value;
+      btn.classList.add('recording');
+      isRecording = true;
+      showWaveformOverlay();
+      await startAudioViz(btn);
+      recognition.start();
+    }
+  }
+
+  // Waveform overlay button handlers
+  if (waveformCancel) {
+    waveformCancel.addEventListener('click', () => {
+      if (isRecording) {
+        recognition.stop();
+        // Clear the textarea back to original
+        if (activeTextarea && activeTextarea.dataset.preSpeech !== undefined) {
+          activeTextarea.value = activeTextarea.dataset.preSpeech;
+        }
+        finalTranscript = '';
+      }
+    });
+  }
+
+  if (waveformDone) {
+    waveformDone.addEventListener('click', () => {
+      if (isRecording) {
+        recognition.stop();
+      }
+    });
+  }
+
+  $('btn-home-mic')?.addEventListener('click', () => toggleMic($('btn-home-mic'), $('home-input')));
+  $('btn-chat-mic')?.addEventListener('click', () => toggleMic($('btn-chat-mic'), $('chat-input')));
+}
+
+// ── File Upload (Attach button) ──────────────────────────────────────────────
+
+const pendingAttachments = [];
+
+function renderAttachments() {
+  const container = $('compose-attachments');
+  if (!container) return;
+  if (pendingAttachments.length === 0) {
+    container.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+  container.classList.remove('hidden');
+  container.innerHTML = pendingAttachments.map((f, i) => {
+    const isImage = f.type.startsWith('image/');
+    const preview = isImage && f.dataUrl
+      ? `<img src="${f.dataUrl}" alt="${escHtml(f.name)}">`
+      : `<span style="font-size:14px">${fileIcon(f.name)}</span>`;
+    return `<div class="attach-chip">${preview}<span class="attach-name">${escHtml(f.name)}</span><span class="attach-remove" data-idx="${i}">&times;</span></div>`;
+  }).join('');
+  container.querySelectorAll('.attach-remove').forEach(el => {
+    el.addEventListener('click', () => {
+      pendingAttachments.splice(Number(el.dataset.idx), 1);
+      renderAttachments();
+    });
+  });
+}
+
+function fileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  const icons = { pdf: '📄', doc: '📝', docx: '📝', txt: '📃', json: '📋', csv: '📊', md: '📝', py: '🐍', js: '📜', ts: '📜', rs: '🦀' };
+  return icons[ext] || '📎';
+}
+
+function handleFileSelect(files) {
+  for (const file of files) {
+    const entry = { name: file.name, type: file.type, size: file.size, dataUrl: null, base64: null };
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => { entry.dataUrl = reader.result; entry.base64 = reader.result.split(',')[1]; renderAttachments(); };
+      reader.readAsDataURL(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => { entry.base64 = btoa(reader.result); renderAttachments(); };
+      reader.readAsBinaryString(file);
+    }
+    pendingAttachments.push(entry);
+  }
+  renderAttachments();
+}
+
+function initFileUpload() {
+  const homeInput = $('home-file-input');
+  const chatInput = $('chat-file-input');
+
+  $('btn-home-attach')?.addEventListener('click', () => homeInput?.click());
+  $('btn-chat-attach')?.addEventListener('click', () => chatInput?.click());
+
+  homeInput?.addEventListener('change', (e) => { handleFileSelect(e.target.files); e.target.value = ''; });
+  chatInput?.addEventListener('change', (e) => { handleFileSelect(e.target.files); e.target.value = ''; });
+
+  // Drag and drop on compose areas
+  ['home-compose', 'compose-inner'].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('dragover', (e) => { e.preventDefault(); el.style.borderColor = 'var(--blue)'; });
+    el.addEventListener('dragleave', () => { el.style.borderColor = ''; });
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      el.style.borderColor = '';
+      if (e.dataTransfer.files.length) handleFileSelect(e.dataTransfer.files);
+    });
+  });
 }
 
 // ── Markdown-lite renderer ────────────────────────────────────────────────────

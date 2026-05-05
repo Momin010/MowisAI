@@ -85,6 +85,19 @@ impl LlmConfig {
                     api_key: Some(api_key),
                 })
             }
+            AiProvider::Mimo => {
+                let api_key = config.mimo_api_key()?;
+                Ok(Self {
+                    provider: AiProvider::Mimo,
+                    model: if config.mimo_model.is_empty() {
+                        "MiMo-V2.5-Pro".into()
+                    } else {
+                        config.mimo_model.clone()
+                    },
+                    vertex_project_id: None,
+                    api_key: Some(api_key),
+                })
+            }
         }
     }
 
@@ -182,7 +195,7 @@ pub async fn generate_text_with_limit(
             generate_text_gemini(llm_config, system_prompt, user_message, json_mode, temperature, max_tokens)
                 .await
         }
-        AiProvider::OpenAi | AiProvider::Grok | AiProvider::Groq => {
+        AiProvider::OpenAi | AiProvider::Grok | AiProvider::Groq | AiProvider::Mimo => {
             generate_text_openai_compat(
                 llm_config,
                 system_prompt,
@@ -436,7 +449,7 @@ pub async fn call_agent_round(
             )
             .await
         }
-        AiProvider::OpenAi | AiProvider::Grok | AiProvider::Groq => {
+        AiProvider::OpenAi | AiProvider::Grok | AiProvider::Groq | AiProvider::Mimo => {
             call_agent_round_openai_compat(
                 llm_config,
                 system_prompt,
@@ -966,6 +979,7 @@ fn openai_compat_url(llm_config: &LlmConfig) -> String {
         AiProvider::OpenAi => "https://api.openai.com/v1/chat/completions".into(),
         AiProvider::Grok => "https://api.x.ai/v1/chat/completions".into(),
         AiProvider::Groq => "https://api.groq.com/openai/v1/chat/completions".into(),
+        AiProvider::Mimo => "https://token-plan-ams.xiaomimimo.com/v1/chat/completions".into(),
         _ => "https://api.openai.com/v1/chat/completions".into(),
     }
 }

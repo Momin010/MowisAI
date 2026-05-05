@@ -1,6 +1,6 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use anyhow::{Result, Context};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -11,6 +11,7 @@ pub enum AiProvider {
     Anthropic,
     OpenAi,
     Gemini,
+    Mimo,
 }
 
 impl Default for AiProvider {
@@ -28,6 +29,7 @@ impl std::fmt::Display for AiProvider {
             AiProvider::Anthropic => write!(f, "Anthropic (Claude)"),
             AiProvider::OpenAi => write!(f, "OpenAI (GPT)"),
             AiProvider::Gemini => write!(f, "Google Gemini (API Key)"),
+            AiProvider::Mimo => write!(f, "Xiaomi MiMo"),
         }
     }
 }
@@ -78,6 +80,12 @@ pub struct MowisConfig {
     #[serde(default)]
     pub gemini_model: String,
 
+    // ── Xiaomi MiMo fields ─────────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mimo_api_key_enc: Option<String>,
+    #[serde(default)]
+    pub mimo_model: String,
+
     // ── Shared fields ───────────────────────────────────────────────────────
     pub socket_path: String,
     /// Active model identifier (Gemini model for VertexAi, Grok model for Grok).
@@ -103,6 +111,8 @@ impl Default for MowisConfig {
             openai_model: String::new(),
             gemini_api_key_enc: None,
             gemini_model: String::new(),
+            mimo_api_key_enc: None,
+            mimo_model: String::new(),
             socket_path: "/tmp/mowisai.sock".into(),
             model: "gemini-2.5-pro".into(),
             max_agents: 1000,
@@ -129,10 +139,8 @@ impl MowisConfig {
         if !path.exists() {
             return Ok(None);
         }
-        let contents = std::fs::read_to_string(&path)
-            .context("reading config file")?;
-        let config: Self = toml::from_str(&contents)
-            .context("parsing config.toml")?;
+        let contents = std::fs::read_to_string(&path).context("reading config file")?;
+        let config: Self = toml::from_str(&contents).context("parsing config.toml")?;
         Ok(Some(config))
     }
 
@@ -148,8 +156,7 @@ impl MowisConfig {
                 .mode(0o700)
                 .create(&dir);
         }
-        let contents = toml::to_string_pretty(self)
-            .context("serializing config")?;
+        let contents = toml::to_string_pretty(self).context("serializing config")?;
         let path = Self::config_path();
         std::fs::write(&path, contents)?;
         // Restrict config file to owner read/write only.
@@ -163,45 +170,59 @@ impl MowisConfig {
 
     /// Returns the decrypted Grok API key, or an error if not set / decryption fails.
     pub fn grok_api_key(&self) -> Result<String> {
-        let enc = self.grok_api_key_enc.as_deref()
+        let enc = self
+            .grok_api_key_enc
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("No Grok API key configured"))?;
         crate::crypto::decrypt(enc)
     }
 
     /// Returns the decrypted Groq API key.
     pub fn groq_api_key(&self) -> Result<String> {
-        let enc = self.groq_api_key_enc.as_deref()
+        let enc = self
+            .groq_api_key_enc
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("No Groq API key configured"))?;
         crate::crypto::decrypt(enc)
     }
 
     pub fn anthropic_api_key(&self) -> Result<String> {
-        let enc = self.anthropic_api_key_enc.as_deref()
+        let enc = self
+            .anthropic_api_key_enc
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("No Anthropic API key configured"))?;
         crate::crypto::decrypt(enc)
     }
 
     pub fn openai_api_key(&self) -> Result<String> {
-        let enc = self.openai_api_key_enc.as_deref()
+        let enc = self
+            .openai_api_key_enc
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("No OpenAI API key configured"))?;
         crate::crypto::decrypt(enc)
     }
 
     pub fn gemini_api_key(&self) -> Result<String> {
-        let enc = self.gemini_api_key_enc.as_deref()
+        let enc = self
+            .gemini_api_key_enc
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("No Gemini API key configured"))?;
+        crate::crypto::decrypt(enc)
+    }
+
+    pub fn mimo_api_key(&self) -> Result<String> {
+        let enc = self
+            .mimo_api_key_enc
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("No MiMo API key configured"))?;
         crate::crypto::decrypt(enc)
     }
 
     pub fn is_valid(&self) -> bool {
         match self.provider {
             AiProvider::VertexAi => !self.gcp_project_id.is_empty(),
-            AiProvider::Grok => {
-                self.grok_api_key_enc.is_some() && !self.grok_model.is_empty()
-            }
-            AiProvider::Groq => {
-                self.groq_api_key_enc.is_some() && !self.groq_model.is_empty()
-            }
+            AiProvider::Grok => self.grok_api_key_enc.is_some() && !self.grok_model.is_empty(),
+            AiProvider::Groq => self.groq_api_key_enc.is_some() && !self.groq_model.is_empty(),
             AiProvider::Anthropic => {
                 self.anthropic_api_key_enc.is_some() && !self.anthropic_model.is_empty()
             }
@@ -211,6 +232,7 @@ impl MowisConfig {
             AiProvider::Gemini => {
                 self.gemini_api_key_enc.is_some() && !self.gemini_model.is_empty()
             }
+            AiProvider::Mimo => self.mimo_api_key_enc.is_some() && !self.mimo_model.is_empty(),
         }
     }
 }

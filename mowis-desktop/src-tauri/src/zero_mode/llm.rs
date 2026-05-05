@@ -89,6 +89,7 @@ pub async fn call_llm(
         "openai"    => call_openai_compat("https://api.openai.com/v1", config, system_prompt, messages, tool_defs).await,
         "grok"      => call_openai_compat("https://api.x.ai/v1", config, system_prompt, messages, tool_defs).await,
         "groq"      => call_openai_compat("https://api.groq.com/openai/v1", config, system_prompt, messages, tool_defs).await,
+        "mimo"      => call_openai_compat("https://token-plan-ams.xiaomimimo.com/v1", config, system_prompt, messages, tool_defs).await,
         other       => bail!("unsupported provider for zero mode: {other}"),
     }
 }
