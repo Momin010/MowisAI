@@ -252,7 +252,7 @@ impl AgentLoop {
             outcome: if success { "success" } else { "failed" }.to_string(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs(),
         };
 
@@ -319,7 +319,7 @@ impl AgentCoordinator {
     ) -> anyhow::Result<Option<String>> {
         match self.agents.get(&agent_id) {
             Some(agent) => {
-                let mut locked = agent.lock().unwrap();
+                let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
                 let result = locked.run(prompt, available_tools)?;
                 Ok(Some(result))
             }
@@ -330,7 +330,7 @@ impl AgentCoordinator {
     pub fn get_agent_status(&self, agent_id: u64) -> Option<Value> {
         self.agents
             .get(&agent_id)
-            .map(|agent| agent.lock().unwrap().status())
+            .map(|agent| agent.lock().unwrap_or_else(|e| e.into_inner()).status())
     }
 
     pub fn remove_agent(&self, agent_id: u64) -> Option<AgentLoop> {
@@ -343,7 +343,13 @@ impl AgentCoordinator {
         let statuses: Vec<Value> = self
             .agents
             .iter()
-            .map(|agent| agent.value().lock().unwrap().status())
+            .map(|agent| {
+                agent
+                    .value()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .status()
+            })
             .collect();
         json!(statuses)
     }

@@ -171,11 +171,23 @@ impl Agent {
             prompt.to_string()
         };
 
+        // Determine success based on tool invocation results
+        let success = if tools_invoked.is_empty() {
+            true // No tools invoked, just forwarding prompt
+        } else if let Ok(result_json) = serde_json::from_str::<serde_json::Value>(&output) {
+            result_json
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+        } else {
+            true
+        };
+
         // Capture any changes made
         let git_diff = self.capture_diff().ok();
 
         Ok(AgentResult {
-            success: true,
+            success,
             output: Some(output),
             git_diff,
             error: None,

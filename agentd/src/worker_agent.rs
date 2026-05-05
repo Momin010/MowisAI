@@ -7,7 +7,6 @@
 /// - Tests its own work
 /// - Reports completion back to Hub Agent
 /// - Signals idle state to Runtime
-
 use crate::protocol::*;
 use runtime::agentd_client::{AgentdClient, InvokeToolParams};
 use serde::{Deserialize, Serialize};
@@ -32,9 +31,9 @@ pub struct WorkerConfig {
     pub team_id: String,
     pub sandbox_id: String,
     pub container_id: String,
-    pub agentd_socket: String, // path to agentd unix socket
+    pub agentd_socket: String,    // path to agentd unix socket
     pub hub_agent_socket: String, // path to hub agent socket for callbacks
-    pub api_key: String, // Claude API key (for LLM calls)
+    pub api_key: String,          // Claude API key (for LLM calls)
 }
 
 /// Worker agent execution state
@@ -97,14 +96,15 @@ impl WorkerAgent {
 
     /// Receive and accept an assignment
     pub fn receive_assignment(&self, assignment: WorkerAssignment) -> WorkerResult<()> {
-        if *self.state.lock().unwrap() != WorkerExecutionState::Idle {
-            return Err(WorkerError::InvalidState(
-                "Worker not idle".to_string(),
-            ));
+        if *self.state.lock().unwrap_or_else(|e| e.into_inner()) != WorkerExecutionState::Idle {
+            return Err(WorkerError::InvalidState("Worker not idle".to_string()));
         }
 
-        *self.current_assignment.lock().unwrap() = Some(assignment);
-        *self.state.lock().unwrap() = WorkerExecutionState::Assigned;
+        *self
+            .current_assignment
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(assignment);
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = WorkerExecutionState::Assigned;
         Ok(())
     }
 
@@ -119,18 +119,18 @@ impl WorkerAgent {
             .ok_or(WorkerError::AssignmentFailed("No assignment".to_string()))?;
 
         // Phase 1: Thinking/Planning
-        *self.state.lock().unwrap() = WorkerExecutionState::Thinking;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = WorkerExecutionState::Thinking;
         self.plan_task(&assignment)?;
 
         // Phase 2: Execute planned steps
-        *self.state.lock().unwrap() = WorkerExecutionState::ExecutingTool;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = WorkerExecutionState::ExecutingTool;
         self.execute_plan(&assignment)?;
 
         // Phase 3: Test work
-        *self.state.lock().unwrap() = WorkerExecutionState::Testing;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = WorkerExecutionState::Testing;
         self.test_work()?;
 
-        *self.state.lock().unwrap() = WorkerExecutionState::Completed;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = WorkerExecutionState::Completed;
         Ok(())
     }
 
@@ -163,7 +163,10 @@ impl WorkerAgent {
             },
         ];
 
-        *self.planning_steps.lock().unwrap() = steps;
+        *self
+            .planning_steps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = steps;
         Ok(())
     }
 
@@ -189,7 +192,7 @@ impl WorkerAgent {
             }
         }
 
-        *self.work_output.lock().unwrap() = Some(output);
+        *self.work_output.lock().unwrap_or_else(|e| e.into_inner()) = Some(output);
         Ok(())
     }
 
@@ -229,7 +232,7 @@ impl WorkerAgent {
             .clone()
             .ok_or(WorkerError::InvalidState("No assignment".to_string()))?;
 
-        let state = *self.state.lock().unwrap();
+        let state = *self.state.lock().unwrap_or_else(|e| e.into_inner());
         let success = state == WorkerExecutionState::Completed;
 
         let output = self
@@ -251,9 +254,12 @@ impl WorkerAgent {
 
     /// Signal idle state to Runtime
     pub fn signal_idle(&self) -> WorkerResult<WorkerIdleSignal> {
-        *self.state.lock().unwrap() = WorkerExecutionState::Idle;
-        *self.current_assignment.lock().unwrap() = None;
-        *self.work_output.lock().unwrap() = None;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = WorkerExecutionState::Idle;
+        *self
+            .current_assignment
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self.work_output.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         Ok(WorkerIdleSignal {
             worker_name: self.config.worker_name.clone(),
@@ -265,17 +271,23 @@ impl WorkerAgent {
 
     /// Get current execution state
     pub fn get_state(&self) -> WorkerExecutionState {
-        *self.state.lock().unwrap()
+        *self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get execution history
     pub fn get_history(&self) -> Vec<ToolCallRecord> {
-        self.execution_history.lock().unwrap().clone()
+        self.execution_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Get planning steps
     pub fn get_planning_steps(&self) -> Vec<PlanningStep> {
-        self.planning_steps.lock().unwrap().clone()
+        self.planning_steps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     // Real tool invocation methods (via agentd)
@@ -302,7 +314,10 @@ impl WorkerAgent {
                     timestamp: current_timestamp(),
                 };
 
-                self.execution_history.lock().unwrap().push(record);
+                self.execution_history
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(record);
                 Ok(response.output)
             }
             Err(e) => Err(WorkerError::ToolInvocationFailed(format!(
@@ -400,7 +415,11 @@ mod tests {
         assert_eq!(worker.get_state(), WorkerExecutionState::Assigned);
 
         // Verify assignment was stored
-        assert!(worker.current_assignment.lock().unwrap().is_some());
+        assert!(worker
+            .current_assignment
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some());
     }
 
     #[test]

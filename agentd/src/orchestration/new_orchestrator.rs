@@ -898,6 +898,7 @@ impl NewOrchestrator {
                     total_tasks: 1,
                     completed: if success { 1 } else { 0 },
                     failed: if success { 0 } else { 1 },
+                    skipped: 0,
                     running: 0,
                     pending: 0,
                 };
