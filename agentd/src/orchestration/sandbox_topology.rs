@@ -1215,6 +1215,66 @@ impl TopologyManager {
         // Not implemented - agentd doesn't expose agent count
         Ok(())
     }
+
+    /// Get resource usage for all active containers
+    pub async fn get_resource_usage(&self) -> Result<ResourceUsageReport> {
+        let containers = self.containers.read().await;
+        let sandboxes = self.sandboxes.read().await;
+        let sleeping = self.sleeping_containers.read().await;
+
+        let active_containers = containers.len();
+        let total_sandboxes = sandboxes.len();
+        let sleeping_containers: usize = sleeping.values().map(|v| v.len()).sum();
+
+        // Get system resources
+        let system = super::health::SystemResources::collect();
+
+        Ok(ResourceUsageReport {
+            active_containers,
+            sleeping_containers,
+            total_sandboxes,
+            system_memory_mb: system.total_memory_bytes / (1024 * 1024),
+            available_memory_mb: system.available_memory_bytes / (1024 * 1024),
+            memory_usage_percent: system.memory_usage_percent,
+            disk_available_mb: system.disk_available_bytes / (1024 * 1024),
+            open_fds: system.open_fds,
+            max_fds: system.max_fds,
+            can_spawn_more: system.can_spawn_agent(),
+            max_recommended_agents: system.max_recommended_agents(),
+        })
+    }
+
+    /// Check if the system can handle more agents
+    pub async fn can_spawn_more_agents(&self) -> bool {
+        let system = super::health::SystemResources::collect();
+        system.can_spawn_agent()
+    }
+
+    /// Get the number of active containers
+    pub async fn active_container_count(&self) -> usize {
+        self.containers.read().await.len()
+    }
+
+    /// Get the number of sleeping (reusable) containers
+    pub async fn sleeping_container_count(&self) -> usize {
+        self.sleeping_containers.read().await.values().map(|v| v.len()).sum()
+    }
+}
+
+/// Resource usage report for the topology
+#[derive(Debug, Clone)]
+pub struct ResourceUsageReport {
+    pub active_containers: usize,
+    pub sleeping_containers: usize,
+    pub total_sandboxes: usize,
+    pub system_memory_mb: u64,
+    pub available_memory_mb: u64,
+    pub memory_usage_percent: f64,
+    pub disk_available_mb: u64,
+    pub open_fds: u32,
+    pub max_fds: u32,
+    pub can_spawn_more: bool,
+    pub max_recommended_agents: u32,
 }
 
 /// Export staged workspaces from a staging directory to output (for CLI post-orchestration export)
