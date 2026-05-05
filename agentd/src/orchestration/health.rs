@@ -127,27 +127,36 @@ impl HealthMonitor {
     /// Check whether a sandbox is healthy (circuit not open)
     pub async fn is_sandbox_healthy(&self, sandbox_name: &str) -> bool {
         let now = now_secs();
-        let mut breakers = self.circuit_breakers.write().await;
-        let cb = breakers
-            .entry(sandbox_name.to_string())
-            .or_insert_with(CircuitBreaker::new);
-
-        match cb.state {
-            CircuitState::Closed => true,
-            CircuitState::HalfOpen => true,
-            CircuitState::Open => {
-                // Transition to HalfOpen after recovery_timeout_secs
-                if now.saturating_sub(cb.last_failure_time) >= self.recovery_timeout_secs {
-                    log::info!(
-                        "[HealthMonitor] Circuit HALF-OPEN for sandbox {} (testing recovery)",
-                        sandbox_name
-                    );
-                    cb.state = CircuitState::HalfOpen;
-                    true
-                } else {
-                    false
+        // Use read lock first, only upgrade to write if we need to transition state
+        let breakers = self.circuit_breakers.read().await;
+        if let Some(cb) = breakers.get(sandbox_name) {
+            match cb.state {
+                CircuitState::Closed => true,
+                CircuitState::HalfOpen => true,
+                CircuitState::Open => {
+                    if now.saturating_sub(cb.last_failure_time) >= self.recovery_timeout_secs {
+                        // Need to transition to HalfOpen — drop read lock, take write lock
+                        drop(breakers);
+                        let mut breakers = self.circuit_breakers.write().await;
+                        if let Some(cb) = breakers.get_mut(sandbox_name) {
+                            if cb.state == CircuitState::Open
+                                && now.saturating_sub(cb.last_failure_time) >= self.recovery_timeout_secs
+                            {
+                                log::info!(
+                                    "[HealthMonitor] Circuit HALF-OPEN for sandbox {} (testing recovery)",
+                                    sandbox_name
+                                );
+                                cb.state = CircuitState::HalfOpen;
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
                 }
             }
+        } else {
+            true // No circuit breaker = healthy
         }
     }
 
@@ -193,6 +202,218 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// System resource snapshot
+#[derive(Debug, Clone)]
+pub struct SystemResources {
+    /// Total system memory in bytes
+    pub total_memory_bytes: u64,
+    /// Available system memory in bytes
+    pub available_memory_bytes: u64,
+    /// Memory usage percentage (0-100)
+    pub memory_usage_percent: f64,
+    /// Number of CPU cores
+    pub cpu_cores: u32,
+    /// System load average (1 minute)
+    pub load_avg_1m: f64,
+    /// Available disk space in bytes for the overlay root
+    pub disk_available_bytes: u64,
+    /// Disk usage percentage (0-100)
+    pub disk_usage_percent: f64,
+    /// Number of open file descriptors (process)
+    pub open_fds: u32,
+    /// Maximum file descriptors
+    pub max_fds: u32,
+    /// Number of running processes
+    pub process_count: u32,
+}
+
+impl SystemResources {
+    /// Collect current system resource usage
+    pub fn collect() -> Self {
+        let (total_mem, avail_mem) = Self::read_memory();
+        let disk = Self::read_disk("/");
+        let load = Self::read_load_avg();
+        let fds = Self::read_fd_count();
+
+        SystemResources {
+            total_memory_bytes: total_mem,
+            available_memory_bytes: avail_mem,
+            memory_usage_percent: if total_mem > 0 {
+                ((total_mem - avail_mem) as f64 / total_mem as f64) * 100.0
+            } else {
+                0.0
+            },
+            cpu_cores: Self::read_cpu_cores(),
+            load_avg_1m: load,
+            disk_available_bytes: disk.0,
+            disk_usage_percent: disk.1,
+            open_fds: fds.0,
+            max_fds: fds.1,
+            process_count: Self::read_process_count(),
+        }
+    }
+
+    /// Check if the system has enough resources to spawn more agents
+    pub fn can_spawn_agent(&self) -> bool {
+        // Need at least 100MB free memory
+        if self.available_memory_bytes < 100 * 1024 * 1024 {
+            return false;
+        }
+        // Need at least 80% of FDs available
+        if self.open_fds as f64 / self.max_fds.max(1) as f64 > 0.8 {
+            return false;
+        }
+        // Need at least 1GB free disk
+        if self.disk_available_bytes < 1024 * 1024 * 1024 {
+            return false;
+        }
+        // Load should not exceed 4x CPU cores
+        if self.load_avg_1m > (self.cpu_cores as f64 * 4.0) {
+            return false;
+        }
+        true
+    }
+
+    /// Get maximum recommended concurrent agents based on resources
+    pub fn max_recommended_agents(&self) -> u32 {
+        // Each agent uses roughly 50MB RAM + 1 FD + some disk
+        let mem_limit = (self.available_memory_bytes / (50 * 1024 * 1024)) as u32;
+        let fd_limit = (self.max_fds - self.open_fds).saturating_sub(100); // Reserve 100 FDs
+        let disk_limit = (self.disk_available_bytes / (100 * 1024 * 1024)) as u32; // 100MB per agent
+
+        mem_limit.min(fd_limit).min(disk_limit).max(1)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_memory() -> (u64, u64) {
+        if let Ok(info) = std::fs::read_to_string("/proc/meminfo") {
+            let mut total = 0u64;
+            let mut available = 0u64;
+            for line in info.lines() {
+                if line.starts_with("MemTotal:") {
+                    total = Self::parse_meminfo_kb(line) * 1024;
+                } else if line.starts_with("MemAvailable:") {
+                    available = Self::parse_meminfo_kb(line) * 1024;
+                }
+            }
+            (total, available)
+        } else {
+            (0, 0)
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_memory() -> (u64, u64) {
+        (0, 0)
+    }
+
+    fn parse_meminfo_kb(line: &str) -> u64 {
+        line.split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_cpu_cores() -> u32 {
+        if let Ok(info) = std::fs::read_to_string("/proc/cpuinfo") {
+            info.lines().filter(|l| l.starts_with("processor")).count() as u32
+        } else {
+            1
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_cpu_cores() -> u32 {
+        1
+    }
+
+    fn read_load_avg() -> f64 {
+        if let Ok(load) = std::fs::read_to_string("/proc/loadavg") {
+            load.split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    fn read_disk(path: &str) -> (u64, f64) {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+            if let Ok(c_path) = CString::new(path) {
+                if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } == 0 {
+                    let total = stat.f_blocks as u64 * stat.f_frsize as u64;
+                    let available = stat.f_bavail as u64 * stat.f_frsize as u64;
+                    let usage = if total > 0 {
+                        ((total - available) as f64 / total as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    return (available, usage);
+                }
+            }
+            (0, 0.0)
+        }
+        #[cfg(not(unix))]
+        {
+            (0, 0.0)
+        }
+    }
+
+    fn read_fd_count() -> (u32, u32) {
+        #[cfg(target_os = "linux")]
+        {
+            let open = std::fs::read_dir("/proc/self/fd")
+                .map(|d| d.count() as u32)
+                .unwrap_or(0);
+            let max = std::fs::read_to_string("/proc/sys/fs/file-max")
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1024);
+            (open, max)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            (0, 1024)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_process_count() -> u32 {
+        std::fs::read_dir("/proc")
+            .map(|d| d.filter(|e| e.as_ref().map(|e| e.file_name().to_string_lossy().chars().all(|c| c.is_numeric())).unwrap_or(false)).count() as u32)
+            .unwrap_or(0)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_process_count() -> u32 {
+        0
+    }
+}
+
+impl std::fmt::Display for SystemResources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Memory: {:.1}% ({}/{} MB), CPUs: {}, Load: {:.2}, Disk: {:.1}% ({} MB free), FDs: {}/{}, Procs: {}",
+            self.memory_usage_percent,
+            (self.total_memory_bytes - self.available_memory_bytes) / (1024 * 1024),
+            self.total_memory_bytes / (1024 * 1024),
+            self.cpu_cores,
+            self.load_avg_1m,
+            self.disk_usage_percent,
+            self.disk_available_bytes / (1024 * 1024),
+            self.open_fds,
+            self.max_fds,
+            self.process_count,
+        )
+    }
 }
 
 #[cfg(test)]

@@ -366,17 +366,14 @@ fn capture_merged_diff(work_dir: &Path, base_commit: &str) -> Result<String> {
     }
 }
 
-/// Repair merge conflict using LLM
+/// Repair merge conflict using LLM via provider_client (provider-agnostic)
 async fn repair_conflict(
     diff1: &str,
     diff2: &str,
     conflict_text: &str,
-    project_id: &str,
+    _project_id: &str,
     max_retries: usize,
 ) -> Result<String> {
-    let access_token = super::gcloud_access_token()?;
-    let url = super::vertex_generate_url(project_id, "gemini-2.5-pro");
-
     let system_prompt = r#"You are a merge conflict resolver. Given two diffs and a conflict message, produce a repaired patch that resolves the conflict.
 
 Output ONLY the repaired git patch, with no explanations or markdown formatting."#;
@@ -386,59 +383,48 @@ Output ONLY the repaired git patch, with no explanations or markdown formatting.
         diff1, diff2, conflict_text
     );
 
-    for attempt in 0..max_retries {
-        let request_body = json!({
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": user_message}]
-                }
-            ],
-            "systemInstruction": {
-                "parts": [{"text": system_prompt}]
-            },
-            "generationConfig": super::vertex_generation_config(0.3)
-        });
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
-            .send()
-            .await
-            .context("Failed to send conflict repair request")?;
-
-        if !response.status().is_success() {
-            if attempt < max_retries - 1 {
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                continue;
-            }
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Gemini API error: {}", error_text));
+    // Use the provider_client which handles all providers (not just Vertex AI)
+    let llm_config = super::provider_client::LlmConfig::from_config(
+        &crate::config::MowisConfig::load().unwrap_or_default()
+    ).unwrap_or_else(|_| {
+        // Fallback: try to construct a minimal config
+        super::provider_client::LlmConfig {
+            provider: crate::config::AiProvider::Gemini,
+            model: "gemini-2.5-pro".to_string(),
+            vertex_project_id: None,
+            api_key: std::env::var("GEMINI_API_KEY").ok(),
         }
+    });
 
-        let response_json: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse repair response")?;
+    let result = super::provider_client::generate_text_with_limit(
+        &llm_config,
+        system_prompt,
+        &user_message,
+        false,
+        0.3,
+        65536,
+    ).await;
 
-        let text = response_json
-            .get("candidates")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("content"))
-            .and_then(|c| c.get("parts"))
-            .and_then(|p| p.get(0))
-            .and_then(|p| p.get("text"))
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| anyhow!("Invalid repair response structure"))?;
-
-        return Ok(text.to_string());
+    match result {
+        Ok(text) => Ok(text),
+        Err(e) => {
+            if max_retries > 0 {
+                log::warn!("Conflict repair failed (will retry): {}", e);
+                // Retry once more with backoff
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                super::provider_client::generate_text_with_limit(
+                    &llm_config,
+                    system_prompt,
+                    &user_message,
+                    false,
+                    0.3,
+                    65536,
+                ).await
+            } else {
+                Err(e)
+            }
+        }
     }
-
-    Err(anyhow!("Failed to repair conflict after {} attempts", max_retries))
 }
 
 #[cfg(test)]

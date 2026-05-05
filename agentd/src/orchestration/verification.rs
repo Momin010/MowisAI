@@ -524,78 +524,131 @@ impl VerificationLoop {
         })
     }
 
-    /// Execute a single VF via an exact shell command inside the sandbox.
+    /// Execute a single VF directly via socket command execution.
     ///
-    /// The agent receives the exact command string and runs it — no LLM
-    /// reasoning about what to test. Success is determined by exit code.
+    /// NO LLM involved — runs the shell command directly in the sandbox container
+    /// and checks the exit code. This is deterministic, fast, and costs $0.
     async fn execute_vf(
         &self,
         vf: &VerificationFunction,
         sandbox_name: &SandboxName,
         topology: &TopologyManager,
-        agent_executor: &AgentExecutor,
+        _agent_executor: &AgentExecutor,
     ) -> Result<VfResult> {
+        let start_time = std::time::Instant::now();
+
+        // Create a container for VF execution
         let agent = topology
             .create_agent_layer(sandbox_name, Some(vf.id.clone()))
             .await
             .with_context(|| {
                 format!(
-                    "Failed to create agent for VF {} in sandbox {}",
+                    "Failed to create container for VF {} in sandbox {}",
                     vf.id, sandbox_name
                 )
             })?;
 
-        // The prompt is deterministic: run this exact command, report exit code.
-        // No creative interpretation allowed.
-        let prompt = format!(
-            "Run this EXACT command verbatim and report the result:\n\n{}\n\n\
-            Use run_command to execute it. Reply with:\n\
-            - SUCCESS if exit code is 0\n\
-            - FAILED if exit code is non-zero, followed by the full output",
-            vf.command
-        );
+        let socket_path = &topology.socket_path;
+        let sandbox_id = &agent.container_id; // container acts as sandbox for socket
+        let container_id = &agent.container_id;
 
-        let tools = vec![
-            "run_command".to_string(),
-            "read_file".to_string(),
-        ];
+        // Execute the command directly via socket — NO LLM
+        let timeout_secs = vf.timeout_secs.max(10);
+        let run_input = serde_json::json!({
+            "cmd": vf.command,
+            "cwd": "/workspace",
+            "timeout": timeout_secs
+        });
 
-        let result = match tokio::time::timeout(
-            std::time::Duration::from_secs(self.planner.max_test_execution_time),
-            agent_executor.execute_task(&agent, &vf.description, &tools, &prompt),
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs + 5), // buffer for socket overhead
+            tokio::task::spawn_blocking({
+                let socket = socket_path.clone();
+                let sid = sandbox_id.clone();
+                let cid = container_id.clone();
+                let cmd_input = run_input.clone();
+                async move {
+                    super::pooled_socket_request(&socket, &serde_json::json!({
+                        "request_type": "invoke_tool",
+                        "sandbox": sid,
+                        "container": cid,
+                        "name": "run_command",
+                        "input": cmd_input
+                    }))
+                }
+            }),
         )
-        .await
-        {
-            Ok(r) => r,
+        .await;
+
+        // Always clean up the container
+        let _ = topology.destroy_agent_layer(&agent.agent_id).await;
+
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(Ok(Ok(resp))) => {
+                // Parse the response from agentd
+                let exit_code = resp.get("exit_code")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(-1);
+                let stdout = resp.get("stdout")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let stderr = resp.get("stderr")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let timed_out = resp.get("timed_out")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                let passed = exit_code == 0 && !timed_out;
+                let output = if passed {
+                    stdout.clone()
+                } else {
+                    format!(
+                        "Exit code: {}\nStdout: {}\nStderr: {}\nTimed out: {}\nDuration: {}ms",
+                        exit_code, stdout, stderr, timed_out, duration_ms
+                    )
+                };
+
+                log::info!(
+                    "[VERIFY] VF [{}] {} in {}ms (exit={})",
+                    vf.id,
+                    if passed { "PASSED" } else { "FAILED" },
+                    duration_ms,
+                    exit_code
+                );
+
+                Ok(VfResult { passed, output })
+            }
+            Ok(Ok(Err(e))) => {
+                log::warn!("[VERIFY] VF [{}] socket error: {}", vf.id, e);
+                Ok(VfResult {
+                    passed: false,
+                    output: format!("Socket error: {}", e),
+                })
+            }
+            Ok(Err(e)) => {
+                log::warn!("[VERIFY] VF [{}] task error: {}", vf.id, e);
+                Ok(VfResult {
+                    passed: false,
+                    output: format!("Task spawn error: {}", e),
+                })
+            }
             Err(_) => {
-                let _ = topology.destroy_agent_layer(&agent.agent_id).await;
                 log::warn!(
                     "[VERIFY] VF [{}] timed out after {}s in sandbox {}",
                     vf.id,
-                    self.planner.max_test_execution_time,
+                    timeout_secs,
                     sandbox_name
                 );
-                return Ok(VfResult {
+                Ok(VfResult {
                     passed: false,
-                    output: format!(
-                        "Timeout after {}s",
-                        self.planner.max_test_execution_time
-                    ),
-                });
+                    output: format!("Timeout after {}s", timeout_secs),
+                })
             }
-        };
-
-        let _ = topology.destroy_agent_layer(&agent.agent_id).await;
-
-        match result {
-            Ok(r) => Ok(VfResult {
-                passed: r.success,
-                output: r.error.unwrap_or_default(),
-            }),
-            Err(e) => Ok(VfResult {
-                passed: false,
-                output: e.to_string(),
-            }),
         }
     }
 }
