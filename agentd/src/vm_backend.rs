@@ -1,8 +1,7 @@
-
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command};
+use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use serde_json::json;
@@ -35,14 +34,18 @@ pub fn detect_vm_backend() -> VmBackend {
     VmBackend::Qemu // Codespace default
 }
 
-pub fn boot_vm(sandbox_id: String, _host_root: &std::path::Path, _image_hint: &str) -> anyhow::Result<VmHandle> {
+pub fn boot_vm(
+    sandbox_id: String,
+    _host_root: &std::path::Path,
+    _image_hint: &str,
+) -> anyhow::Result<VmHandle> {
     // VM backend temporarily disabled - focus on new orchestration system
     // TODO: Re-implement VM backend with proper error handling
-    
+
     // Generate SSH keypair for future use
     let keypair = generate_ssh_keypair(&sandbox_id)?;
     let ssh_port = NEXT_SSH_PORT.fetch_add(1, Ordering::SeqCst);
-    
+
     // Return a stub handle for now
     let handle = VmHandle {
         sandbox_id: sandbox_id.clone(),
@@ -52,18 +55,24 @@ pub fn boot_vm(sandbox_id: String, _host_root: &std::path::Path, _image_hint: &s
         ssh_key: keypair.0.clone(),
         rootfs_path: std::path::PathBuf::from(format!("/tmp/vm-{}-rootfs.ext4", sandbox_id)),
     };
-    
+
     Ok(handle)
 }
 
-
 pub fn stop_vm(handle: &VmHandle) -> anyhow::Result<()> {
+    // SECURITY: Never kill PID 0 (would kill entire process group)
+    if handle.pid == 0 {
+        log::info!("[vm_backend] VM handle is a stub (pid=0), skipping kill");
+        return Ok(());
+    }
 
     // QEMU: qemu-monitor or kill
     let _ = Command::new("kill").arg(format!("{}", handle.pid)).status();
     // Cleanup
     let _ = fs::remove_file(&handle.rootfs_path);
-    let _ = fs::remove_dir_all(handle.ssh_key.parent().unwrap());
+    if let Some(parent) = handle.ssh_key.parent() {
+        let _ = fs::remove_dir_all(parent);
+    }
     log::info!("[vm_backend] VM stopped sandbox={}", handle.sandbox_id);
     Ok(())
 }
@@ -75,7 +84,7 @@ pub fn exec_in_vm(handle: &VmHandle, tool_name: &str, input: Value) -> Result<Va
 fn exec_in_vm_ssh(handle: &VmHandle, tool_name: &str, input: Value) -> Result<Value> {
     let cmd = map_tool_to_ssh(tool_name, input);
     let output = ssh_exec(handle, &cmd)?;
-    
+
     // Parse output to ToolResult format
     Ok(json!({
         "success": output.status.success(),
@@ -108,7 +117,13 @@ fn map_tool_to_ssh(tool: &str, input: Value) -> String {
             format!("cd /workspace && git clone {} repo || true", url)
         }
         "pip_install" => {
-            let pkgs = input["packages"].as_array().unwrap_or(&vec![]).iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>().join(" ");
+            let pkgs = input["packages"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .map(|v| v.as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join(" ");
             format!("pip install {}", pkgs)
         }
         _ => "echo 'tool not mapped'".to_string(),
@@ -118,10 +133,14 @@ fn map_tool_to_ssh(tool: &str, input: Value) -> String {
 fn ssh_exec(handle: &VmHandle, cmd: &str) -> Result<std::process::Output> {
     let output = Command::new("ssh")
         .args([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=10",
-            "-i", handle.ssh_key.to_str().unwrap(),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=10",
+            "-i",
+            handle.ssh_key.to_str().unwrap(),
             &format!("root@localhost -p {}", handle.ssh_port),
             cmd,
         ])
@@ -136,8 +155,15 @@ fn generate_ssh_keypair(sandbox_id: &str) -> Result<(PathBuf, PathBuf)> {
     let private = key_dir.join("id_ed25519");
     let public = key_dir.join("id_ed25519.pub");
     Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-f", private.to_str().unwrap(), "-N", "", "-q"])
+        .args([
+            "-t",
+            "ed25519",
+            "-f",
+            private.to_str().unwrap(),
+            "-N",
+            "",
+            "-q",
+        ])
         .status()?;
     Ok((private, public))
 }
-

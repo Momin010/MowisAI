@@ -1,4 +1,4 @@
-﻿use super::app::{App, MainView, MessageRole};
+use super::app::{App, MainView, MessageRole};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -7,7 +7,9 @@ use ratatui::{
     Frame,
 };
 
-const SPINNER_FRAMES: &[&str] = &["\u{28fe}", "\u{28f7}", "\u{28ef}", "\u{289f}", "\u{287f}", "\u{28bf}", "\u{28fb}", "\u{28fd}"];
+const SPINNER_FRAMES: &[&str] = &[
+    "\u{28fe}", "\u{28f7}", "\u{28ef}", "\u{289f}", "\u{287f}", "\u{28bf}", "\u{28fb}", "\u{28fd}",
+];
 
 // Colour palette
 const GREEN: Color = Color::Rgb(0, 180, 120);
@@ -36,7 +38,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match app.view_mode {
         MainView::Development => draw_development_view(f, app, chunks[1]),
-        MainView::Orchestration if app.orchestrating => draw_orchestration_dashboard(f, app, chunks[1]),
+        MainView::Orchestration if app.orchestrating => {
+            draw_orchestration_dashboard(f, app, chunks[1])
+        }
         _ => draw_chat(f, app, chunks[1]),
     }
     draw_input(f, app, chunks[2]);
@@ -174,7 +178,9 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         };
         all_lines.push(Line::from(Span::styled(
             format!("{} {}", spinner, label),
-            Style::default().fg(BRIGHT_GREEN).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(BRIGHT_GREEN)
+                .add_modifier(Modifier::BOLD),
         )));
     }
 
@@ -246,7 +252,11 @@ fn draw_development_view(f: &mut Frame, app: &App, area: Rect) {
 
     let total = lines.len();
     let visible = inner.height as usize;
-    let scroll = if total > visible { (total - visible) as u16 } else { 0 };
+    let scroll = if total > visible {
+        (total - visible) as u16
+    } else {
+        0
+    };
 
     let widget = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -308,14 +318,20 @@ fn draw_orch_log(f: &mut Frame, app: &App, area: Rect) {
         };
         lines.push(Line::from(Span::styled(
             layer_info,
-            Style::default().fg(BRIGHT_GREEN).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(BRIGHT_GREEN)
+                .add_modifier(Modifier::BOLD),
         )));
     }
 
     // Scroll to bottom
     let total = lines.len();
     let visible = inner.height as usize;
-    let scroll = if total > visible { (total - visible) as u16 } else { 0 };
+    let scroll = if total > visible {
+        (total - visible) as u16
+    } else {
+        0
+    };
 
     let widget = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -327,10 +343,7 @@ fn draw_orch_agents(f: &mut Frame, app: &App, area: Rect) {
     // Split vertically: top = progress, middle = agent list
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Min(3),
-        ])
+        .constraints([Constraint::Length(4), Constraint::Min(3)])
         .split(area);
 
     draw_orch_progress(f, app, rows[0]);
@@ -365,11 +378,7 @@ fn draw_orch_progress(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let gauge = Gauge::default()
-        .gauge_style(
-            Style::default()
-                .fg(BRIGHT_GREEN)
-                .bg(Color::Rgb(20, 40, 30)),
-        )
+        .gauge_style(Style::default().fg(BRIGHT_GREEN).bg(Color::Rgb(20, 40, 30)))
         .ratio(ratio.clamp(0.0, 1.0))
         .label(label);
 
@@ -416,15 +425,12 @@ fn draw_orch_agent_list(f: &mut Frame, app: &App, area: Rect) {
                 .map(|t| format!(" [{t}]"))
                 .unwrap_or_default();
 
-            let id_short = &agent.agent_id[..agent.agent_id.len().min(10)];
+            let id_short: String = agent.agent_id.chars().take(10).collect();
             let desc_max = avail.saturating_sub(id_short.len() + tool_info.len() + 5);
             let desc: String = agent.description.chars().take(desc_max).collect();
 
             let text = format!("{} {}  {}{}", symbol, id_short, desc, tool_info);
-            ListItem::new(Line::from(Span::styled(
-                text,
-                Style::default().fg(color),
-            )))
+            ListItem::new(Line::from(Span::styled(text, Style::default().fg(color))))
         })
         .collect();
 
@@ -433,7 +439,11 @@ fn draw_orch_agent_list(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    let border_color = if app.is_loading { Color::DarkGray } else { GREEN };
+    let border_color = if app.is_loading {
+        Color::DarkGray
+    } else {
+        GREEN
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -469,7 +479,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         format!(" {}  \u{b7}  Ctrl+C quit  \u{b7}  /help", app.cwd)
     };
     let widget = Paragraph::new(status)
-        .style(Style::default().bg(Color::DarkGray).fg(Color::Rgb(150, 150, 150)))
+        .style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .fg(Color::Rgb(150, 150, 150)),
+        )
         .alignment(Alignment::Left);
     f.render_widget(widget, area);
 }
@@ -482,11 +496,24 @@ pub fn draw_save_selector_overlay(f: &mut Frame, app: &App) {
     let area = f.size();
 
     // Center a 62x14 popup
-    let popup_width = if area.width > 66 { 62u16 } else { area.width.saturating_sub(4) };
-    let popup_height = if area.height > 18 { 14u16 } else { area.height.saturating_sub(4) };
+    let popup_width = if area.width > 66 {
+        62u16
+    } else {
+        area.width.saturating_sub(4)
+    };
+    let popup_height = if area.height > 18 {
+        14u16
+    } else {
+        area.height.saturating_sub(4)
+    };
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect { x, y, width: popup_width, height: popup_height };
+    let popup_area = Rect {
+        x,
+        y,
+        width: popup_width,
+        height: popup_height,
+    };
 
     // Clear background
     f.render_widget(Clear, popup_area);
@@ -497,7 +524,9 @@ pub fn draw_save_selector_overlay(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(BRIGHT_GREEN))
         .title(Span::styled(
             " Save Generated Code ",
-            Style::default().fg(BRIGHT_GREEN).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(BRIGHT_GREEN)
+                .add_modifier(Modifier::BOLD),
         ));
     f.render_widget(block, popup_area);
 
@@ -515,12 +544,21 @@ pub fn draw_save_selector_overlay(f: &mut Frame, app: &App) {
 
     let options: [(&str, String); 3] = [
         ("Save into current directory", format!("  -> {}", cwd)),
-        ("Save to a specific path", "  -> type the path below".to_string()),
-        ("Create new folder here", "  -> mowisai-output-<timestamp>/".to_string()),
+        (
+            "Save to a specific path",
+            "  -> type the path below".to_string(),
+        ),
+        (
+            "Create new folder here",
+            "  -> mowisai-output-<timestamp>/".to_string(),
+        ),
     ];
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled("  Select where to save:", Style::default().fg(DIM))));
+    lines.push(Line::from(Span::styled(
+        "  Select where to save:",
+        Style::default().fg(DIM),
+    )));
     lines.push(Line::from(""));
 
     for (i, (label, hint)) in options.iter().enumerate() {
@@ -528,7 +566,9 @@ pub fn draw_save_selector_overlay(f: &mut Frame, app: &App) {
         let (bullet, label_style, hint_style) = if is_selected {
             (
                 "> ",
-                Style::default().fg(BRIGHT_GREEN).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(BRIGHT_GREEN)
+                    .add_modifier(Modifier::BOLD),
                 Style::default().fg(WHITE),
             )
         } else {
@@ -543,7 +583,10 @@ pub fn draw_save_selector_overlay(f: &mut Frame, app: &App) {
             Span::styled(bullet, label_style),
             Span::styled(format!("[{}] {}", i + 1, label), label_style),
         ]));
-        lines.push(Line::from(Span::styled(format!("     {}", hint), hint_style)));
+        lines.push(Line::from(Span::styled(
+            format!("     {}", hint),
+            hint_style,
+        )));
 
         // Show text input for "specific path" option when typing
         if i == 1 && is_selected && sel.typing_path {

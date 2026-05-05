@@ -198,7 +198,7 @@ impl App {
                     a.status = "executing_tool".to_string();
                     a.current_tool = Some(tool_name.clone());
                 }
-                self.orch_log.push(format!("  [{}] {}", &agent_id[..agent_id.len().min(8)], tool_name));
+                self.orch_log.push(format!("  [{}] {}", agent_id.chars().take(8).collect::<String>(), tool_name));
             }
             OrchActivityEvent::AgentCompleted { agent_id } => {
                 if let Some(a) = self.agents.iter_mut().find(|a| a.agent_id == agent_id) {
@@ -212,7 +212,7 @@ impl App {
                     a.status = "failed".to_string();
                     a.current_tool = None;
                 }
-                self.orch_log.push(format!("FAILED [{}]: {}", &agent_id[..agent_id.len().min(8)], error));
+                self.orch_log.push(format!("FAILED [{}]: {}", agent_id.chars().take(8).collect::<String>(), error));
             }
             OrchActivityEvent::LayerProgress { layer, message } => {
                 self.orch_layer = layer;

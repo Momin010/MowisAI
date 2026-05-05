@@ -25,6 +25,13 @@ impl Channel {
     }
 }
 
+/// Recover a poisoned mutex
+macro_rules! lock_store {
+    ($store:expr) => {
+        $store.lock().unwrap_or_else(|e| e.into_inner())
+    };
+}
+
 // global channel registry and message store for prototyping
 lazy_static::lazy_static! {
     static ref CHANNEL_STORE: Mutex<HashMap<u64, Channel>> = Mutex::new(HashMap::new());
@@ -36,15 +43,15 @@ static CHANNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub fn create_channel(from: u64, to: u64) -> u64 {
     let id = CHANNEL_COUNTER.fetch_add(1, Ordering::SeqCst);
     let chan = Channel::new(id, from, to);
-    CHANNEL_STORE.lock().unwrap().insert(id, chan);
-    MESSAGE_STORE.lock().unwrap().insert(id, Vec::new());
+    lock_store!(CHANNEL_STORE).insert(id, chan);
+    lock_store!(MESSAGE_STORE).insert(id, Vec::new());
     id
 }
 
 /// send a message on the given channel; errors if channel does not exist or
 /// sender does not match.
 pub fn send_message(channel_id: u64, msg: Message) -> anyhow::Result<()> {
-    let store = CHANNEL_STORE.lock().unwrap();
+    let store = lock_store!(CHANNEL_STORE);
     let chan = store
         .get(&channel_id)
         .ok_or_else(|| anyhow::anyhow!("channel {} not found", channel_id))?;
@@ -52,9 +59,7 @@ pub fn send_message(channel_id: u64, msg: Message) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("sender mismatch"));
     }
     drop(store);
-    MESSAGE_STORE
-        .lock()
-        .unwrap()
+    lock_store!(MESSAGE_STORE)
         .entry(channel_id)
         .or_default()
         .push(msg);
@@ -63,9 +68,16 @@ pub fn send_message(channel_id: u64, msg: Message) -> anyhow::Result<()> {
 
 /// read all messages on a channel (non-destructive).
 pub fn read_messages(channel_id: u64) -> anyhow::Result<Vec<Message>> {
-    let msgs = MESSAGE_STORE.lock().unwrap();
+    let msgs = lock_store!(MESSAGE_STORE);
     let v = msgs
         .get(&channel_id)
         .ok_or_else(|| anyhow::anyhow!("channel {} not found", channel_id))?;
     Ok(v.clone())
+}
+
+/// delete a channel and its messages
+pub fn delete_channel(channel_id: u64) -> anyhow::Result<bool> {
+    let existed = lock_store!(CHANNEL_STORE).remove(&channel_id).is_some();
+    lock_store!(MESSAGE_STORE).remove(&channel_id);
+    Ok(existed)
 }
