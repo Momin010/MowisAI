@@ -225,10 +225,12 @@ pub(crate) fn gcloud_access_token() -> anyhow::Result<String> {
     ))
 }
 
-pub(crate) fn vertex_generate_url(project_id: &str) -> String {
+pub(crate) fn vertex_generate_url(project_id: &str, model: &str) -> String {
+    // Default to gemini-2.5-pro if no model specified
+    let model_name = if model.is_empty() { "gemini-2.5-pro" } else { model };
     format!(
-        "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent",
-        project_id
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/{}:generateContent",
+        project_id, model_name
     )
 }
 

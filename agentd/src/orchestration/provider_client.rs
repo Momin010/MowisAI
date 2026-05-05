@@ -9,7 +9,20 @@
 
 use crate::config::AiProvider;
 use anyhow::{anyhow, Context, Result};
+use once_cell::sync::Lazy;
 use serde_json::{json, Value};
+
+/// Shared HTTP client for all LLM API calls (reuses connections and TLS context)
+static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(10)
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .expect("Failed to create HTTP client")
+});
+
+/// Atomic counter for generating unique tool call IDs
+static TOOL_CALL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ── LlmConfig ────────────────────────────────────────────────────────────────
 
@@ -245,7 +258,7 @@ async fn generate_text_gemini(
         "generationConfig": gen_config
     });
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let mut req = client
         .post(&url)
         .header("Content-Type", "application/json")
@@ -306,7 +319,7 @@ async fn generate_text_openai_compat(
         );
     }
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -380,7 +393,7 @@ async fn generate_text_anthropic(
         "temperature": temperature
     });
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
@@ -502,7 +515,7 @@ async fn call_agent_round_gemini(
         "generationConfig": gen_config
     });
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let mut req = client
         .post(&url)
         .header("Content-Type", "application/json")
@@ -555,7 +568,8 @@ async fn call_agent_round_gemini(
                 .unwrap_or("")
                 .to_string();
             let args = fc.get("args").cloned().unwrap_or(json!({}));
-            let id = format!("call_{}", name);
+            let seq = TOOL_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let id = format!("call_{}_{}", name, seq);
             tool_calls.push(ToolCall { id, name, args });
         }
     }
@@ -598,7 +612,7 @@ async fn call_agent_round_openai_compat(
         "max_tokens": 16384
     });
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -698,7 +712,7 @@ async fn call_agent_round_anthropic(
         "temperature": temperature
     });
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
@@ -953,7 +967,7 @@ fn gemini_url_and_auth(llm_config: &LlmConfig) -> Result<(String, Option<String>
                 .as_deref()
                 .ok_or_else(|| anyhow!("Vertex AI: no GCP project ID configured"))?;
             let token = super::gcloud_access_token()?;
-            let url = super::vertex_generate_url(project_id);
+            let url = super::vertex_generate_url(project_id, &llm_config.model);
             Ok((url, Some(format!("Bearer {}", token))))
         }
         AiProvider::Gemini => {

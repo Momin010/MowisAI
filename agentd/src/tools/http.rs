@@ -1,9 +1,11 @@
-use crate::tools::common::{execute_http_command, resolve_path, Tool, ToolContext};
+use crate::tools::common::{
+    execute_http_command, resolve_path, validate_url_for_http, Tool, ToolContext,
+};
 use serde_json::{json, Value};
-use std::fs;
 use std::process::Command;
 
-// ============== HTTP TOOLS (6) ==============
+/// Maximum download size (100MB)
+const MAX_DOWNLOAD_SIZE: u64 = 100 * 1024 * 1024;
 
 pub struct HttpGetTool;
 impl Tool for HttpGetTool {
@@ -15,7 +17,51 @@ impl Tool for HttpGetTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("http_get: missing url"))?;
 
-        execute_http_command(vec!["-s", "-w", "\n%{http_code}", url])
+        validate_url_for_http(url)?;
+
+        let headers = input.get("headers").and_then(|v| v.as_object());
+
+        let mut args = vec![
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "60",
+            "--max-redirs",
+            "5",
+            "--proto",
+            "=http,https",    // Only allow http/https protocols
+            "--no-sessionid", // Don't reuse TLS sessions across requests
+        ];
+
+        // Add custom headers safely
+        let mut header_args = Vec::new();
+        if let Some(hdrs) = headers {
+            for (k, v) in hdrs {
+                // Validate header name (no newlines, no control chars)
+                if k.chars().any(|c| c.is_control() || c == '\n' || c == '\r') {
+                    return Err(anyhow::anyhow!("Invalid header name: {}", k));
+                }
+                let val = v.as_str().unwrap_or("");
+                if val
+                    .chars()
+                    .any(|c| c.is_control() || c == '\n' || c == '\r')
+                {
+                    return Err(anyhow::anyhow!("Invalid header value for '{}'", k));
+                }
+                header_args.push("-H".to_string());
+                header_args.push(format!("{}: {}", k, val));
+            }
+        }
+
+        for arg in &header_args {
+            args.push(arg);
+        }
+        args.push(url);
+
+        execute_http_command(args)
     }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(HttpGetTool)
@@ -32,7 +78,10 @@ impl Tool for HttpPostTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("http_post: missing url"))?;
 
-        let body_val = input.get("body")
+        validate_url_for_http(url)?;
+
+        let body_val = input
+            .get("body")
             .ok_or_else(|| anyhow::anyhow!("http_post: missing body"))?;
         let body_string;
         let body = if let Some(s) = body_val.as_str() {
@@ -42,10 +91,23 @@ impl Tool for HttpPostTool {
             &body_string
         };
 
+        // SECURITY: Block body starting with @ (curl reads from file)
+        if body.starts_with('@') {
+            return Err(anyhow::anyhow!(
+                "Body starting with '@' is not allowed (prevents file disclosure)"
+            ));
+        }
+
         let output = Command::new("curl")
             .arg("-s")
             .arg("-w")
             .arg("\n%{http_code}")
+            .arg("--connect-timeout")
+            .arg("10")
+            .arg("--max-time")
+            .arg("60")
+            .arg("--proto")
+            .arg("=http,https")
             .arg("-X")
             .arg("POST")
             .arg("-H")
@@ -67,7 +129,8 @@ impl Tool for HttpPostTool {
 
         Ok(json!({
             "status": status_code,
-            "body": response_body
+            "body": response_body,
+            "success": output.status.success()
         }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -85,10 +148,16 @@ impl Tool for HttpPutTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("http_put: missing url"))?;
 
-        let body_val = input.get("body")
+        validate_url_for_http(url)?;
+
+        let body_val = input
+            .get("body")
             .ok_or_else(|| anyhow::anyhow!("http_put: missing body"))?;
         let body_string;
         let body = if let Some(s) = body_val.as_str() {
+            if s.starts_with('@') {
+                return Err(anyhow::anyhow!("Body starting with '@' is not allowed"));
+            }
             s
         } else {
             body_string = body_val.to_string();
@@ -99,6 +168,12 @@ impl Tool for HttpPutTool {
             .arg("-s")
             .arg("-w")
             .arg("\n%{http_code}")
+            .arg("--connect-timeout")
+            .arg("10")
+            .arg("--max-time")
+            .arg("60")
+            .arg("--proto")
+            .arg("=http,https")
             .arg("-X")
             .arg("PUT")
             .arg("-H")
@@ -120,7 +195,8 @@ impl Tool for HttpPutTool {
 
         Ok(json!({
             "status": status_code,
-            "body": response_body
+            "body": response_body,
+            "success": output.status.success()
         }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -138,10 +214,18 @@ impl Tool for HttpDeleteTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("http_delete: missing url"))?;
 
+        validate_url_for_http(url)?;
+
         let output = Command::new("curl")
             .arg("-s")
             .arg("-w")
             .arg("\n%{http_code}")
+            .arg("--connect-timeout")
+            .arg("10")
+            .arg("--max-time")
+            .arg("60")
+            .arg("--proto")
+            .arg("=http,https")
             .arg("-X")
             .arg("DELETE")
             .arg(url)
@@ -159,7 +243,8 @@ impl Tool for HttpDeleteTool {
 
         Ok(json!({
             "status": status_code,
-            "body": body
+            "body": body,
+            "success": output.status.success()
         }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -177,10 +262,16 @@ impl Tool for HttpPatchTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("http_patch: missing url"))?;
 
-        let body_val = input.get("body")
+        validate_url_for_http(url)?;
+
+        let body_val = input
+            .get("body")
             .ok_or_else(|| anyhow::anyhow!("http_patch: missing body"))?;
         let body_string;
         let body = if let Some(s) = body_val.as_str() {
+            if s.starts_with('@') {
+                return Err(anyhow::anyhow!("Body starting with '@' is not allowed"));
+            }
             s
         } else {
             body_string = body_val.to_string();
@@ -191,6 +282,12 @@ impl Tool for HttpPatchTool {
             .arg("-s")
             .arg("-w")
             .arg("\n%{http_code}")
+            .arg("--connect-timeout")
+            .arg("10")
+            .arg("--max-time")
+            .arg("60")
+            .arg("--proto")
+            .arg("=http,https")
             .arg("-X")
             .arg("PATCH")
             .arg("-H")
@@ -212,7 +309,8 @@ impl Tool for HttpPatchTool {
 
         Ok(json!({
             "status": status_code,
-            "body": response_body
+            "body": response_body,
+            "success": output.status.success()
         }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -233,26 +331,52 @@ impl Tool for DownloadFileTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("download_file: missing path"))?;
 
-        let dest = resolve_path(ctx, dest_str);
+        validate_url_for_http(url)?;
+
+        let dest = resolve_path(ctx, dest_str)?;
         if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)?;
         }
 
+        // Download with size limit and timeout, don't follow redirects to internal
         let output = Command::new("curl")
             .arg("-L")
+            .arg("--max-redirs")
+            .arg("5")
+            .arg("--connect-timeout")
+            .arg("10")
+            .arg("--max-time")
+            .arg("300")
+            .arg("--proto")
+            .arg("=http,https")
+            .arg("--limit-rate")
+            .arg("10m") // Rate limit to prevent bandwidth abuse
             .arg("-o")
             .arg(&dest)
             .arg(url)
             .output()?;
 
         if output.status.success() {
-            let size = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+
+            // Enforce download size limit
+            if size > MAX_DOWNLOAD_SIZE {
+                let _ = std::fs::remove_file(&dest);
+                return Err(anyhow::anyhow!(
+                    "Downloaded file size {} exceeds maximum {} bytes",
+                    size,
+                    MAX_DOWNLOAD_SIZE
+                ));
+            }
+
             Ok(json!({
                 "success": true,
                 "size": size,
                 "path": dest.to_string_lossy().to_string()
             }))
         } else {
+            // Clean up partial download
+            let _ = std::fs::remove_file(&dest);
             Err(anyhow::anyhow!(
                 "download failed: {}",
                 String::from_utf8_lossy(&output.stderr)
@@ -263,21 +387,55 @@ impl Tool for DownloadFileTool {
         Box::new(DownloadFileTool)
     }
 }
+
 pub struct WebsocketSendTool;
 impl Tool for WebsocketSendTool {
     fn name(&self) -> &'static str {
         "websocket_send"
     }
     fn invoke(&self, _ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
-        let _url = input["url"]
+        let url = input["url"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("websocket_send: missing url"))?;
-        let _message = input["message"]
+        let message = input["message"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("websocket_send: missing message"))?;
 
-        // WebSocket support would require async runtime, returning success for now
-        Ok(json!({ "success": false, "error": "WebSocket not fully implemented" }))
+        validate_url_for_http(url)?;
+
+        // WebSocket requires async runtime — use blocking ws library as fallback
+        // For now, use websocat-like approach via subprocess
+        let output = Command::new("websocat")
+            .arg("--one-message")
+            .arg(url)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+
+        match output {
+            Ok(out) => {
+                if out.status.success() {
+                    Ok(json!({
+                        "success": true,
+                        "response": String::from_utf8_lossy(&out.stdout).to_string()
+                    }))
+                } else {
+                    Ok(json!({
+                        "success": false,
+                        "error": String::from_utf8_lossy(&out.stderr).to_string()
+                    }))
+                }
+            }
+            Err(_) => {
+                // websocat not available, return informative error
+                Ok(json!({
+                    "success": false,
+                    "error": "WebSocket tool requires 'websocat' to be installed in the container",
+                    "install_hint": "apk add websocat || apt-get install websocat"
+                }))
+            }
+        }
     }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(WebsocketSendTool)

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Persisted sandbox configuration and metadata
@@ -30,7 +31,6 @@ impl PersistenceManager {
         }
     }
 
-    /// Ensure persistence directory exists
     pub fn init(&self) -> anyhow::Result<()> {
         fs::create_dir_all(&self.base_path)?;
         fs::create_dir_all(self.base_path.join("sandboxes"))?;
@@ -39,14 +39,26 @@ impl PersistenceManager {
         Ok(())
     }
 
-    /// Save sandbox state to disk
+    /// Atomic write: write to temp file then rename
+    fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+        let tmp_path = path.with_extension("tmp");
+        {
+            let mut f = fs::File::create(&tmp_path)?;
+            f.write_all(content)?;
+            f.sync_all()?;
+        }
+        fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+
+    /// Save sandbox state to disk (atomically)
     pub fn save_sandbox(&self, sandbox: &PersistedSandbox) -> anyhow::Result<()> {
         let path = self
             .base_path
             .join("sandboxes")
             .join(format!("sandbox_{}.json", sandbox.id));
         let json = serde_json::to_string_pretty(sandbox)?;
-        fs::write(path, json)?;
+        Self::atomic_write(&path, json.as_bytes())?;
         Ok(())
     }
 
@@ -93,14 +105,14 @@ impl PersistenceManager {
         Ok(())
     }
 
-    /// Save agent state to disk
+    /// Save agent state to disk (atomically)
     pub fn save_agent_memory(&self, agent_id: u64, memory_json: &Value) -> anyhow::Result<()> {
         let path = self
             .base_path
             .join("memory")
             .join(format!("agent_{}.json", agent_id));
         let json = serde_json::to_string_pretty(memory_json)?;
-        fs::write(path, json)?;
+        Self::atomic_write(&path, json.as_bytes())?;
         Ok(())
     }
 
@@ -114,7 +126,6 @@ impl PersistenceManager {
         Ok(serde_json::from_str(&json)?)
     }
 
-    /// Check if sandbox exists on disk
     pub fn sandbox_exists(&self, sandbox_id: u64) -> bool {
         let path = self
             .base_path
@@ -123,7 +134,6 @@ impl PersistenceManager {
         path.exists()
     }
 
-    /// Check if agent memory exists on disk
     pub fn agent_exists(&self, agent_id: u64) -> bool {
         let path = self
             .base_path
@@ -151,23 +161,42 @@ impl Checkpointer {
         Ok(())
     }
 
-    pub fn save_checkpoint(&self, checkpoint_id: String, data: &Value) -> anyhow::Result<()> {
+    /// Save checkpoint with sanitized ID (prevent path traversal)
+    pub fn save_checkpoint(&self, checkpoint_id: &str, data: &Value) -> anyhow::Result<()> {
+        // Sanitize checkpoint_id: only allow alphanumeric, dash, underscore
+        let sanitized: String = checkpoint_id
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+
+        if sanitized.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Invalid checkpoint ID: '{}' (sanitized to empty)",
+                checkpoint_id
+            ));
+        }
+
         let path = self
             .persistence
             .base_path
             .join("checkpoints")
-            .join(format!("checkpoint_{}.json", checkpoint_id));
+            .join(format!("checkpoint_{}.json", sanitized));
         let json = serde_json::to_string_pretty(data)?;
-        fs::write(path, json)?;
+        PersistenceManager::atomic_write(&path, json.as_bytes())?;
         Ok(())
     }
 
     pub fn load_checkpoint(&self, checkpoint_id: &str) -> anyhow::Result<Value> {
+        let sanitized: String = checkpoint_id
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+
         let path = self
             .persistence
             .base_path
             .join("checkpoints")
-            .join(format!("checkpoint_{}.json", checkpoint_id));
+            .join(format!("checkpoint_{}.json", sanitized));
         let json = fs::read_to_string(path)?;
         Ok(serde_json::from_str(&json)?)
     }
@@ -194,6 +223,7 @@ impl Checkpointer {
 }
 
 /// Write-ahead logging for durability
+/// Uses O_APPEND for atomic appends (no read-modify-write)
 pub struct WriteAheadLog {
     log_path: PathBuf,
 }
@@ -211,11 +241,18 @@ impl WriteAheadLog {
         Ok(())
     }
 
+    /// Atomic append using O_APPEND flag
     pub fn append(&self, entry: &Value) -> anyhow::Result<()> {
-        let line = serde_json::to_string(entry)? + "\n";
-        let mut content = fs::read_to_string(&self.log_path).unwrap_or_default();
-        content.push_str(&line);
-        fs::write(&self.log_path, content)?;
+        let mut line = serde_json::to_string(entry)?;
+        line.push('\n');
+
+        use std::fs::OpenOptions;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)?;
+        file.write_all(line.as_bytes())?;
+        file.sync_all()?;
         Ok(())
     }
 
@@ -260,25 +297,33 @@ impl RecoveryJournal {
                 "pending_operations": [],
                 "version": 1
             });
-            fs::write(&self.journal_path, serde_json::to_string_pretty(&empty)?)?;
+            PersistenceManager::atomic_write(
+                &self.journal_path,
+                serde_json::to_string_pretty(&empty)?.as_bytes(),
+            )?;
         }
         Ok(())
     }
 
     pub fn mark_checkpoint(&self, checkpoint_id: &str) -> anyhow::Result<()> {
-        let mut journal: Value = serde_json::from_str(&fs::read_to_string(&self.journal_path)?)?;
+        let content = fs::read_to_string(&self.journal_path)?;
+        let mut journal: Value = serde_json::from_str(&content)?;
         if let Some(obj) = journal.as_object_mut() {
             obj.insert(
                 "last_checkpoint".to_string(),
                 Value::String(checkpoint_id.to_string()),
             );
         }
-        fs::write(&self.journal_path, serde_json::to_string_pretty(&journal)?)?;
+        PersistenceManager::atomic_write(
+            &self.journal_path,
+            serde_json::to_string_pretty(&journal)?.as_bytes(),
+        )?;
         Ok(())
     }
 
     pub fn add_pending_operation(&self, op: &Value) -> anyhow::Result<()> {
-        let mut journal: Value = serde_json::from_str(&fs::read_to_string(&self.journal_path)?)?;
+        let content = fs::read_to_string(&self.journal_path)?;
+        let mut journal: Value = serde_json::from_str(&content)?;
         if let Some(obj) = journal.as_object_mut() {
             if let Some(ops) = obj
                 .get_mut("pending_operations")
@@ -287,12 +332,16 @@ impl RecoveryJournal {
                 ops.push(op.clone());
             }
         }
-        fs::write(&self.journal_path, serde_json::to_string_pretty(&journal)?)?;
+        PersistenceManager::atomic_write(
+            &self.journal_path,
+            serde_json::to_string_pretty(&journal)?.as_bytes(),
+        )?;
         Ok(())
     }
 
     pub fn get_pending_operations(&self) -> anyhow::Result<Vec<Value>> {
-        let journal: Value = serde_json::from_str(&fs::read_to_string(&self.journal_path)?)?;
+        let content = fs::read_to_string(&self.journal_path)?;
+        let journal: Value = serde_json::from_str(&content)?;
         Ok(journal["pending_operations"]
             .as_array()
             .cloned()
@@ -300,11 +349,15 @@ impl RecoveryJournal {
     }
 
     pub fn clear_pending_operations(&self) -> anyhow::Result<()> {
-        let mut journal: Value = serde_json::from_str(&fs::read_to_string(&self.journal_path)?)?;
+        let content = fs::read_to_string(&self.journal_path)?;
+        let mut journal: Value = serde_json::from_str(&content)?;
         if let Some(obj) = journal.as_object_mut() {
             obj.insert("pending_operations".to_string(), Value::Array(vec![]));
         }
-        fs::write(&self.journal_path, serde_json::to_string_pretty(&journal)?)?;
+        PersistenceManager::atomic_write(
+            &self.journal_path,
+            serde_json::to_string_pretty(&journal)?.as_bytes(),
+        )?;
         Ok(())
     }
 }
@@ -344,6 +397,43 @@ mod tests {
         pm.save_sandbox(&sandbox)?;
         let loaded = pm.load_sandbox(42)?;
         assert_eq!(loaded.id, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_id_sanitization() -> anyhow::Result<()> {
+        let dir = TempDir::new()?;
+        let cp = Checkpointer::new(dir.path());
+        cp.init()?;
+
+        // Normal ID works
+        cp.save_checkpoint("test-123", &json!({"ok": true}))?;
+
+        // Path traversal attempt is sanitized
+        cp.save_checkpoint("../../etc/evil", &json!({"ok": true}))?;
+
+        // List should show sanitized names
+        let ids = cp.list_checkpoints()?;
+        assert!(ids.contains(&"test-123".to_string()));
+        assert!(ids.contains(&"etcevil".to_string())); // Slashes removed
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_atomic_append() -> anyhow::Result<()> {
+        let dir = TempDir::new()?;
+        let wal = WriteAheadLog::new(dir.path());
+        wal.init()?;
+
+        wal.append(&json!({"op": "create", "id": 1}))?;
+        wal.append(&json!({"op": "update", "id": 2}))?;
+
+        let entries = wal.read_all()?;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["op"], "create");
+        assert_eq!(entries[1]["op"], "update");
+
         Ok(())
     }
 }

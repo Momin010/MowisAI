@@ -1,4 +1,4 @@
-﻿//! New 7-layer orchestration system entry point
+//! New 7-layer orchestration system entry point
 
 use super::scheduler::{Scheduler, SchedulerStats};
 
@@ -64,7 +64,7 @@ pub struct OrchestratorConfig {
     /// Optional staging directory for save-all functionality
     pub staging_dir: Option<PathBuf>,
     /// Optional channel sender for real-time TUI progress events
-    pub event_tx: Option<std::sync::mpsc::Sender<OrchestratorEvent>>,
+    pub event_tx: Option<tokio::sync::mpsc::Sender<OrchestratorEvent>>,
     /// Explicit mode override from CLI (`--mode simple|standard|full`).
     /// When `None`, the complexity classifier decides automatically.
     pub mode_override: Option<ComplexityMode>,
@@ -324,7 +324,19 @@ impl NewOrchestrator {
                                         log::warn!("{}", error_msg);
                                         {
                                             let mut errors = errors_clone.write().await;
-                                            errors.push(error_msg);
+                                            errors.push(error_msg.clone());
+                                        }
+                                        // CRITICAL: Properly report task failure so scheduler can unlock dependents
+                                        let fail_result = agentd_protocol::AgentResult {
+                                            task_id: ready_task_id.clone(),
+                                            success: false,
+                                            git_diff: None,
+                                            error: Some(error_msg),
+                                            checkpoint_log: vec![],
+                                            timestamp: agentd_protocol::current_timestamp_ms(),
+                                        };
+                                        if let Err(e) = scheduler_clone.handle_task_completion(fail_result).await {
+                                            log::warn!("[Worker {}] Failed to report task failure: {}", worker_id, e);
                                         }
                                         continue;
                                     }
@@ -630,12 +642,12 @@ impl NewOrchestrator {
                         }
                         Err(_) => {
                             log::warn!(
-                                "  âš  Verification timed out for {} after {} minutes, skipping",
+                                "  Verification timed out for {} after {} minutes, skipping",
                                 sandbox_name,
                                 verify_timeout.as_secs() / 60
                             );
-                            sandbox_result.verification_status = VerificationStatus::NotStarted;
-                            verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
+                            sandbox_result.verification_status = VerificationStatus::TimedOut;
+                            verification_status.insert(sandbox_name.clone(), VerificationStatus::TimedOut);
                         }
                     }
                 } else {

@@ -1,63 +1,10 @@
 //! Internal types for new 7-layer orchestration system
-//! Also contains legacy types from old 5-layer system (marked DEPRECATED)
 
 use agentd_protocol::{SandboxName, AgentHandle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::RwLock;
-
-// ============================================================================
-// DEPRECATED: OLD 5-LAYER ARCHITECTURE TYPES (kept for orchestrator.rs)
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct ProjectContext {
-    pub file_tree: String,
-    pub relevant_files: Vec<String>,
-    pub metadata: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct ImplementationBlueprint {
-    pub sandboxes: Vec<SandboxConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct SandboxConfig {
-    pub name: String,
-    pub scope: String,
-    pub tools: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct SandboxExecutionPlan {
-    pub sandbox_id: String,
-    pub tasks: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct SandboxResult {
-    pub sandbox_id: String,
-    pub success: bool,
-    pub output: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct SandboxWarmState {
-    pub merge_container_id: String,
-    pub worker_containers: HashMap<String, String>,
-}
-
-// ============================================================================
-// NEW 7-LAYER ARCHITECTURE TYPES
-// ============================================================================
 
 /// Dependency counter for scheduler (Layer 3)
 #[derive(Debug)]
@@ -81,8 +28,8 @@ pub struct SandboxState {
     pub sandbox_layer_path: String,
     pub scope: String,
     pub tools: Vec<String>,
-    pub max_agents: usize,
-    pub active_agents: usize,
+    pub max_agents: u32,
+    pub active_agents: u32,
     pub idle_agents: Vec<AgentHandle>,
 }
 
@@ -90,11 +37,11 @@ pub struct SandboxState {
 #[derive(Debug)]
 pub struct AgentPool {
     pub agents: RwLock<Vec<AgentHandle>>,
-    pub max_size: usize,
+    pub max_size: u32,
 }
 
 impl AgentPool {
-    pub fn new(max_size: usize) -> Self {
+    pub fn new(max_size: u32) -> Self {
         Self {
             agents: RwLock::new(Vec::new()),
             max_size,
@@ -108,7 +55,9 @@ impl AgentPool {
 
     pub async fn return_idle(&self, agent: AgentHandle) {
         let mut agents = self.agents.write().await;
-        agents.push(agent);
+        if (agents.len() as u32) < self.max_size {
+            agents.push(agent);
+        }
     }
 
     pub async fn size(&self) -> usize {
@@ -124,10 +73,106 @@ pub enum MergeNode {
 }
 
 /// Verification test task (Layer 6)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationTask {
     pub test_id: String,
     pub description: String,
     pub command: String,
-    pub expected_result: String,
+    pub expected_result: Option<String>,
+}
+
+/// Verification function (Layer 6) - planned once, executed every round
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationFunction {
+    pub id: String,
+    pub description: String,
+    pub command: String,
+    pub expected_schema: Option<String>,
+    pub assertion: Option<String>,
+    pub timeout_secs: u64,
+}
+
+/// Result of running a verification function
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VfResult {
+    pub vf_id: String,
+    pub passed: bool,
+    pub output: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub duration_ms: u64,
+}
+
+/// Fix task generated from verification failure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixTask {
+    pub id: String,
+    pub description: String,
+    pub target_sandbox: SandboxName,
+    pub related_vf_id: String,
+    pub failure_output: String,
+}
+
+/// Merge result (Layer 5)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeResult {
+    pub success: bool,
+    pub merged_diff: String,
+    pub conflicts: Vec<MergeConflict>,
+    pub strategy_used: MergeStrategy,
+}
+
+/// Merge conflict information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeConflict {
+    pub file_path: String,
+    pub description: String,
+    pub severity: ConflictSeverity,
+    pub resolved: bool,
+    pub resolution: Option<String>,
+}
+
+/// Conflict severity levels
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConflictSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// Merge strategies
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MergeStrategy {
+    Auto,
+    Manual,
+    LlmAssisted,
+}
+
+/// Agent contribution to a merge
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentContribution {
+    pub agent_id: String,
+    pub task_id: String,
+    pub diff: String,
+    pub files_changed: Vec<String>,
+    pub lines_added: u32,
+    pub lines_removed: u32,
+}
+
+/// Health status of an agent
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentHealth {
+    Healthy,
+    Degraded,
+    Unresponsive,
+    Failed,
+}
+
+/// Circuit breaker states
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CircuitState {
+    Closed,
+    Open,
+    HalfOpen,
 }

@@ -113,7 +113,7 @@ impl Drop for Sandbox {
         for (_, container) in &self.containers {
             let _ = umount2(&container.root.join("workspace"), MntFlags::MNT_DETACH);
             if has_image {
-                let _ = umount2(&container.root.join("dev"),  MntFlags::MNT_DETACH);
+                let _ = umount2(&container.root.join("dev"), MntFlags::MNT_DETACH);
                 let _ = umount2(&container.root.join("proc"), MntFlags::MNT_DETACH);
             }
             let _ = umount2(&container.root, MntFlags::MNT_DETACH);
@@ -191,7 +191,11 @@ impl Sandbox {
                     log::info!("mounted {} via overlayfs into sandbox {}", img_ref, id);
                 }
                 Err(e) => {
-                    log::warn!("overlayfs mount failed for {} ({}); falling back to rootfs copy", img_ref, e);
+                    log::warn!(
+                        "overlayfs mount failed for {} ({}); falling back to rootfs copy",
+                        img_ref,
+                        e
+                    );
                     // Clear and copy instead
                     sandbox_upper = None;
                     copy_dir_recursive(&img_path, root.path())
@@ -342,30 +346,55 @@ impl Sandbox {
         subdir: Option<&str>,
     ) -> Result<()> {
         let target = subdir.unwrap_or("repo");
-        let mut cmd = format!(
-            "mkdir -p /workspace && cd /workspace && rm -rf '{}' && git clone '{}' '{}'",
-            target, repo_url, target
-        );
-        if let Some(branch) = branch {
-            cmd.push_str(&format!(" && cd '{}' && git checkout '{}'", target, branch));
-        }
 
-        let output = Command::new("chroot")
+        // SECURITY: Use Command args instead of shell string to prevent injection
+        let workspace = self.root.path().join("workspace");
+        let _ = std::fs::create_dir_all(&workspace);
+        let target_path = workspace.join(target);
+        let _ = std::fs::remove_dir_all(&target_path);
+
+        let mut clone_cmd = Command::new("chroot");
+        clone_cmd
             .arg(self.root.path())
-            .arg("/bin/sh")
-            .arg("-c")
-            .arg(&cmd)
-            .output()
-            .context("seed_git_repo chroot failed")?;
+            .arg("git")
+            .arg("clone")
+            .arg("--")
+            .arg(repo_url)
+            .arg(&target_path);
 
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(
-                "seed_git_repo failed: {}",
+        let output = clone_cmd.output().context("seed_git_repo clone failed")?;
+
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "git clone failed: {}",
                 String::from_utf8_lossy(&output.stderr)
-            ))
+            ));
         }
+
+        // Checkout branch if specified
+        if let Some(branch_name) = branch {
+            let mut checkout_cmd = Command::new("chroot");
+            checkout_cmd
+                .arg(self.root.path())
+                .arg("git")
+                .arg("-C")
+                .arg(&target_path)
+                .arg("checkout")
+                .arg("-b")
+                .arg(branch_name);
+
+            let output = checkout_cmd
+                .output()
+                .context("seed_git_repo checkout failed")?;
+            if !output.status.success() {
+                return Err(anyhow::anyhow!(
+                    "git checkout failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     /// write resource limits into cgroup v2 if available and running as root.
@@ -420,11 +449,7 @@ impl Sandbox {
     /// DEPRECATED: Use `prepare_tool_invocation()` + `execute_tool_unlocked()` for lock-free execution.
     /// This method has incomplete policy checks (only 5 tools covered).
     /// Invoke a tool in the sandbox root context.
-    pub fn invoke_tool(
-        &self,
-        name: &str,
-        input: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    pub fn invoke_tool(&self, name: &str, input: serde_json::Value) -> Result<serde_json::Value> {
         // reuse the same security policy checks as the container variant
         if let Some(policy) = &self.policy {
             match name {
@@ -577,8 +602,8 @@ impl Sandbox {
                     }
                 }
                 // Network access
-                "http_get" | "http_post" | "http_put" | "http_delete" | "http_patch" |
-                "download_file" | "websocket_send" => {
+                "http_get" | "http_post" | "http_put" | "http_delete" | "http_patch"
+                | "download_file" | "websocket_send" => {
                     if !policy.check_network_access(true) {
                         return Err(anyhow::anyhow!(
                             "security policy denied outbound network access"
@@ -683,7 +708,11 @@ impl Sandbox {
                 // overlayfs not available (e.g. running inside a container without
                 // CAP_SYS_ADMIN for nested overlay) — fall back to copying the
                 // sandbox rootfs so the container still has a usable filesystem.
-                log::warn!("overlay mount failed for container {} ({}); falling back to rootfs copy", id, e);
+                log::warn!(
+                    "overlay mount failed for container {} ({}); falling back to rootfs copy",
+                    id,
+                    e
+                );
                 copy_dir_recursive(self.root.path(), &root)
                     .context("copy sandbox rootfs into container root")?;
             }
@@ -829,13 +858,18 @@ impl Sandbox {
 
     /// create a checkpoint snapshot of a container's upper layer
     /// this is called from the privileged socket server context
-    pub fn checkpoint_container(&self, container_id: u64, snapshot_dir: &Path) -> anyhow::Result<()> {
-        let upper = self.get_container_upper(container_id)
+    pub fn checkpoint_container(
+        &self,
+        container_id: u64,
+        snapshot_dir: &Path,
+    ) -> anyhow::Result<()> {
+        let upper = self
+            .get_container_upper(container_id)
             .ok_or_else(|| anyhow::anyhow!("container {} not found", container_id))?;
-        
+
         // Ensure snapshot directory exists
         std::fs::create_dir_all(snapshot_dir)?;
-        
+
         // Use cp -a to preserve permissions and do a regular copy
         // (not hard links since we want a true snapshot)
         let cp_result = std::process::Command::new("cp")
@@ -843,22 +877,23 @@ impl Sandbox {
             .arg(upper.join("."))
             .arg(snapshot_dir)
             .output()?;
-        
+
         if !cp_result.status.success() {
             return Err(anyhow::anyhow!(
                 "checkpoint failed: {}",
                 String::from_utf8_lossy(&cp_result.stderr)
             ));
         }
-        
+
         Ok(())
     }
 
     /// restore a container's upper layer from a checkpoint snapshot
     pub fn restore_container(&self, container_id: u64, snapshot_dir: &Path) -> anyhow::Result<()> {
-        let upper = self.get_container_upper(container_id)
+        let upper = self
+            .get_container_upper(container_id)
             .ok_or_else(|| anyhow::anyhow!("container {} not found", container_id))?;
-        
+
         // Remove current upper contents
         if upper.exists() {
             // Make writable first (in case files are read-only)
@@ -870,21 +905,21 @@ impl Sandbox {
             std::fs::remove_dir_all(&upper)?;
         }
         std::fs::create_dir_all(&upper)?;
-        
+
         // Restore from snapshot
         let cp_result = std::process::Command::new("cp")
             .arg("-a")
             .arg(snapshot_dir.join("."))
             .arg(&upper)
             .output()?;
-        
+
         if !cp_result.status.success() {
             return Err(anyhow::anyhow!(
                 "restore failed: {}",
                 String::from_utf8_lossy(&cp_result.stderr)
             ));
         }
-        
+
         Ok(())
     }
 
@@ -898,7 +933,7 @@ impl Sandbox {
             // has a real image (see create_container).
             let _ = umount2(&container.root.join("workspace"), MntFlags::MNT_DETACH);
             if self.image_path.is_some() {
-                let _ = umount2(&container.root.join("dev"),  MntFlags::MNT_DETACH);
+                let _ = umount2(&container.root.join("dev"), MntFlags::MNT_DETACH);
                 let _ = umount2(&container.root.join("proc"), MntFlags::MNT_DETACH);
             }
             // Now unmount the container root itself
@@ -919,10 +954,6 @@ impl Sandbox {
     pub fn run_command(&self, cmd: &str) -> Result<String> {
         let root_path = self.root.path().to_owned();
         let _sid = self.id; // copy id so closure doesn't borrow self
-
-        // npm requires thread creation which fails in strict namespaces.
-        // detect npm commands and run them with chroot only (no namespace isolation).
-        let is_npm = cmd.starts_with("npm") || cmd.contains(" npm ");
 
         // extract policy limits for the closure
         let policy_limits = self
@@ -945,36 +976,27 @@ impl Sandbox {
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 )
                 .pre_exec(move || {
-                    // skip namespace isolation for npm commands
-                    if !is_npm {
-                        // unshare all available namespaces to isolate. if we're not
-                        // running as root (common during CI/tests) the call will fail
-                        // with EPERM; that's harmless, so log a warning and continue
-                        // without isolation rather than returning an error.
-                        if let Err(e) = sched::unshare(
-                            sched::CloneFlags::CLONE_NEWNS
-                                | sched::CloneFlags::CLONE_NEWPID
-                                | sched::CloneFlags::CLONE_NEWUSER
-                                | sched::CloneFlags::CLONE_NEWNET
-                                | sched::CloneFlags::CLONE_NEWIPC
-                                | sched::CloneFlags::CLONE_NEWUTS,
-                        ) {
-                            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-                        }
+                    // Always attempt namespace isolation - never skip it
+                    if let Err(e) = sched::unshare(
+                        sched::CloneFlags::CLONE_NEWNS
+                            | sched::CloneFlags::CLONE_NEWPID
+                            | sched::CloneFlags::CLONE_NEWUSER
+                            | sched::CloneFlags::CLONE_NEWNET
+                            | sched::CloneFlags::CLONE_NEWIPC
+                            | sched::CloneFlags::CLONE_NEWUTS,
+                    ) {
+                        // Namespace isolation is REQUIRED for security
+                        return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
                     }
-                    // chroot to our root path
+                    // chroot to our root path - REQUIRED for isolation
                     if let Err(e) = nix::unistd::chroot(&root_path) {
-                        // if permission denied, we can't isolate; log and continue
-                        if e == nix::errno::Errno::EPERM {
-                            log::warn!("chroot denied for sandbox {} (running unisolated)", _sid);
-                        } else {
-                            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-                        }
-                    } else {
-                        // only change directory if chroot succeeded
-                        if let Err(e) = nix::unistd::chdir("/") {
-                            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-                        }
+                        // SECURITY: Never fall through to unisolated execution
+                        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+                            format!("chroot required for sandbox isolation but failed: {}. Refusing to run unisolated.", e)));
+                    }
+                    // only change directory if chroot succeeded
+                    if let Err(e) = nix::unistd::chdir("/") {
+                        return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
                     }
                     // apply resource limits from security policy if set
                     // max memory (RLIMIT_AS = virtual address space)
