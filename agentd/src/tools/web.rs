@@ -1,4 +1,4 @@
-use crate::tools::common::{resolve_path, Tool, ToolContext};
+use crate::tools::common::{resolve_path, validate_url_for_http, Tool, ToolContext};
 use serde_json::{json, Value};
 use std::process::Command;
 use urlencoding;
@@ -16,7 +16,16 @@ impl Tool for WebSearchTool {
         let encoded = urlencoding::encode(query);
         let url = format!("https://api.duckduckgo.com/?q={}&format=json", encoded);
 
-        let output = Command::new("curl").arg("-s").arg(&url).output()?;
+        let output = Command::new("curl")
+            .arg("-s")
+            .arg("--connect-timeout")
+            .arg("10")
+            .arg("--max-time")
+            .arg("30")
+            .arg("--proto")
+            .arg("=https")
+            .arg(&url)
+            .output()?;
 
         let body = String::from_utf8_lossy(&output.stdout).to_string();
         match serde_json::from_str::<Value>(&body) {
@@ -39,7 +48,23 @@ impl Tool for WebFetchTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("web_fetch: missing url"))?;
 
-        let output = Command::new("curl").arg("-L").arg(url).output()?;
+        // SECURITY: Validate URL against SSRF
+        validate_url_for_http(url)?;
+
+        let output = Command::new("curl")
+            .arg("-L")
+            .arg("--max-redirs")
+            .arg("5")
+            .arg("--connect-timeout")
+            .arg("10")
+            .arg("--max-time")
+            .arg("60")
+            .arg("--proto")
+            .arg("=http,https")
+            .arg("--limit-rate")
+            .arg("5m")
+            .arg(url)
+            .output()?;
 
         Ok(json!({
             "content": String::from_utf8_lossy(&output.stdout).to_string(),
@@ -57,21 +82,27 @@ impl Tool for WebScreenshotTool {
         "web_screenshot"
     }
     fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
-        let _url = input["url"]
+        let url = input["url"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("web_screenshot: missing url"))?;
+
+        // SECURITY: Validate URL
+        validate_url_for_http(url)?;
+
         let output_str = input["output"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("web_screenshot: missing output"))?;
 
         let output_path = resolve_path(ctx, output_str);
 
-        // Try chromium, fallback to other browsers if not available
+        // Try chromium, use the actual URL
         let cmd_result = Command::new("chromium")
             .arg("--headless")
             .arg("--disable-gpu")
+            .arg("--no-sandbox")
+            .arg("--disable-dev-shm-usage")
             .arg(&format!("--screenshot={}", output_path.display()))
-            .arg("about:blank")
+            .arg(url)
             .output();
 
         match cmd_result {
@@ -83,6 +114,7 @@ impl Tool for WebScreenshotTool {
                 };
                 Ok(json!({
                     "success": output.status.success(),
+                    "path": output_path.to_string_lossy().to_string(),
                     "error": error_val
                 }))
             }
@@ -96,5 +128,3 @@ impl Tool for WebScreenshotTool {
         Box::new(WebScreenshotTool)
     }
 }
-
-// ============== AGENT COORDINATION TOOLS (6) ==============

@@ -90,10 +90,21 @@ impl Tool for CargoAddTool {
         let version = input.get("version").and_then(|v| v.as_str());
         let cwd_str = input.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
-        let cwd = resolve_path(ctx, cwd_str);
+        let cwd = resolve_path(ctx, cwd_str)?;
 
-        let check_cmd = format!("timeout 1 which cargo");
-        let check = Command::new("sh").arg("-c").arg(&check_cmd).output();
+        // SECURITY: Validate package name (alphanumeric, dash, underscore, @, /)
+        let valid_pkg = package.chars().all(|c| {
+            c.is_alphanumeric() || c == '-' || c == '_' || c == '@' || c == '/' || c == '.'
+        });
+        if !valid_pkg || package.is_empty() {
+            return Err(anyhow::anyhow!(
+                "cargo_add: invalid package name '{}'",
+                package
+            ));
+        }
+
+        // Check cargo availability using Command args
+        let check = Command::new("which").arg("cargo").output();
         if check.map(|o| !o.status.success()).unwrap_or(true) {
             return Ok(json!({
                 "success": true,
@@ -102,16 +113,33 @@ impl Tool for CargoAddTool {
             }));
         }
 
-        let pkg = if let Some(v) = version {
+        // SECURITY: Use Command args instead of shell string interpolation
+        let pkg_spec = if let Some(v) = version {
+            // Validate version string too
+            let valid_ver = v.chars().all(|c| {
+                c.is_alphanumeric()
+                    || c == '.'
+                    || c == '-'
+                    || c == '+'
+                    || c == '^'
+                    || c == '~'
+                    || c == '='
+                    || c == ' '
+                    || c == ','
+            });
+            if !valid_ver {
+                return Err(anyhow::anyhow!("cargo_add: invalid version '{}'", v));
+            }
             format!("{}@{}", package, v)
         } else {
             package.to_string()
         };
 
-        let cmd = format!("timeout 5 cargo add {} 2>/dev/null", pkg);
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
+        let output = Command::new("timeout")
+            .arg("5")
+            .arg("cargo")
+            .arg("add")
+            .arg(&pkg_spec)
             .current_dir(&cwd)
             .output();
 
