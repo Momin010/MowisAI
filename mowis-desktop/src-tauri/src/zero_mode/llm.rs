@@ -32,6 +32,7 @@ pub struct ToolCallRequest {
 #[derive(Debug, Clone)]
 pub enum MessageContent {
     Text(String),
+    Image { data_url: String, media_type: String },
     ToolCall(ToolCallRequest),
     ToolResult { call_id: String, content: String },
 }
@@ -45,6 +46,13 @@ pub struct LlmMessage {
 impl LlmMessage {
     pub fn user(text: impl Into<String>) -> Self {
         Self { role: Role::User, parts: vec![MessageContent::Text(text.into())] }
+    }
+    pub fn user_with_images(text: impl Into<String>, images: Vec<(String, String)>) -> Self {
+        let mut parts = vec![MessageContent::Text(text.into())];
+        for (data_url, media_type) in images {
+            parts.push(MessageContent::Image { data_url, media_type });
+        }
+        Self { role: Role::User, parts }
     }
     pub fn system(text: impl Into<String>) -> Self {
         Self { role: Role::System, parts: vec![MessageContent::Text(text.into())] }
@@ -613,8 +621,29 @@ async fn call_openai_compat(
         match msg.role {
             Role::System => {} // already added above
             Role::User => {
-                let text = msg.parts.iter().filter_map(|p| if let MessageContent::Text(t) = p { Some(t.as_str()) } else { None }).collect::<Vec<_>>().join("\n");
-                oai_messages.push(json!({ "role": "user", "content": text }));
+                let has_images = msg.parts.iter().any(|p| matches!(p, MessageContent::Image { .. }));
+                if has_images {
+                    // OpenAI vision format: content is an array of text + image_url blocks
+                    let mut content_parts: Vec<Value> = Vec::new();
+                    for part in &msg.parts {
+                        match part {
+                            MessageContent::Text(t) if !t.is_empty() => {
+                                content_parts.push(json!({ "type": "text", "text": t }));
+                            }
+                            MessageContent::Image { data_url, .. } => {
+                                content_parts.push(json!({
+                                    "type": "image_url",
+                                    "image_url": { "url": data_url }
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    oai_messages.push(json!({ "role": "user", "content": content_parts }));
+                } else {
+                    let text = msg.parts.iter().filter_map(|p| if let MessageContent::Text(t) = p { Some(t.as_str()) } else { None }).collect::<Vec<_>>().join("\n");
+                    oai_messages.push(json!({ "role": "user", "content": text }));
+                }
             }
             Role::Assistant => {
                 let text: String = msg.parts.iter().filter_map(|p| if let MessageContent::Text(t) = p { Some(t.as_str()) } else { None }).collect::<Vec<_>>().join("");

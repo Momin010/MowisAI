@@ -632,10 +632,15 @@ a { text-decoration: none; color: inherit; }
 .btn-outline:hover { border-color: rgba(255,255,255,0.18); color: var(--tx); background: rgba(255,255,255,0.03); }
 .btn-outline.sm { font-size: 11px; padding: 4px 9px; }
 .btn-stop {
-  font-family: var(--sans); font-size: 11px;
-  background: rgba(240,80,80,0.12); color: var(--red);
-  border: 1px solid rgba(240,80,80,0.2); border-radius: var(--r);
-  padding: 4px 10px;
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  background: rgba(240,80,80,0.10); color: var(--red);
+  border: 1px solid rgba(240,80,80,0.15); border-radius: 50%;
+  padding: 0;
+  cursor: pointer;
+  transition: background 0.12s;
+  flex-shrink: 0;
 }
 .btn-stop:hover { background: rgba(240,80,80,0.18); }
 .btn-send {
@@ -643,10 +648,23 @@ a { text-decoration: none; color: inherit; }
   background: var(--blue); color: #fff;
   border: none; border-radius: var(--r);
   padding: 6px 14px;
+  cursor: pointer;
   transition: background 0.12s;
 }
 .btn-send:hover { background: #5099ff; }
 .btn-send:disabled { opacity: 0.4; pointer-events: none; }
+
+/* Compose send — icon-only circle */
+.compose-row .btn-send {
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  padding: 0;
+  font-size: 0;
+  flex-shrink: 0;
+}
+.compose-row .btn-send svg { width: 14px; height: 14px; }
 
 /* ── Home page ───────────────────────────────────────── */
 .home-empty {
@@ -1263,15 +1281,17 @@ a { text-decoration: none; color: inherit; }
 .chat-compose {
   flex-shrink: 0;
   padding: 8px 16px 12px;
+  position: relative;
+  max-width: 680px;
+  margin: 0 auto;
+  width: 100%;
 }
 .compose-inner {
   background: var(--bg-2);
   border: 1px solid var(--line-2);
-  border-radius: var(--r2);
+  border-radius: 16px;
   padding: 10px 14px;
-  display: flex; flex-direction: column; gap: 8px;
-  max-width: 680px;
-  margin: 0 auto;
+  display: flex; flex-direction: column; gap: 6px;
 }
 .compose-textarea {
   background: transparent; border: none; outline: none;
@@ -1281,23 +1301,30 @@ a { text-decoration: none; color: inherit; }
 }
 .compose-textarea::placeholder { color: var(--tx-4); }
 .compose-row {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 4px;
+}
+.compose-actions-left {
+  display: flex; align-items: center; gap: 2px;
+}
+.compose-actions-right {
+  display: flex; align-items: center; gap: 6px;
 }
 .compose-session-info {
   flex: 1;
   font-family: var(--mono); font-size: 9px; color: var(--tx-5);
   letter-spacing: 0.04em;
+  min-width: 0;
 }
 
 /* ── Attach & Mic buttons ────────────────────────────── */
 .btn-icon {
   display: inline-flex;
   align-items: center; justify-content: center;
-  width: 32px; height: 32px;
+  width: 28px; height: 28px;
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--r);
+  border-radius: 8px;
   color: var(--tx-4);
   cursor: pointer;
   transition: color 0.15s;
@@ -1305,73 +1332,63 @@ a { text-decoration: none; color: inherit; }
   position: relative;
 }
 .btn-icon:hover { color: var(--tx-2); }
-.btn-icon .material-symbols-outlined { font-size: 20px; }
+.btn-icon .material-symbols-outlined { font-size: 18px; }
 
 /* Mic button — icon + canvas overlay */
-.btn-mic { 
-  position: relative; 
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+.btn-mic {
+  position: relative;
+  transition: all 0.2s ease;
 }
-.btn-mic .mic-icon { 
-  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
+.btn-mic .mic-icon {
+  transition: opacity 0.2s ease;
 }
 .btn-mic .mic-bars {
   position: absolute;
   inset: 0;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: opacity 0.2s ease;
 }
 .btn-mic.recording .mic-icon { opacity: 0; }
 .btn-mic.recording .mic-bars { opacity: 1; }
-.btn-mic.recording { 
+.btn-mic.recording {
   color: var(--blue);
-  background: rgba(59, 139, 255, 0.08);
-  border-color: rgba(59, 139, 255, 0.3);
 }
 
-/* Waveform overlay when recording */
+/* Waveform overlay — anchored on top of the input bar */
 .waveform-overlay {
-  position: fixed;
-  left: 50%;
-  bottom: 100px;
-  transform: translateX(-50%);
-  width: 90%;
-  max-width: 700px;
-  height: 52px;
-  background: rgba(18, 18, 20, 0.92);
-  backdrop-filter: blur(40px) saturate(180%);
-  -webkit-backdrop-filter: blur(40px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 26px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  margin-bottom: 6px;
+  height: 44px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: 14px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 20px;
-  padding: 0 20px;
+  gap: 12px;
+  padding: 0 12px;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.25s ease, transform 0.25s ease;
-  z-index: 1000;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 10;
 }
 .waveform-overlay.active {
   opacity: 1;
   pointer-events: all;
+  transform: translateY(0);
 }
 .waveform-canvas {
   flex: 1;
-  height: 32px;
+  height: 28px;
   min-width: 0;
 }
-.waveform-overlay .waveform-actions {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-}
 .waveform-overlay .waveform-btn {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   border: none;
   background: transparent;
@@ -1379,15 +1396,16 @@ a { text-decoration: none; color: inherit; }
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: opacity 0.2s ease;
-  color: var(--tx-3);
+  transition: color 0.15s;
+  color: var(--tx-4);
+  flex-shrink: 0;
 }
 .waveform-overlay .waveform-btn:hover {
-  opacity: 0.6;
+  color: var(--tx-2);
 }
 .waveform-overlay .waveform-btn svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 /* ── Attachment preview strip ────────────────────────── */

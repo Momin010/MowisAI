@@ -146,34 +146,39 @@ const GEMINI_MODELS: &[ModelOption] = &[
 
 const MIMO_MODELS: &[ModelOption] = &[
     ModelOption {
-        id: "MiMo-V2.5-Pro",
+        id: "mimo-v2.5-pro",
         label: "MiMo-V2.5 Pro",
-        note: "Flagship — highest quality",
+        note: "Flagship — 1T params, 1M context",
     },
     ModelOption {
-        id: "MiMo-V2.5",
+        id: "mimo-v2.5",
         label: "MiMo-V2.5",
-        note: "Balanced performance",
+        note: "Native omnimodal — text/image/video/audio",
     },
     ModelOption {
-        id: "MiMo-V2-Pro",
+        id: "mimo-v2-pro",
         label: "MiMo-V2 Pro",
-        note: "Previous gen flagship",
+        note: "Previous flagship — high-tier reasoning",
     },
     ModelOption {
-        id: "MiMo-V2-Omni",
+        id: "mimo-v2-omni-0327",
         label: "MiMo-V2 Omni",
-        note: "Multimodal capabilities",
+        note: "Perception — see, hear, act",
     },
     ModelOption {
-        id: "MiMo-V2.5-TTS",
+        id: "mimo-v2-flash",
+        label: "MiMo-V2 Flash",
+        note: "High speed — 309B MoE, 256K context",
+    },
+    ModelOption {
+        id: "mimo-v2.5-tts",
         label: "MiMo-V2.5 TTS",
-        note: "Text-to-speech",
+        note: "Voice cloning and speech",
     },
     ModelOption {
-        id: "MiMo-V2-TTS",
-        label: "MiMo-V2 TTS",
-        note: "Previous gen TTS",
+        id: "mimo-v2.5-asr",
+        label: "MiMo-V2.5 ASR",
+        note: "Speech recognition across dialects",
     },
 ];
 

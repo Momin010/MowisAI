@@ -265,6 +265,7 @@ pub async fn start_session(
     project_path: Option<String>,
     repo_url: Option<String>,
     repo_source: Option<String>,
+    images: Option<Vec<ImageAttachment>>,
 ) -> Result<String, String> {
     let session_id = Uuid::new_v4().to_string();
     let cfg = state.config.lock().unwrap().clone();
@@ -382,6 +383,7 @@ pub async fn start_session(
                 prompt,
                 config: cfg,
                 workspace: ws,
+                images: images.unwrap_or_default(),
             }).await;
         } else {
             *state.zero_workspace.lock().unwrap() = None;
@@ -428,6 +430,7 @@ pub async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String>
 pub async fn send_message(
     state: State<'_, Arc<AppState>>,
     message: String,
+    images: Option<Vec<ImageAttachment>>,
 ) -> Result<(), String> {
     let session_id = state.current_session_id.lock().unwrap().clone()
         .ok_or_else(|| "No active session".to_string())?;
@@ -450,6 +453,7 @@ pub async fn send_message(
             message,
             config: cfg,
             workspace,
+            images: images.unwrap_or_default(),
         }).await;
     }
 

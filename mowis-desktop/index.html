@@ -206,7 +206,8 @@
             <div class="home-title">What should the agents build?</div>
             <div class="home-sub">MowisAI orchestrates hundreds of parallel AI agents in isolated sandboxes.</div>
           </div>
-          <div class="home-compose" id="home-compose">
+            <div class="home-compose" id="home-compose">
+            <div class="compose-attachments hidden" id="home-attachments"></div>
             <textarea id="home-input" class="home-textarea" placeholder="Describe your task… e.g. build a REST API with OAuth2, rate limiting, and OpenAPI docs" rows="3"></textarea>
             <div class="home-compose-row">
               <select id="home-mode" class="mini-select">
@@ -278,21 +279,44 @@
 
           <!-- Composer -->
           <div class="chat-compose" id="chat-compose">
+            <!-- Waveform overlay — sits on top of the input bar -->
+            <div id="waveform-overlay" class="waveform-overlay" aria-hidden="true">
+              <button class="waveform-btn" id="waveform-cancel" title="Cancel" aria-label="Cancel recording">
+                <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                  <line x1="4" y1="4" x2="14" y2="14"/>
+                  <line x1="14" y1="4" x2="4" y2="14"/>
+                </svg>
+              </button>
+              <canvas id="waveform-canvas" class="waveform-canvas" width="600" height="32"></canvas>
+              <button class="waveform-btn" id="waveform-done" title="Done" aria-label="Finish recording">
+                <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="3,9 7,13 15,5"/>
+                </svg>
+              </button>
+            </div>
             <div class="compose-inner">
               <div class="compose-attachments hidden" id="compose-attachments"></div>
               <textarea id="chat-input" class="compose-textarea" placeholder="Follow up…" rows="1"></textarea>
               <div class="compose-row">
-                <button class="btn-icon" id="btn-chat-attach" title="Attach files" aria-label="Attach files">
-                  <span class="material-symbols-outlined">attach_file</span>
-                </button>
-                <input type="file" id="chat-file-input" multiple accept="image/*,.pdf,.doc,.docx,.txt,.json,.csv,.md,.py,.js,.ts,.rs,.toml,.yaml,.yml" style="display:none">
-                <button class="btn-icon btn-mic" id="btn-chat-mic" title="Dictate" aria-label="Dictate">
-                  <span class="mic-icon material-symbols-outlined">mic</span>
-                  <canvas class="mic-bars" width="20" height="20"></canvas>
-                </button>
+                <div class="compose-actions-left">
+                  <button class="btn-icon" id="btn-chat-attach" title="Attach files" aria-label="Attach files">
+                    <span class="material-symbols-outlined">attach_file</span>
+                  </button>
+                  <input type="file" id="chat-file-input" multiple accept="image/*,.pdf,.doc,.docx,.txt,.json,.csv,.md,.py,.js,.ts,.rs,.toml,.yaml,.yml" style="display:none">
+                  <button class="btn-icon btn-mic" id="btn-chat-mic" title="Dictate" aria-label="Dictate">
+                    <span class="mic-icon material-symbols-outlined">mic</span>
+                    <canvas class="mic-bars" width="20" height="20"></canvas>
+                  </button>
+                </div>
                 <div class="compose-session-info" id="compose-session-info"></div>
-                <button class="btn-stop" id="btn-stop" style="display:none">Stop</button>
-                <button class="btn-send" id="btn-chat-send">Send</button>
+                <div class="compose-actions-right">
+                  <button class="btn-stop" id="btn-stop" style="display:none" title="Stop">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="1" y="1" width="10" height="10" rx="2"/></svg>
+                  </button>
+                  <button class="btn-send" id="btn-chat-send">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 14l12-6L2 2v5l8 1-8 1z" fill="currentColor"/></svg>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -461,7 +485,10 @@
           </div>
           <div class="form-row">
             <label class="form-label">Model<span class="form-hint">Specific model variant</span></label>
-            <div class="form-ctrl"><input type="text" id="set-model" class="form-input" value="gemini-2.0-flash" /></div>
+            <div class="form-ctrl">
+              <select id="set-model" class="form-select"></select>
+              <input type="text" id="set-model-custom" class="form-input hidden" placeholder="Custom model ID" />
+            </div>
           </div>
           <div class="form-row">
             <label class="form-label">API Key<span class="form-hint">Stored locally, never transmitted</span></label>
@@ -573,21 +600,6 @@
 
 </div><!-- /#app -->
 
-<!-- Waveform overlay for voice input -->
-<div id="waveform-overlay" class="waveform-overlay" aria-hidden="true">
-  <button class="waveform-btn" id="waveform-cancel" title="Cancel" aria-label="Cancel recording">
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-      <line x1="4" y1="4" x2="14" y2="14"/>
-      <line x1="14" y1="4" x2="4" y2="14"/>
-    </svg>
-  </button>
-  <canvas id="waveform-canvas" class="waveform-canvas" width="600" height="32"></canvas>
-  <button class="waveform-btn" id="waveform-done" title="Done" aria-label="Finish recording">
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="3,9 7,13 15,5"/>
-    </svg>
-  </button>
-</div>
 
 <!-- Repository picker -->
 <div id="repo-modal" class="repo-modal hidden" aria-hidden="true">

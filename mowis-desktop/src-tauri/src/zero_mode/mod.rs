@@ -23,7 +23,7 @@ use llm::{LlmMessage, MessageContent, Role, ToolCallRequest};
 use tools::{execute_tool, tool_definitions};
 use workspace::WorkspaceInfo;
 
-use crate::types::{BridgeEvent, Config, Task, TaskStatus, FileChange, FileAction};
+use crate::types::{BridgeEvent, Config, Task, TaskStatus, FileChange, FileAction, ImageAttachment};
 use crate::zero_mode::llm::LlmResponse;
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -144,6 +144,7 @@ pub async fn run_zero_session(
     prompt: String,
     config: Config,
     workspace: WorkspaceInfo,
+    images: Vec<ImageAttachment>,
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
     let _ws_path = Path::new(&workspace.path).to_path_buf();
@@ -154,10 +155,10 @@ pub async fn run_zero_session(
     
     match intent {
         UserIntent::Chat => {
-            run_chat_mode(session_id, prompt, config, workspace, event_tx).await;
+            run_chat_mode(session_id, prompt, config, workspace, images, event_tx).await;
         }
         UserIntent::Build => {
-            run_build_mode(session_id, prompt, config, workspace, event_tx).await;
+            run_build_mode(session_id, prompt, config, workspace, images, event_tx).await;
         }
     }
 }
@@ -168,6 +169,7 @@ async fn run_chat_mode(
     prompt: String,
     config: Config,
     _workspace: WorkspaceInfo,
+    images: Vec<ImageAttachment>,
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
     // Tell the frontend we're in chat mode
@@ -189,8 +191,13 @@ async fn run_chat_mode(
     // Load previous conversation history
     let mut messages = get_session_history(&session_id);
     
-    // Append new user message
-    messages.push(LlmMessage::user(prompt.clone()));
+    // Append new user message (with images if present)
+    let img_tuples: Vec<(String, String)> = images.iter().map(|i| (i.data_url.clone(), i.media_type.clone())).collect();
+    if img_tuples.is_empty() {
+        messages.push(LlmMessage::user(prompt.clone()));
+    } else {
+        messages.push(LlmMessage::user_with_images(prompt.clone(), img_tuples));
+    }
 
     // Call LLM without tools
     let response = match llm::call_llm(&config, system_prompt, &messages, &[]).await {
@@ -228,6 +235,7 @@ async fn run_build_mode(
     prompt: String,
     config: Config,
     workspace: WorkspaceInfo,
+    images: Vec<ImageAttachment>,
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
     let ws_path = Path::new(&workspace.path).to_path_buf();
@@ -261,8 +269,13 @@ async fn run_build_mode(
     let system_prompt = system_prompt_for(&workspace, frontend_skills.as_deref());
     let mut messages: Vec<LlmMessage> = get_session_history(&session_id);
     
-    // Append new user message
-    messages.push(LlmMessage::user(prompt.clone()));
+    // Append new user message (with images if present)
+    let img_tuples: Vec<(String, String)> = images.iter().map(|i| (i.data_url.clone(), i.media_type.clone())).collect();
+    if img_tuples.is_empty() {
+        messages.push(LlmMessage::user(prompt.clone()));
+    } else {
+        messages.push(LlmMessage::user_with_images(prompt.clone(), img_tuples));
+    }
 
     let mut task_counter: usize = 0;
     let mut total_tool_calls: usize = 0;

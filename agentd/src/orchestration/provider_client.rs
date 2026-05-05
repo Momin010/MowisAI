@@ -90,7 +90,7 @@ impl LlmConfig {
                 Ok(Self {
                     provider: AiProvider::Mimo,
                     model: if config.mimo_model.is_empty() {
-                        "MiMo-V2.5-Pro".into()
+                        "mimo-v2.5-pro".into()
                     } else {
                         config.mimo_model.clone()
                     },

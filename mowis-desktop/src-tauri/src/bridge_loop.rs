@@ -110,15 +110,15 @@ pub fn start_bridge(
                             });
                         }
 
-                        BridgeCommand::StartZeroMode { session_id, prompt, config, workspace } => {
+                        BridgeCommand::StartZeroMode { session_id, prompt, config, workspace, images } => {
                             tokio::spawn(async move {
-                                zero_mode::run_zero_session(session_id, prompt, config, workspace, tx).await;
+                                zero_mode::run_zero_session(session_id, prompt, config, workspace, images, tx).await;
                             });
                         }
 
-                        BridgeCommand::ContinueZeroMode { session_id, message, config, workspace } => {
+                        BridgeCommand::ContinueZeroMode { session_id, message, config, workspace, images } => {
                             tokio::spawn(async move {
-                                zero_mode::run_zero_session(session_id, message, config, workspace, tx).await;
+                                zero_mode::run_zero_session(session_id, message, config, workspace, images, tx).await;
                             });
                         }
                     }

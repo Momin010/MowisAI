@@ -738,19 +738,10 @@ async function setupListeners() {
 async function startSession(prompt, mode, repo = State.selectedRepo) {
   if (!prompt.trim() && pendingAttachments.length === 0) { toast('Enter a task description', 'error'); return; }
 
-  // Prepend attachment info to prompt
-  let fullPrompt = prompt.trim();
-  if (pendingAttachments.length > 0) {
-    const attachInfo = pendingAttachments.map(f => {
-      if (f.type.startsWith('image/') && f.dataUrl) {
-        return `[Attached image: ${f.name}]\n${f.dataUrl}`;
-      }
-      return `[Attached file: ${f.name} (${f.type || 'unknown'}, ${Math.round(f.size/1024)}KB)]`;
-    }).join('\n');
-    fullPrompt = attachInfo + '\n\n' + fullPrompt;
-    pendingAttachments.length = 0;
-    renderAttachments();
-  }
+  // Build attachment payload — images are NOT embedded in the text
+  const attach = buildAttachmentPayload();
+  const fullPrompt = prompt.trim();
+  clearAttachments();
 
   // Reset chat
   State.tasks = {};
@@ -770,8 +761,9 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
 
   setSessionActive(true);
 
-  // Show user message immediately
-  appendChatMessage({ kind: 'user', content: fullPrompt, ts: nowTs() });
+  // Show user message immediately — file refs only, no binary data
+  const displayMsg = attach.fileRef ? `${fullPrompt}\n${attach.fileRef}` : fullPrompt;
+  appendChatMessage({ kind: 'user', content: displayMsg, ts: nowTs() });
   if (repo?.path) {
     appendChatMessage({
       kind: 'system',
@@ -790,6 +782,7 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
       projectPath: repo?.path || null,
       repoUrl: repo?.repo_url || repo?.remote_url || null,
       repoSource: repo?.source || null,
+      images: attach.images.length > 0 ? attach.images : null,
     });
     State.sessionId = id;
     setText('compose-session-info', `session ${id.slice(0,12)}`);
@@ -2012,10 +2005,89 @@ function renderUsageTable(hist) {
   </table>`;
 }
 
+// ── Provider → Model mapping ─────────────────────────────────────────────────
+
+const PROVIDER_MODELS = {
+  gemini: [
+    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — frontier' },
+    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — fast' },
+    { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite — lightweight' },
+    { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+  ],
+  vertex: [
+    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+  ],
+  anthropic: [
+    { id: 'claude-opus-4-7', label: 'Claude Opus 4.7 — most capable' },
+    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 — smart + fast' },
+    { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 — fast' },
+  ],
+  openai: [
+    { id: 'gpt-4o', label: 'GPT-4o — flagship' },
+    { id: 'o1', label: 'o1 — reasoning' },
+    { id: 'o3-mini', label: 'o3-mini — fast reasoning' },
+    { id: 'gpt-4o-mini', label: 'GPT-4o Mini — cheap' },
+  ],
+  grok: [
+    { id: 'grok-3', label: 'Grok-3 — flagship' },
+    { id: 'grok-3-fast', label: 'Grok-3 Fast' },
+    { id: 'grok-3-mini', label: 'Grok-3 Mini' },
+  ],
+  groq: [
+    { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B — versatile' },
+    { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B — instant' },
+    { id: 'mixtral-8x7b-32768', label: 'Mixtral 8x7B' },
+  ],
+  mimo: [
+    { id: 'mimo-v2.5-pro', label: 'MiMo-V2.5 Pro — 1T flagship' },
+    { id: 'mimo-v2.5', label: 'MiMo-V2.5 — omnimodal' },
+    { id: 'mimo-v2-pro', label: 'MiMo-V2 Pro' },
+    { id: 'mimo-v2-omni-0327', label: 'MiMo-V2 Omni — see/hear/act' },
+    { id: 'mimo-v2-flash', label: 'MiMo-V2 Flash — fast' },
+    { id: 'mimo-v2.5-asr', label: 'MiMo-V2.5 ASR — speech recognition' },
+    { id: 'mimo-v2.5-tts', label: 'MiMo-V2.5 TTS — voice' },
+  ],
+};
+
+function populateModelDropdown(provider) {
+  const sel = $('set-model');
+  const custom = $('set-model-custom');
+  if (!sel) return;
+
+  const models = PROVIDER_MODELS[provider] || [];
+  sel.innerHTML = models.map(m => `<option value="${m.id}">${m.label}</option>`).join('')
+    + '<option value="__custom">Custom…</option>';
+
+  // Show/hide custom input
+  sel.onchange = () => {
+    if (sel.value === '__custom') {
+      custom?.classList.remove('hidden');
+      custom?.focus();
+    } else {
+      custom?.classList.add('hidden');
+    }
+  };
+}
+
 function loadSettings() {
   const c = State.config || {};
   setVal('set-provider', c.provider || 'gemini');
-  setVal('set-model', c.model || '');
+  populateModelDropdown(c.provider || 'gemini');
+
+  // Set model value — try dropdown first, fall back to custom input
+  const modelSel = $('set-model');
+  const modelCustom = $('set-model-custom');
+  const models = PROVIDER_MODELS[c.provider || 'gemini'] || [];
+  const knownModel = models.some(m => m.id === c.model);
+  if (c.model && knownModel && modelSel) {
+    modelSel.value = c.model;
+    modelCustom?.classList.add('hidden');
+  } else if (c.model && modelSel) {
+    modelSel.value = '__custom';
+    if (modelCustom) { modelCustom.value = c.model; modelCustom.classList.remove('hidden'); }
+  }
+
   setVal('set-api-key', c.api_key || '');
   setVal('set-gcp', c.gcp_project || '');
   setVal('set-gcp-region', c.gcp_region || 'us-central1');
@@ -2053,12 +2125,18 @@ function setVal(id, val) {
 function getVal(id) { const e = $(id); if (!e) return ''; if (e.type === 'checkbox') return e.checked; return e.value; }
 
 async function saveSettings() {
+  // Model: from dropdown or custom input
+  const modelSel = $('set-model');
+  const modelCustom = $('set-model-custom');
+  let modelVal = modelSel?.value || '';
+  if (modelVal === '__custom') modelVal = modelCustom?.value?.trim() || '';
+
   const config = {
     socket_path: getVal('set-socket'),
     max_agents: parseInt(getVal('set-max-agents') || '100'),
     mode: getVal('set-mode'),
     provider: getVal('set-provider'),
-    model: getVal('set-model'),
+    model: modelVal,
     api_key: getVal('set-api-key'),
     gcp_project: getVal('set-gcp'),
     gcp_region: getVal('set-gcp-region'),
@@ -2492,6 +2570,7 @@ function setupHandlers() {
     if (rowGcp) rowGcp.style.display = showVertex ? '' : 'none';
     if (rowGcpRegion) rowGcpRegion.style.display = showVertex ? '' : 'none';
     if (rowSaKey) rowSaKey.style.display = showVertex ? '' : 'none';
+    populateModelDropdown(e.target.value);
     if (e.tagName === 'SELECT') syncCustomSelect(e);
   });
   $('set-mode')?.addEventListener('change', (e) => {
@@ -2549,28 +2628,20 @@ async function sendChatMessage() {
   const text = input.value.trim();
   if (!text && pendingAttachments.length === 0) return;
 
-  // Prepend attachment info
-  let fullText = text;
-  if (pendingAttachments.length > 0) {
-    const attachInfo = pendingAttachments.map(f => {
-      if (f.type.startsWith('image/') && f.dataUrl) {
-        return `[Attached image: ${f.name}]\n${f.dataUrl}`;
-      }
-      return `[Attached file: ${f.name} (${f.type || 'unknown'}, ${Math.round(f.size/1024)}KB)]`;
-    }).join('\n');
-    fullText = attachInfo + '\n\n' + text;
-    pendingAttachments.length = 0;
-    renderAttachments();
-  }
+  // Build attachment payload — images are NOT embedded in the text
+  const attach = buildAttachmentPayload();
+  const fullText = text;
+  clearAttachments();
 
-  // Add user message to UI immediately
-  appendChatMessage({ kind: 'user', content: fullText, ts: nowTs() });
+  // Show user message — file refs only, no binary data
+  const displayMsg = attach.fileRef ? `${fullText}\n${attach.fileRef}` : fullText;
+  appendChatMessage({ kind: 'user', content: displayMsg, ts: nowTs() });
   input.value = '';
   autoResize.call(input);
 
-  // Send to backend
+  // Send to backend — images as separate payload
   try {
-    await invoke('send_message', { message: fullText });
+    await invoke('send_message', { message: fullText, images: attach.images.length > 0 ? attach.images : null });
   } catch (err) {
     appendChatMessage({ kind: 'error', content: `Failed to send message: ${err}`, ts: nowTs() });
   }
@@ -2831,49 +2902,82 @@ function initSpeechRecognition() {
 const pendingAttachments = [];
 
 function renderAttachments() {
-  const container = $('compose-attachments');
-  if (!container) return;
-  if (pendingAttachments.length === 0) {
-    container.classList.add('hidden');
-    container.innerHTML = '';
-    return;
-  }
-  container.classList.remove('hidden');
-  container.innerHTML = pendingAttachments.map((f, i) => {
-    const isImage = f.type.startsWith('image/');
-    const preview = isImage && f.dataUrl
-      ? `<img src="${f.dataUrl}" alt="${escHtml(f.name)}">`
-      : `<span style="font-size:14px">${fileIcon(f.name)}</span>`;
-    return `<div class="attach-chip">${preview}<span class="attach-name">${escHtml(f.name)}</span><span class="attach-remove" data-idx="${i}">&times;</span></div>`;
-  }).join('');
-  container.querySelectorAll('.attach-remove').forEach(el => {
-    el.addEventListener('click', () => {
-      pendingAttachments.splice(Number(el.dataset.idx), 1);
-      renderAttachments();
+  // Render in BOTH compose areas (home + chat)
+  ['home-attachments', 'compose-attachments'].forEach(id => {
+    const container = $(id);
+    if (!container) return;
+    if (pendingAttachments.length === 0) {
+      container.classList.add('hidden');
+      container.innerHTML = '';
+      return;
+    }
+    container.classList.remove('hidden');
+    container.innerHTML = pendingAttachments.map((f, i) => {
+      if (f.isImage && f.dataUrl) {
+        return `<div class="attach-chip attach-img">
+          <img src="${f.dataUrl}" alt="${escHtml(f.name)}">
+          <span class="attach-name">${escHtml(f.name)}</span>
+          <button class="attach-remove" data-idx="${i}" title="Remove">&times;</button>
+        </div>`;
+      }
+      return `<div class="attach-chip">
+        <span class="material-symbols-outlined" style="font-size:14px">description</span>
+        <span class="attach-name">${escHtml(f.name)}</span>
+        <button class="attach-remove" data-idx="${i}" title="Remove">&times;</button>
+      </div>`;
+    }).join('');
+    container.querySelectorAll('.attach-remove').forEach(el => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pendingAttachments.splice(Number(el.dataset.idx), 1);
+        renderAttachments();
+      });
     });
   });
 }
 
-function fileIcon(name) {
-  const ext = name.split('.').pop().toLowerCase();
-  const icons = { pdf: '📄', doc: '📝', docx: '📝', txt: '📃', json: '📋', csv: '📊', md: '📝', py: '🐍', js: '📜', ts: '📜', rs: '🦀' };
-  return icons[ext] || '📎';
-}
-
 function handleFileSelect(files) {
   for (const file of files) {
-    const entry = { name: file.name, type: file.type, size: file.size, dataUrl: null, base64: null };
-    if (file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = () => { entry.dataUrl = reader.result; entry.base64 = reader.result.split(',')[1]; renderAttachments(); };
+    const isImage = file.type.startsWith('image/');
+    const entry = { name: file.name, type: file.type, size: file.size, isImage, dataUrl: null, base64: null };
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (isImage) {
+        entry.dataUrl = reader.result; // full data:image/...;base64,... URL for preview
+        entry.base64 = reader.result.split(',')[1]; // raw base64 for API
+      } else {
+        entry.base64 = btoa(reader.result);
+      }
+      renderAttachments();
+    };
+    if (isImage) {
       reader.readAsDataURL(file);
     } else {
-      const reader = new FileReader();
-      reader.onload = () => { entry.base64 = btoa(reader.result); renderAttachments(); };
       reader.readAsBinaryString(file);
     }
     pendingAttachments.push(entry);
   }
+  renderAttachments();
+}
+
+function buildAttachmentPayload() {
+  // Returns { text: string, images: [{data_url, media_type}] }
+  // Text is NEVER polluted with base64 data
+  const images = [];
+  const fileNames = [];
+  for (const f of pendingAttachments) {
+    if (f.isImage && f.base64) {
+      images.push({ data_url: `data:${f.type};base64,${f.base64}`, media_type: f.type, name: f.name });
+      fileNames.push(`[image: ${f.name}]`);
+    } else if (f.base64) {
+      fileNames.push(`[file: ${f.name} (${f.type}, ${Math.round(f.size/1024)}KB)]`);
+    }
+  }
+  return { fileRef: fileNames.join(' '), images };
+}
+
+function clearAttachments() {
+  pendingAttachments.length = 0;
   renderAttachments();
 }
 

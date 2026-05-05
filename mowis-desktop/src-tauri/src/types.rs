@@ -155,6 +155,13 @@ pub struct GitRepositoryInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub data_url: String,
+    pub media_type: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryContext {
     pub project_path: String,
     pub repo_source: String,
@@ -254,6 +261,7 @@ pub enum BridgeCommand {
         prompt: String,
         config: Config,
         workspace: zero_mode::ZeroWorkspaceInfo,
+        images: Vec<ImageAttachment>,
     },
     /// Continue an existing zero mode session with a follow-up message
     ContinueZeroMode {
@@ -261,6 +269,7 @@ pub enum BridgeCommand {
         message: String,
         config: Config,
         workspace: zero_mode::ZeroWorkspaceInfo,
+        images: Vec<ImageAttachment>,
     },
     StopOrchestration,
     CheckSocket,
