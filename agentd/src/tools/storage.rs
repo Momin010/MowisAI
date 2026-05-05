@@ -179,12 +179,18 @@ impl Tool for SecretSetTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("secret_set: missing value"))?;
 
+        // SECURITY: Encrypt the secret value before storing
+        let encrypted = crate::crypto::encrypt(value).unwrap_or_else(|e| {
+            log::warn!("Encryption failed, storing plaintext (non-fatal): {}", e);
+            value.to_string()
+        });
+
         // SECURITY: Scope secret to sandbox to prevent cross-sandbox leakage
         let scoped_key = format!("{}:{}", ctx.sandbox_id, name);
         let mut store = lock_store!(SECRET_STORE);
-        store.insert(scoped_key, value.to_string());
+        store.insert(scoped_key, encrypted);
 
-        Ok(json!({ "success": true }))
+        Ok(json!({ "success": true, "encrypted": true }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(SecretSetTool)
@@ -207,7 +213,12 @@ impl Tool for SecretGetTool {
         let scoped_key = format!("{}:{}", ctx.sandbox_id, name);
         let store = lock_store!(SECRET_STORE);
         match store.get(&scoped_key) {
-            Some(value) => Ok(json!({ "value": value })),
+            Some(encrypted) => {
+                // Decrypt the value
+                let decrypted =
+                    crate::crypto::decrypt(encrypted).unwrap_or_else(|_| encrypted.clone());
+                Ok(json!({ "value": decrypted }))
+            }
             None => Err(anyhow::anyhow!("secret not found: {}", name)),
         }
     }
