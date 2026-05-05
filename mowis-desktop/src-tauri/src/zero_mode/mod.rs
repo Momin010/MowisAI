@@ -767,6 +767,7 @@ fn message_size_estimate(msg: &LlmMessage) -> usize {
         MessageContent::Text(t) => t.len(),
         MessageContent::ToolResult { content, .. } => content.len(),
         MessageContent::ToolCall(_) => 160,
+        MessageContent::Image { .. } => 0, // images not counted in text size
     }).sum()
 }
 
