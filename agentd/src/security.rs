@@ -379,11 +379,17 @@ impl ThreatAnalyzer {
     }
 
     pub fn generate_report(&self, policy: &SecurityPolicy) -> Value {
+        let network_restricted = policy
+            .network_rules
+            .first()
+            .map(|r| !r.allow_outbound)
+            .unwrap_or(true); // Default to restricted if no rules
+
         json!({
             "policy_name": policy.name,
             "blocked_syscalls": policy.denied_syscalls.len(),
             "file_rules": policy.file_access_rules.len(),
-            "network_restricted": !policy.network_rules[0].allow_outbound,
+            "network_restricted": network_restricted,
             "capabilities_limited": policy.resource_limits.max_memory_mb.is_some(),
         })
     }
@@ -435,7 +441,7 @@ mod tests {
     fn test_update_security_policy() {
         let mut policy = SecurityPolicy::default_restrictive();
         assert_eq!(policy.allow_shell_execution, false);
-        
+
         // Verify policy can be modified
         policy.allow_shell_execution = true;
         assert!(policy.allow_shell_execution);

@@ -346,7 +346,7 @@ async fn repair_conflict(
     max_retries: usize,
 ) -> Result<String> {
     let access_token = super::gcloud_access_token()?;
-    let url = super::vertex_generate_url(project_id);
+    let url = super::vertex_generate_url(project_id, "gemini-2.5-pro");
 
     let system_prompt = r#"You are a merge conflict resolver. Given two diffs and a conflict message, produce a repaired patch that resolves the conflict.
 

@@ -2,7 +2,6 @@
 ///
 /// Provides a client interface to communicate with agentd via Unix sockets.
 /// All real infrastructure operations go through this module.
-
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -129,7 +128,10 @@ impl AgentdClient {
     }
 
     /// Create a new sandbox
-    pub fn create_sandbox(&self, params: CreateSandboxParams) -> AgentdClientResult<CreateSandboxResponse> {
+    pub fn create_sandbox(
+        &self,
+        params: CreateSandboxParams,
+    ) -> AgentdClientResult<CreateSandboxResponse> {
         let request = AgentdRequest {
             method: "create_sandbox".to_string(),
             params: serde_json::to_value(&params)
@@ -149,7 +151,10 @@ impl AgentdClient {
     }
 
     /// Create a container in a sandbox
-    pub fn create_container(&self, params: CreateContainerParams) -> AgentdClientResult<CreateContainerResponse> {
+    pub fn create_container(
+        &self,
+        params: CreateContainerParams,
+    ) -> AgentdClientResult<CreateContainerResponse> {
         let request = AgentdRequest {
             method: "create_container".to_string(),
             params: serde_json::to_value(&params)
@@ -263,14 +268,17 @@ impl AgentdClient {
     }
 }
 
-/// Generate a unique request ID
+/// Generate a unique request ID using atomic counter + timestamp
 fn generate_request_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
-    let nanos = SystemTime::now()
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
-        .subsec_nanos();
-    format!("req-{}", nanos)
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("req-{}-{}", ts, seq)
 }
 
 #[cfg(test)]

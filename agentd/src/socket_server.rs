@@ -3,10 +3,12 @@ use dashmap::DashMap;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crate::audit::{AuditEvent, EventType};
@@ -14,8 +16,8 @@ use crate::buckets::BucketStore;
 use crate::memory::AgentMemory;
 use crate::security::SecurityPolicy;
 use crate::tool_registry;
-use crate::{ResourceLimits, Sandbox};
 use crate::vm_backend::{boot_vm, exec_in_vm, stop_vm, VmHandle};
+use crate::{ResourceLimits, Sandbox};
 
 const FAST_WORKERS: usize = 64;
 pub(crate) const SLOW_WORKERS: usize = 128;
@@ -103,10 +105,18 @@ pub struct SocketResponse {
 
 impl SocketResponse {
     fn ok(result: Option<Value>) -> Self {
-        SocketResponse { status: "ok".into(), result, error: None }
+        SocketResponse {
+            status: "ok".into(),
+            result,
+            error: None,
+        }
     }
     fn err<E: ToString>(e: E) -> Self {
-        SocketResponse { status: "error".into(), result: None, error: Some(e.to_string()) }
+        SocketResponse {
+            status: "error".into(),
+            result: None,
+            error: Some(e.to_string()),
+        }
     }
 }
 
@@ -192,12 +202,22 @@ fn install_packages_in_image(
     // Core packages every container needs – git, shell utilities, runtimes
     let core = [
         // tooling
-        "git", "curl", "wget", "bash", "ca-certificates", "openssh-client",
+        "git",
+        "curl",
+        "wget",
+        "bash",
+        "ca-certificates",
+        "openssh-client",
         // runtimes
-        "python3", "py3-pip", "nodejs", "npm",
+        "python3",
+        "py3-pip",
+        "nodejs",
+        "npm",
         // container stack (guest OS requirement)
         // Note: exact package names vary by distro; we resolve per distro below where needed.
-        "docker", "containerd", "runc",
+        "docker",
+        "containerd",
+        "runc",
     ];
 
     let is_alpine = image_hint.contains("alpine") || image_hint.is_empty();
@@ -265,25 +285,25 @@ fn install_packages_in_image(
     // Copy CA certificates into chroot so apk can verify TLS
     // Try multiple common locations to find system CA certificates
     let ca_src_paths = vec![
-        "/etc/ssl/certs/ca-certificates.crt",      // Debian/Ubuntu bundle
-        "/etc/pki/tls/certs/ca-bundle.crt",        // RedHat/CentOS bundle
-        "/etc/ssl/certs/ca-bundle.crt",            // Alpine alternative
+        "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu bundle
+        "/etc/pki/tls/certs/ca-bundle.crt",   // RedHat/CentOS bundle
+        "/etc/ssl/certs/ca-bundle.crt",       // Alpine alternative
     ];
-    
+
     let ca_dest = root.join("etc/ssl/certs");
     std::fs::create_dir_all(&ca_dest).ok();
-    
+
     // Try to copy the first available CA bundle
     for src in &ca_src_paths {
         if std::path::Path::new(src).exists() {
             let dest = ca_dest.join("ca-certificates.crt");
             let _ = std::fs::copy(src, &dest);
             if dest.exists() {
-                break;  // Successfully copied, stop trying other paths
+                break; // Successfully copied, stop trying other paths
             }
         }
     }
-    
+
     // Also copy individual cert files if ca-certificates.crt exists
     if std::path::Path::new("/etc/ssl/certs").exists() {
         if let Ok(entries) = std::fs::read_dir("/etc/ssl/certs") {
@@ -303,8 +323,7 @@ fn install_packages_in_image(
         }
     }
 
-    chroot_run_streaming(root, &install_cmd)
-        .context("package installation failed")?;
+    chroot_run_streaming(root, &install_cmd).context("package installation failed")?;
 
     log::info!("[sandbox] Packages installed.");
     Ok(())
@@ -386,7 +405,8 @@ fn validate_request(req: &SocketRequest) -> Result<(), String> {
                 Ok(())
             }
         }
-        "list_containers" | "get_policy" | "register_tool" | "bucket_put" | "bucket_get" | "memory_set" | "memory_get" | "memory_save" | "memory_load" | "create_channel" => {
+        "list_containers" | "get_policy" | "register_tool" | "bucket_put" | "bucket_get"
+        | "memory_set" | "memory_get" | "memory_save" | "memory_load" | "create_channel" => {
             if req.sandbox.is_none() {
                 Err(format!("{}: missing sandbox id", req.request_type))
             } else {
@@ -413,7 +433,10 @@ fn validate_request(req: &SocketRequest) -> Result<(), String> {
 
 fn classify_request(req: &SocketRequest) -> RequestLane {
     match req.request_type.as_str() {
-        "list" | "list_containers" | "get_policy" | "get_audit_stats" | "get_anomalies" | "agent_status" | "bucket_get" | "memory_get" | "memory_load" | "read_messages" => RequestLane::Fast,
+        "list" | "list_containers" | "get_policy" | "get_audit_stats" | "get_anomalies"
+        | "agent_status" | "bucket_get" | "memory_get" | "memory_load" | "read_messages" => {
+            RequestLane::Fast
+        }
         _ => RequestLane::Slow,
     }
 }
@@ -424,7 +447,6 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
     }
 
     match req.request_type.as_str() {
-
         // ── create_sandbox ──────────────────────────────────────────────────
         // 1. Create sandbox with the given OS image (required).
         // 2. Install core packages + any extras via chroot into that image.
@@ -434,7 +456,10 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
         "create_sandbox" => {
             let image = req.image.clone(); // None means plain tmpfs (no skopeo needed)
             let backend = req.backend.clone().unwrap_or_else(|| "chroot".to_string());
-            let limits = ResourceLimits { ram_bytes: req.ram, cpu_millis: req.cpu };
+            let limits = ResourceLimits {
+                ram_bytes: req.ram,
+                cpu_millis: req.cpu,
+            };
             let seed_repo_url = req.seed_repo_url.clone();
             let seed_repo_branch = req.seed_repo_branch.clone();
             let seed_repo_subdir = req.seed_repo_subdir.clone();
@@ -456,7 +481,11 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             let image_label = image.as_deref().unwrap_or("(none)");
 
             log::info!("sandbox created: {}", id);
-            log::info!("[agentd] Setting up sandbox {} with image '{}'", id, image_label);
+            log::info!(
+                "[agentd] Setting up sandbox {} with image '{}'",
+                id,
+                image_label
+            );
 
             if let Err(e) = install_packages_in_image(&root, image_label, extra) {
                 log::warn!("sandbox {} package install warning: {}", id, e);
@@ -466,10 +495,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
 
             // Optional: seed a repository into sandbox baseline so all containers share it.
             if let Some(repo_url) = seed_repo_url.as_ref() {
-                log::info!(
-                    "[agentd] Seeding repo {} into sandbox {} ...",
-                    repo_url, id
-                );
+                log::info!("[agentd] Seeding repo {} into sandbox {} ...", repo_url, id);
                 if let Err(e) = sb.seed_git_repo(
                     repo_url,
                     seed_repo_branch.as_deref(),
@@ -493,7 +519,11 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                             sb.set_scope(scope.clone());
                             scoped_path
                         } else {
-                            log::warn!("sandbox {} scope path does not exist: {}, using full project", id, scoped_path.display());
+                            log::warn!(
+                                "sandbox {} scope path does not exist: {}, using full project",
+                                id,
+                                scoped_path.display()
+                            );
                             project_path.to_path_buf()
                         }
                     } else {
@@ -509,17 +539,30 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                             Some(&mount_source),
                             &workspace_dir,
                             Some("none"),
-                            nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_RDONLY,  // Read-only mount for safety
+                            nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_RDONLY, // Read-only mount for safety
                             None::<&str>,
                         ) {
                             log::warn!("sandbox {} failed to bind-mount project root: {}", id, e);
                         } else {
-                            let scope_info = req.scope.as_ref().map(|s| format!(" (scope: {})", s)).unwrap_or_default();
-                            log::info!("[agentd] Mounted {} into sandbox {} /workspace{}", mount_source.display(), id, scope_info);
+                            let scope_info = req
+                                .scope
+                                .as_ref()
+                                .map(|s| format!(" (scope: {})", s))
+                                .unwrap_or_default();
+                            log::info!(
+                                "[agentd] Mounted {} into sandbox {} /workspace{}",
+                                mount_source.display(),
+                                id,
+                                scope_info
+                            );
                         }
                     }
                 } else {
-                    log::warn!("sandbox {} project_root does not exist: {}", id, project_root);
+                    log::warn!(
+                        "sandbox {} project_root does not exist: {}",
+                        id,
+                        project_root
+                    );
                 }
             }
 
@@ -537,7 +580,11 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                 match boot_vm(id.to_string(), &root, image.as_deref().unwrap_or("alpine")) {
                     Ok(handle) => {
                         VM_HANDLES.insert(id, handle);
-                        log::info!("[agentd] guest_vm QEMU boot pid={} sandbox={} port=?", id, id);
+                        log::info!(
+                            "[agentd] guest_vm QEMU boot pid={} sandbox={} port=?",
+                            id,
+                            id
+                        );
                     }
                     Err(e) => {
                         log::warn!("guest_vm boot failed sandbox={} (continuing): {}", id, e);
@@ -552,7 +599,9 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             );
 
             log::info!("[agentd] Sandbox {} ready.", id);
-            SocketResponse::ok(Some(json!({ "sandbox": id.to_string(), "backend": backend })))
+            SocketResponse::ok(Some(
+                json!({ "sandbox": id.to_string(), "backend": backend }),
+            ))
         }
 
         // ── create_container ────────────────────────────────────────────────
@@ -568,7 +617,9 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             let container_id = match SANDBOXES.get_mut(&sandbox_id) {
                 Some(mut sb_ref) => match sb_ref.create_container() {
                     Ok(id) => id,
-                    Err(e) => return SocketResponse::err(format!("create_container failed: {}", e)),
+                    Err(e) => {
+                        return SocketResponse::err(format!("create_container failed: {}", e))
+                    }
                 },
                 None => return SocketResponse::err(format!("sandbox {} not found", sandbox_id)),
             };
@@ -587,7 +638,11 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             };
             let container_id = match req.container.as_ref().and_then(parse_id) {
                 Some(id) => id,
-                None => return SocketResponse::err("missing container id — create one first with create_container"),
+                None => {
+                    return SocketResponse::err(
+                        "missing container id — create one first with create_container",
+                    )
+                }
             };
             let name = match req.name {
                 Some(ref n) if !n.is_empty() => n.clone(),
@@ -601,7 +656,12 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                     if let Some(handle) = VM_HANDLES.get(&sandbox_id) {
                         match exec_in_vm(&handle, &name, input.clone()) {
                             Ok(result) => return SocketResponse::ok(Some(result)),
-                            Err(e) => return SocketResponse::err(format!("vm tool {} failed: {}", name, e)),
+                            Err(e) => {
+                                return SocketResponse::err(format!(
+                                    "vm tool {} failed: {}",
+                                    name, e
+                                ))
+                            }
                         }
                     }
                 }
@@ -663,7 +723,10 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
 
         // ── list ────────────────────────────────────────────────────────────
         "list" => {
-            let ids: Vec<String> = SANDBOXES.iter().map(|item| item.key().to_string()).collect();
+            let ids: Vec<String> = SANDBOXES
+                .iter()
+                .map(|item| item.key().to_string())
+                .collect();
             SocketResponse::ok(Some(json!(ids)))
         }
 
@@ -675,7 +738,8 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             };
             match SANDBOXES.get(&sandbox_id) {
                 Some(sb) => {
-                    let cids: Vec<String> = sb.list_containers()
+                    let cids: Vec<String> = sb
+                        .list_containers()
                         .iter()
                         .map(|id| id.to_string())
                         .collect();
@@ -699,7 +763,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                 Some(mut sb) => match sb.destroy_container(container_id) {
                     Ok(_) => SocketResponse::ok(None),
                     Err(e) => SocketResponse::err(format!("destroy_container failed: {}", e)),
-                }
+                },
                 None => SocketResponse::err(format!("sandbox {} not found", sandbox_id)),
             }
         }
@@ -712,7 +776,8 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             };
             if SANDBOXES.remove(&id).is_some() {
                 // If a guest_vm scaffold was started, stop it best-effort.
-                let backend = SANDBOX_BACKENDS.get(&id)
+                let backend = SANDBOX_BACKENDS
+                    .get(&id)
                     .map(|e| e.value().clone())
                     .unwrap_or_default();
 
@@ -740,15 +805,13 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             };
             let name = req.name.clone().unwrap_or_default();
             match tool_registry::get_tool(&name) {
-                Some(tool) => {
-                     match SANDBOXES.get_mut(&sandbox_id) {
-                         Some(mut sb_ref) => {
-                             sb_ref.register_tool(tool);
-                             SocketResponse::ok(None)
-                         }
-                        None => SocketResponse::err(format!("sandbox {} not found", sandbox_id)),
+                Some(tool) => match SANDBOXES.get_mut(&sandbox_id) {
+                    Some(mut sb_ref) => {
+                        sb_ref.register_tool(tool);
+                        SocketResponse::ok(None)
                     }
-                }
+                    None => SocketResponse::err(format!("sandbox {} not found", sandbox_id)),
+                },
                 None => SocketResponse::err(format!("unknown tool: {}", name)),
             }
         }
@@ -762,12 +825,17 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             let name = req.name.clone().unwrap_or_default();
             let policy = match name.as_str() {
                 "restrictive" => SecurityPolicy::default_restrictive(),
-                "permissive"  => SecurityPolicy::default_permissive(),
-                other => return SocketResponse::err(format!("unknown policy '{}' — use 'restrictive' or 'permissive'", other)),
+                "permissive" => SecurityPolicy::default_permissive(),
+                other => {
+                    return SocketResponse::err(format!(
+                        "unknown policy '{}' — use 'restrictive' or 'permissive'",
+                        other
+                    ))
+                }
             };
-             match SANDBOXES.get_mut(&sandbox_id) {
-                 Some(mut sb_ref) => {
-                     sb_ref.set_policy(policy);
+            match SANDBOXES.get_mut(&sandbox_id) {
+                Some(mut sb_ref) => {
+                    sb_ref.set_policy(policy);
                     let _ = AUDITOR.record_event(
                         AuditEvent::new(EventType::Custom("PolicySet".into()), 0, "policy set")
                             .with_target(sandbox_id)
@@ -798,7 +866,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
 
         // ── audit ────────────────────────────────────────────────────────────
         "get_audit_stats" => SocketResponse::ok(Some(AUDITOR.get_stats())),
-        "get_anomalies"   => SocketResponse::ok(Some(AUDITOR.detect_anomalies())),
+        "get_anomalies" => SocketResponse::ok(Some(AUDITOR.detect_anomalies())),
 
         // ── channels ─────────────────────────────────────────────────────────
         "create_channel" => {
@@ -826,9 +894,13 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             let payload = req.command.clone().unwrap_or_default();
             match crate::channels::send_message(
                 channel_id,
-                crate::channels::Message { from, to: 0, payload },
+                crate::channels::Message {
+                    from,
+                    to: 0,
+                    payload,
+                },
             ) {
-                Ok(_)  => SocketResponse::ok(None),
+                Ok(_) => SocketResponse::ok(None),
                 Err(e) => SocketResponse::err(e),
             }
         }
@@ -856,7 +928,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                 Some(id) => id,
                 None => return SocketResponse::err("missing sandbox id"),
             };
-            let key   = req.name.clone().unwrap_or_default();
+            let key = req.name.clone().unwrap_or_default();
             let value = req.command.clone().unwrap_or_default();
 
             let bucket_path = match SANDBOXES.get(&sandbox_id) {
@@ -865,8 +937,8 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             };
             match BucketStore::new(bucket_path) {
                 Ok(mut bs) => match bs.put(&key, &value) {
-                    Ok(())  => SocketResponse::ok(None),
-                    Err(e)  => SocketResponse::err(e),
+                    Ok(()) => SocketResponse::ok(None),
+                    Err(e) => SocketResponse::err(e),
                 },
                 Err(e) => SocketResponse::err(e),
             }
@@ -886,8 +958,8 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             match BucketStore::new(bucket_path) {
                 Ok(bs) => match bs.get(&key) {
                     Ok(Some(v)) => SocketResponse::ok(Some(json!({ "value": v }))),
-                    Ok(None)    => SocketResponse::err("key not found"),
-                    Err(e)      => SocketResponse::err(e),
+                    Ok(None) => SocketResponse::err("key not found"),
+                    Err(e) => SocketResponse::err(e),
                 },
                 Err(e) => SocketResponse::err(e),
             }
@@ -899,12 +971,13 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                 Some(id) => id,
                 None => return SocketResponse::err("missing sandbox id"),
             };
-            let key   = req.name.clone().unwrap_or_default();
+            let key = req.name.clone().unwrap_or_default();
             let value = req.input.clone().unwrap_or(json!(null));
-            MEMORY_STORE.entry(sandbox_id)
-               .or_insert_with(|| AgentMemory::new(sandbox_id, sandbox_id))
-               .short_term
-               .set_context(key, value);
+            MEMORY_STORE
+                .entry(sandbox_id)
+                .or_insert_with(|| AgentMemory::new(sandbox_id, sandbox_id))
+                .short_term
+                .set_context(key, value);
             SocketResponse::ok(None)
         }
 
@@ -934,8 +1007,8 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                 None => return SocketResponse::err("no memory found for sandbox"),
             };
             match PERSISTENCE.save_agent_memory(sandbox_id, &json_val) {
-                Ok(())  => SocketResponse::ok(None),
-                Err(e)  => SocketResponse::err(e),
+                Ok(()) => SocketResponse::ok(None),
+                Err(e) => SocketResponse::err(e),
             }
         }
 
@@ -945,11 +1018,11 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                 None => return SocketResponse::err("missing sandbox id"),
             };
             let json_val = match PERSISTENCE.load_agent_memory(sandbox_id) {
-                Ok(j)  => j,
+                Ok(j) => j,
                 Err(e) => return SocketResponse::err(e),
             };
             let agent_mem = match AgentMemory::deserialize_from_json(&json_val) {
-                Ok(m)  => m,
+                Ok(m) => m,
                 Err(e) => return SocketResponse::err(e),
             };
             MEMORY_STORE.insert(sandbox_id, agent_mem);
@@ -1011,7 +1084,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                         "checkpoint_dir": checkpoint_dir.to_string_lossy().to_string()
                     }))),
                     Err(e) => SocketResponse::err(format!("checkpoint failed: {}", e)),
-                }
+                },
                 None => SocketResponse::err(format!("sandbox {} not found", sandbox_id)),
             }
         }
@@ -1039,7 +1112,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                         "restored_from": checkpoint_dir.to_string_lossy().to_string()
                     }))),
                     Err(e) => SocketResponse::err(format!("restore failed: {}", e)),
-                }
+                },
                 None => SocketResponse::err(format!("sandbox {} not found", sandbox_id)),
             }
         }
@@ -1133,29 +1206,66 @@ fn handle_connection(stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
+/// Shared work queue that supports multiple concurrent consumers
+struct WorkQueue {
+    queue: Mutex<VecDeque<WorkerJob>>,
+    condvar: Condvar,
+    shutdown: AtomicBool,
+}
+
+impl WorkQueue {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            condvar: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+        }
+    }
+
+    fn push(&self, job: WorkerJob) {
+        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        q.push_back(job);
+        self.condvar.notify_one();
+    }
+
+    fn pop(&self) -> Option<WorkerJob> {
+        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(job) = q.pop_front() {
+                return Some(job);
+            }
+            if self.shutdown.load(Ordering::Relaxed) {
+                return None;
+            }
+            q = self.condvar.wait(q).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.condvar.notify_all();
+    }
+}
+
 fn spawn_worker_pool(
     name: &str,
     workers: usize,
-    receiver: Arc<Mutex<mpsc::Receiver<WorkerJob>>>,
+    queue: Arc<WorkQueue>,
 ) -> Vec<thread::JoinHandle<()>> {
     (0..workers)
         .map(|idx| {
-            let receiver = Arc::clone(&receiver);
+            let queue = Arc::clone(&queue);
             let worker_name = format!("{}-{}", name, idx);
             thread::Builder::new()
                 .name(worker_name)
                 .spawn(move || loop {
-                    let job = {
-                        let locked = receiver.lock().unwrap();
-                        locked.recv()
-                    };
-                    match job {
-                        Ok(job) => {
+                    match queue.pop() {
+                        Some(job) => {
                             if let Err(e) = process_job(job) {
                                 log::warn!("connection error: {}", e);
                             }
                         }
-                        Err(_) => break,
+                        None => break, // Shutdown signal
                     }
                 })
                 .expect("failed to spawn socket worker")
@@ -1169,7 +1279,7 @@ fn create_listener(path: &str) -> Result<UnixListener> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o666);
+        let perms = std::fs::Permissions::from_mode(0o660);
         std::fs::set_permissions(path, perms).context("chmod socket")?;
     }
     Ok(listener)
@@ -1180,13 +1290,11 @@ pub fn run_server(path: &str) -> Result<()> {
     let _ = PERSISTENCE.init();
     let listener = create_listener(path)?;
 
-    let (fast_tx, fast_rx) = mpsc::channel::<WorkerJob>();
-    let (slow_tx, slow_rx) = mpsc::channel::<WorkerJob>();
-    let fast_rx = Arc::new(Mutex::new(fast_rx));
-    let slow_rx = Arc::new(Mutex::new(slow_rx));
+    let fast_queue = Arc::new(WorkQueue::new());
+    let slow_queue = Arc::new(WorkQueue::new());
 
-    let _fast_workers = spawn_worker_pool("socket-fast", FAST_WORKERS, Arc::clone(&fast_rx));
-    let _slow_workers = spawn_worker_pool("socket-slow", SLOW_WORKERS, Arc::clone(&slow_rx));
+    let _fast_workers = spawn_worker_pool("socket-fast", FAST_WORKERS, Arc::clone(&fast_queue));
+    let _slow_workers = spawn_worker_pool("socket-slow", SLOW_WORKERS, Arc::clone(&slow_queue));
 
     log::info!("Socket server listening on {}", path);
 
@@ -1196,13 +1304,10 @@ pub fn run_server(path: &str) -> Result<()> {
                 Ok(Some(connection)) => {
                     let lane = classify_request(&connection.request);
                     let job = WorkerJob { connection };
-                    let send_result = match lane {
-                        RequestLane::Fast => fast_tx.send(job),
-                        RequestLane::Slow => slow_tx.send(job),
+                    match lane {
+                        RequestLane::Fast => fast_queue.push(job),
+                        RequestLane::Slow => slow_queue.push(job),
                     };
-                    if let Err(e) = send_result {
-                        log::warn!("dispatch error: {}", e);
-                    }
                 }
                 Ok(None) => {}
                 Err(e) => log::warn!("connection error: {}", e),
@@ -1210,6 +1315,11 @@ pub fn run_server(path: &str) -> Result<()> {
             Err(e) => log::warn!("accept error: {}", e),
         }
     }
+
+    // Signal workers to shut down
+    fast_queue.shutdown();
+    slow_queue.shutdown();
+
     Ok(())
 }
 
@@ -1228,7 +1338,7 @@ pub fn run(socket_path: &str) -> Result<()> {
 
     // Bind listener
     let listener = UnixListener::bind(socket_path)?;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))?;
 
     println!("Socket server listening on {}", socket_path);
 
@@ -1274,7 +1384,7 @@ mod tests {
 
     fn setup_sandbox_with_tool(tool: Box<dyn crate::tools::Tool>) -> u64 {
         let id = create_test_sandbox();
-         if let Some(mut sb_ref) = SANDBOXES.get_mut(&id) {
+        if let Some(mut sb_ref) = SANDBOXES.get_mut(&id) {
             sb_ref.register_tool(tool);
         }
         id
@@ -1337,7 +1447,10 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(resp.status, "ok");
-        let id_str = resp.result.unwrap()["sandbox"].as_str().unwrap().to_string();
+        let id_str = resp.result.unwrap()["sandbox"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let id = id_str.parse::<u64>().unwrap();
 
         // Verify listed

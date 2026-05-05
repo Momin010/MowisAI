@@ -1,17 +1,16 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 // ============== SHORT-TERM MEMORY ==============
 
 /// Short-Term Memory (STM) - volatile, session-based storage
-/// Cleared when agent session ends. Stores current task context, intermediate results.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShortTermMemory {
     pub session_id: u64,
     pub context: HashMap<String, Value>,
     pub task_stack: Vec<TaskFrame>,
-    pub recent_results: Vec<ExecutionResult>,
+    pub recent_results: VecDeque<ExecutionResult>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,13 +40,15 @@ pub struct ExecutionResult {
     pub success: bool,
 }
 
+const MAX_RECENT_RESULTS: usize = 50;
+
 impl ShortTermMemory {
     pub fn new(session_id: u64) -> Self {
         ShortTermMemory {
             session_id,
             context: HashMap::new(),
             task_stack: Vec::new(),
-            recent_results: Vec::new(),
+            recent_results: VecDeque::new(),
         }
     }
 
@@ -71,10 +72,11 @@ impl ShortTermMemory {
         self.task_stack.last()
     }
 
+    /// Add result with bounded size (VecDeque::pop_front is O(1))
     pub fn add_result(&mut self, result: ExecutionResult) {
-        self.recent_results.push(result);
-        if self.recent_results.len() > 50 {
-            self.recent_results.remove(0);
+        self.recent_results.push_back(result);
+        while self.recent_results.len() > MAX_RECENT_RESULTS {
+            self.recent_results.pop_front();
         }
     }
 
@@ -88,13 +90,13 @@ impl ShortTermMemory {
 // ============== LONG-TERM MEMORY ==============
 
 /// Long-Term Memory (LTM) - persistent, semantic storage
-/// Persists across sessions. Stores learned patterns, embeddings, indexed knowledge.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LongTermMemory {
     pub agent_id: u64,
+    /// Index for O(1) key lookups
+    pub knowledge_index: HashMap<String, usize>,
     pub knowledge_base: Vec<KnowledgeEntry>,
     pub pattern_index: HashMap<String, PatternInfo>,
-    pub semantic_cache: Vec<SemanticEntry>,
     pub decision_log: Vec<DecisionLog>,
 }
 
@@ -102,11 +104,12 @@ pub struct LongTermMemory {
 pub struct KnowledgeEntry {
     pub key: String,
     pub value: String,
-    pub embedding: Vec<f32>,
     pub confidence: f32,
     pub source: String,
     pub created_at: u64,
     pub accessed_count: u64,
+    /// TF-IDF-style keyword vector for lightweight similarity
+    pub keywords: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,14 +119,6 @@ pub struct PatternInfo {
     pub success_rate: f32,
     pub optimal_tools: Vec<String>,
     pub context_clues: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SemanticEntry {
-    pub query: String,
-    pub embedding: Vec<f32>,
-    pub results: Vec<Value>,
-    pub relevance_scores: Vec<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -140,25 +135,48 @@ impl LongTermMemory {
     pub fn new(agent_id: u64) -> Self {
         LongTermMemory {
             agent_id,
+            knowledge_index: HashMap::new(),
             knowledge_base: Vec::new(),
             pattern_index: HashMap::new(),
-            semantic_cache: Vec::new(),
             decision_log: Vec::new(),
         }
     }
 
-    pub fn store_knowledge(&mut self, entry: KnowledgeEntry) {
+    /// Store knowledge with keyword extraction for search
+    pub fn store_knowledge(&mut self, mut entry: KnowledgeEntry) {
+        // Extract keywords from key and value for search
+        if entry.keywords.is_empty() {
+            entry.keywords = extract_keywords(&format!("{} {}", entry.key, entry.value));
+        }
+
+        let idx = self.knowledge_base.len();
+        self.knowledge_index.insert(entry.key.clone(), idx);
         self.knowledge_base.push(entry);
     }
 
+    /// O(1) retrieval by key
     pub fn retrieve_knowledge(&self, key: &str) -> Option<&KnowledgeEntry> {
-        self.knowledge_base.iter().find(|e| e.key == key)
+        self.knowledge_index
+            .get(key)
+            .and_then(|&idx| self.knowledge_base.get(idx))
     }
 
+    /// Keyword-based search (much faster than full-text scan)
     pub fn search_knowledge(&self, query: &str) -> Vec<&KnowledgeEntry> {
+        let query_keywords = extract_keywords(query);
+        if query_keywords.is_empty() {
+            return self.knowledge_base.iter().collect();
+        }
+
         self.knowledge_base
             .iter()
-            .filter(|e| e.key.contains(query) || e.value.contains(query))
+            .filter(|e| {
+                // Check keyword overlap
+                query_keywords.iter().any(|qk| e.keywords.contains(qk))
+                // Also check direct substring match for exact queries
+                || e.key.contains(query)
+                || e.value.contains(query)
+            })
             .collect()
     }
 
@@ -189,9 +207,21 @@ impl LongTermMemory {
     }
 }
 
+/// Extract keywords from text (simple tokenization + lowercase)
+fn extract_keywords(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2) // Skip very short words
+        .map(|w| w.to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>() // Deduplicate
+        .into_iter()
+        .collect()
+}
+
 // ============== COMBINED AGENT MEMORY ==============
 
-/// Combined memory system (STM + LTM) for an agent
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentMemory {
     pub short_term: ShortTermMemory,
@@ -233,7 +263,6 @@ impl AgentMemory {
 
 // ============== SEMANTIC MATCHING ==============
 
-/// Semantic search and similarity matching for memory retrieval
 pub struct SemanticMatcher;
 
 impl SemanticMatcher {
@@ -253,24 +282,61 @@ impl SemanticMatcher {
         dot_product / (norm_a * norm_b)
     }
 
-    /// Find semantic matches in knowledge base
+    /// Jaccard similarity between keyword sets (fast, no embeddings needed)
+    pub fn keyword_similarity(a: &[String], b: &[String]) -> f32 {
+        if a.is_empty() && b.is_empty() {
+            return 1.0;
+        }
+        if a.is_empty() || b.is_empty() {
+            return 0.0;
+        }
+
+        let set_a: std::collections::HashSet<&String> = a.iter().collect();
+        let set_b: std::collections::HashSet<&String> = b.iter().collect();
+        let intersection = set_a.intersection(&set_b).count();
+        let union = set_a.union(&set_b).count();
+
+        if union == 0 {
+            0.0
+        } else {
+            intersection as f32 / union as f32
+        }
+    }
+
+    /// Find knowledge matches using keyword similarity
     pub fn find_similar_knowledge<'a>(
         ltm: &'a LongTermMemory,
-        query_embedding: &[f32],
+        query_keywords: &[String],
         threshold: f32,
     ) -> Vec<&'a KnowledgeEntry> {
         ltm.knowledge_base
             .iter()
-            .filter(|entry| Self::cosine_similarity(&entry.embedding, query_embedding) >= threshold)
+            .filter(|entry| Self::keyword_similarity(&entry.keywords, query_keywords) >= threshold)
             .collect()
     }
 
-    /// Suggest tools based on pattern history
+    /// Suggest tools based on pattern history with safe comparison
     pub fn suggest_tools(ltm: &LongTermMemory, context: &str) -> Vec<String> {
-        ltm.pattern_index
+        let context_lower = context.to_lowercase();
+        let candidates: Vec<&PatternInfo> = ltm
+            .pattern_index
             .values()
-            .filter(|p| context.contains(&p.pattern))
-            .max_by(|a, b| a.success_rate.partial_cmp(&b.success_rate).unwrap())
+            .filter(|p| {
+                let pattern_lower = p.pattern.to_lowercase();
+                context_lower.contains(&pattern_lower)
+                    || pattern_lower
+                        .split('_')
+                        .any(|part| context_lower.contains(part))
+            })
+            .collect();
+
+        candidates
+            .iter()
+            .max_by(|a, b| {
+                a.success_rate
+                    .partial_cmp(&b.success_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|p| p.optimal_tools.clone())
             .unwrap_or_default()
     }
@@ -278,13 +344,12 @@ impl SemanticMatcher {
 
 // ============== MEMORY PERSISTENCE ==============
 
-/// Memory persistence layer - saves/loads memory to disk
 pub struct MemoryPersistence;
 
 impl MemoryPersistence {
     pub fn save_stm(memory: &AgentMemory, path: &std::path::Path) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(&memory.short_term)?;
-        std::fs::write(path, json)?;
+        crate::persistence::PersistenceManager::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 
@@ -295,7 +360,7 @@ impl MemoryPersistence {
 
     pub fn save_ltm(memory: &AgentMemory, path: &std::path::Path) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(&memory.long_term)?;
-        std::fs::write(path, json)?;
+        crate::persistence::PersistenceManager::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 
@@ -306,7 +371,7 @@ impl MemoryPersistence {
 
     pub fn save_full_memory(memory: &AgentMemory, path: &std::path::Path) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(memory)?;
-        std::fs::write(path, json)?;
+        crate::persistence::PersistenceManager::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 
@@ -327,10 +392,9 @@ mod tests {
         let session_id = 100u64;
         let mut memory = AgentMemory::new(agent_id, session_id);
 
-        // Test set_context
-        memory.short_term.set_context("mykey".into(), json!("myvalue"));
-
-        // Test get_context
+        memory
+            .short_term
+            .set_context("mykey".into(), json!("myvalue"));
         let value = memory.short_term.get_context("mykey");
         assert_eq!(value, Some(&json!("myvalue")));
     }
@@ -356,6 +420,103 @@ mod tests {
         assert!(!json.is_null());
 
         let deserialized = AgentMemory::deserialize_from_json(&json).unwrap();
-        assert_eq!(deserialized.short_term.get_context("test"), Some(&json!("value")));
+        assert_eq!(
+            deserialized.short_term.get_context("test"),
+            Some(&json!("value"))
+        );
+    }
+
+    #[test]
+    fn test_knowledge_search_with_keywords() {
+        let mut ltm = LongTermMemory::new(1);
+
+        ltm.store_knowledge(KnowledgeEntry {
+            key: "rust-borrow-checker".to_string(),
+            value: "The borrow checker ensures memory safety in Rust".to_string(),
+            confidence: 0.9,
+            source: "docs".to_string(),
+            created_at: 0,
+            accessed_count: 0,
+            keywords: vec![],
+        });
+
+        ltm.store_knowledge(KnowledgeEntry {
+            key: "python-gc".to_string(),
+            value: "Python uses reference counting with cycle detection".to_string(),
+            confidence: 0.8,
+            source: "docs".to_string(),
+            created_at: 0,
+            accessed_count: 0,
+            keywords: vec![],
+        });
+
+        // Search for "rust" should find the borrow checker entry
+        let results = ltm.search_knowledge("rust borrow");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "rust-borrow-checker");
+
+        // Search for "python" should find the GC entry
+        let results = ltm.search_knowledge("python reference");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "python-gc");
+    }
+
+    #[test]
+    fn test_suggest_tools_safe_ordering() {
+        let mut ltm = LongTermMemory::new(1);
+
+        ltm.record_pattern(
+            "read_file_write_file".to_string(),
+            vec!["read_file".to_string(), "write_file".to_string()],
+            true,
+        );
+        ltm.record_pattern(
+            "read_file_write_file".to_string(),
+            vec!["read_file".to_string(), "write_file".to_string()],
+            true,
+        );
+        ltm.record_pattern(
+            "run_command_run_command".to_string(),
+            vec!["run_command".to_string()],
+            false,
+        );
+
+        let tools = SemanticMatcher::suggest_tools(&ltm, "read_file");
+        assert!(!tools.is_empty());
+        assert!(tools.contains(&"read_file".to_string()));
+    }
+
+    #[test]
+    fn test_keyword_similarity() {
+        let a = vec![
+            "rust".to_string(),
+            "memory".to_string(),
+            "safety".to_string(),
+        ];
+        let b = vec![
+            "rust".to_string(),
+            "memory".to_string(),
+            "management".to_string(),
+        ];
+        let sim = SemanticMatcher::keyword_similarity(&a, &b);
+        // 2 intersection (rust, memory) / 4 union (rust, memory, safety, management) = 0.5
+        assert!((sim - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_recent_results_bounded() {
+        let mut stm = ShortTermMemory::new(1);
+        for i in 0..100 {
+            stm.add_result(ExecutionResult {
+                tool: "test".to_string(),
+                input: json!(null),
+                output: json!(i),
+                timestamp: i,
+                success: true,
+            });
+        }
+        assert_eq!(stm.recent_results.len(), MAX_RECENT_RESULTS);
+        // Most recent should be 99
+        assert_eq!(stm.recent_results.back().unwrap().output, json!(99));
     }
 }

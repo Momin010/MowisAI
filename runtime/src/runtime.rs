@@ -10,10 +10,9 @@
 /// - Pausing/resuming containers via agentd (SIGSTOP, cgroup freeze)
 /// - Providing health status to Global Orchestrator
 /// - Handling incremental provisioning and hot scaling
-
 use crate::agentd_client::{
-    AgentdClient, ContainerControlAction, ContainerControlParams,
-    CreateContainerParams, CreateSandboxParams,
+    AgentdClient, ContainerControlAction, ContainerControlParams, CreateContainerParams,
+    CreateSandboxParams,
 };
 use agentd_protocol::*;
 use serde::{Deserialize, Serialize};
@@ -41,8 +40,8 @@ struct ManagedContainer {
     pub status: ContainerStatus,
     pub created_at: u64,
     pub paused_at: Option<u64>,
-    pub agentd_pid: Option<u32>,  // Real process ID from agentd
-    pub agentd_rootfs: Option<String>,  // Real root filesystem from agentd
+    pub agentd_pid: Option<u32>,       // Real process ID from agentd
+    pub agentd_rootfs: Option<String>, // Real root filesystem from agentd
 }
 
 /// Managed sandbox state
@@ -54,9 +53,9 @@ struct ManagedSandbox {
     pub containers: HashMap<String, ManagedContainer>,
     pub created_at: u64,
     pub total_ram_used: u64,
-    pub total_cpu_used: u32,
-    pub agentd_sandbox_path: String,  // Real path from agentd
-    pub agentd_sandbox_pid: u32,  // Real process ID from agentd
+    pub total_cpu_used: u64,
+    pub agentd_sandbox_path: String, // Real path from agentd
+    pub agentd_sandbox_pid: u32,     // Real process ID from agentd
 }
 
 /// The Runtime manager
@@ -77,11 +76,11 @@ impl Runtime {
 
     /// Provision a set of sandboxes according to specification
     /// This ACTUALLY creates sandboxes via agentd
-    pub fn provision_sandboxes(
-        &self,
-        spec: &ProvisioningSpec,
-    ) -> RuntimeResult<ProvisioningReady> {
-        let mut sb_map = self.sandboxes.lock().unwrap();
+    pub fn provision_sandboxes(&self, spec: &ProvisioningSpec) -> RuntimeResult<ProvisioningReady> {
+        let mut sb_map = self
+            .sandboxes
+            .lock()
+            .map_err(|e| RuntimeError::InvalidState(format!("Lock poisoned: {}", e)))?;
         let mut sandbox_handles = Vec::new();
         let now = current_timestamp();
 
@@ -95,7 +94,8 @@ impl Runtime {
                 packages: sb_spec.init_packages.clone(),
             };
 
-            let sandbox_response = self.client
+            let sandbox_response = self
+                .client
                 .create_sandbox(create_params)
                 .map_err(|e| RuntimeError::SandboxCreationFailed(format!("{:?}", e)))?;
 
@@ -116,13 +116,14 @@ impl Runtime {
             // REAL: Create initial containers via agentd
             for i in 0..sb_spec.initial_containers {
                 let container_id = format!("{}-{}", sb_spec.sandbox_id, i);
-                
+
                 let container_params = CreateContainerParams {
                     sandbox_id: sb_spec.sandbox_id.clone(),
                     container_id: container_id.clone(),
                 };
 
-                let container_response = self.client
+                let container_response = self
+                    .client
                     .create_container(container_params)
                     .map_err(|e| RuntimeError::ContainerCreationFailed(format!("{:?}", e)))?;
 
@@ -176,7 +177,10 @@ impl Runtime {
         count: usize,
         _spec: &SandboxSpec,
     ) -> RuntimeResult<Vec<ContainerHandle>> {
-        let mut sb_map = self.sandboxes.lock().unwrap();
+        let mut sb_map = self
+            .sandboxes
+            .lock()
+            .map_err(|e| RuntimeError::InvalidState(format!("Lock poisoned: {}", e)))?;
 
         let managed_sb = sb_map
             .get_mut(sandbox_id)
@@ -195,7 +199,8 @@ impl Runtime {
                 container_id: container_id.clone(),
             };
 
-            let container_response = self.client
+            let container_response = self
+                .client
                 .create_container(container_params)
                 .map_err(|e| RuntimeError::ContainerCreationFailed(format!("{:?}", e)))?;
 
@@ -224,7 +229,10 @@ impl Runtime {
     /// Pause a container (idle management)
     /// REAL: Sends SIGSTOP via agentd
     pub fn pause_container(&self, sandbox_id: &str, container_id: &str) -> RuntimeResult<()> {
-        let mut sb_map = self.sandboxes.lock().unwrap();
+        let mut sb_map = self
+            .sandboxes
+            .lock()
+            .map_err(|e| RuntimeError::InvalidState(format!("Lock poisoned: {}", e)))?;
 
         let managed_sb = sb_map
             .get_mut(sandbox_id)
@@ -262,7 +270,10 @@ impl Runtime {
     /// Resume a paused container
     /// REAL: Sends SIGCONT via agentd
     pub fn resume_container(&self, sandbox_id: &str, container_id: &str) -> RuntimeResult<()> {
-        let mut sb_map = self.sandboxes.lock().unwrap();
+        let mut sb_map = self
+            .sandboxes
+            .lock()
+            .map_err(|e| RuntimeError::InvalidState(format!("Lock poisoned: {}", e)))?;
 
         let managed_sb = sb_map
             .get_mut(sandbox_id)
@@ -282,9 +293,9 @@ impl Runtime {
                     action: ContainerControlAction::Resume,
                 };
 
-                self.client
-                    .control_container(control_params)
-                    .map_err(|e| RuntimeError::InvalidState(format!("Failed to resume: {:?}", e)))?;
+                self.client.control_container(control_params).map_err(|e| {
+                    RuntimeError::InvalidState(format!("Failed to resume: {:?}", e))
+                })?;
 
                 container.status = ContainerStatus::Active;
                 container.paused_at = None;
@@ -299,7 +310,10 @@ impl Runtime {
 
     /// Mark Local Hub Agent as running in sandbox
     pub fn register_hub_agent(&self, sandbox_id: &str, pid: u32) -> RuntimeResult<()> {
-        let mut sb_map = self.sandboxes.lock().unwrap();
+        let mut sb_map = self
+            .sandboxes
+            .lock()
+            .map_err(|e| RuntimeError::InvalidState(format!("Lock poisoned: {}", e)))?;
 
         let managed_sb = sb_map
             .get_mut(sandbox_id)
@@ -311,7 +325,10 @@ impl Runtime {
 
     /// Get health status of a sandbox
     pub fn get_health_status(&self, sandbox_id: &str) -> RuntimeResult<SandboxHealthStatus> {
-        let sb_map = self.sandboxes.lock().unwrap();
+        let sb_map = self
+            .sandboxes
+            .lock()
+            .map_err(|e| RuntimeError::InvalidState(format!("Lock poisoned: {}", e)))?;
 
         let managed_sb = sb_map
             .get(sandbox_id)
@@ -334,7 +351,10 @@ impl Runtime {
 
     /// Get all active sandboxes
     pub fn list_sandboxes(&self) -> Vec<String> {
-        let sb_map = self.sandboxes.lock().unwrap();
+        let sb_map = self
+            .sandboxes
+            .lock()
+            .map_err(|e| RuntimeError::InvalidState(format!("Lock poisoned: {}", e)))?;
         sb_map.keys().cloned().collect()
     }
 
@@ -347,10 +367,13 @@ impl Runtime {
             .map_err(|e| RuntimeError::SandboxNotFound(format!("Failed to destroy: {:?}", e)))?;
 
         // Remove from our tracking
-        let mut sb_map = self.sandboxes.lock().unwrap();
-        sb_map.remove(sandbox_id).ok_or(RuntimeError::SandboxNotFound(
-            sandbox_id.to_string(),
-        ))?;
+        let mut sb_map = self
+            .sandboxes
+            .lock()
+            .map_err(|e| RuntimeError::InvalidState(format!("Lock poisoned: {}", e)))?;
+        sb_map
+            .remove(sandbox_id)
+            .ok_or(RuntimeError::SandboxNotFound(sandbox_id.to_string()))?;
         Ok(())
     }
 }

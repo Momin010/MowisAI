@@ -96,11 +96,7 @@ impl Tool for GitAddTool {
 
         let output = if let Some(root) = &ctx.root_path {
             let mut cmd = Command::new("chroot");
-            cmd.arg(root)
-                .arg("git")
-                .arg("-C")
-                .arg(path_str)
-                .arg("add");
+            cmd.arg(root).arg("git").arg("-C").arg(path_str).arg("add");
             for file in &file_args {
                 cmd.arg(file);
             }
@@ -309,7 +305,10 @@ impl Tool for GitCheckoutTool {
 
         if let Some(root) = &ctx.root_path {
             // chroot branch: we accept an optional `create` flag, defaulting to true
-            let create = input.get("create").and_then(|v| v.as_bool()).unwrap_or(true);
+            let create = input
+                .get("create")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let mut cmd = Command::new("chroot");
             cmd.arg(root)
                 .arg("git")
@@ -321,10 +320,10 @@ impl Tool for GitCheckoutTool {
             }
             cmd.arg(branch);
             // use explicit identity for chrooted operations (pattern from spec)
-            cmd.env("GIT_AUTHOR_NAME", "Momin")
-                .env("GIT_AUTHOR_EMAIL", "momin.aldahdooh@gmail.com")
-                .env("GIT_COMMITTER_NAME", "Momin")
-                .env("GIT_COMMITTER_EMAIL", "momin.aldahdooh@gmail.com");
+            cmd.env("GIT_AUTHOR_NAME", "MowisAI Agent")
+                .env("GIT_AUTHOR_EMAIL", "agent@mowisai.com")
+                .env("GIT_COMMITTER_NAME", "MowisAI Agent")
+                .env("GIT_COMMITTER_EMAIL", "agent@mowisai.com");
 
             let output = cmd.output()?;
             return Ok(json!({
@@ -352,10 +351,7 @@ impl Tool for GitCheckoutTool {
             if !output.status.success() {
                 // Try without -b flag (branch might already exist)
                 let mut cmd2 = Command::new("git");
-                cmd2.arg("-C")
-                    .arg(&path)
-                    .arg("checkout")
-                    .arg(branch);
+                cmd2.arg("-C").arg(&path).arg("checkout").arg(branch);
                 cmd2.env("GIT_AUTHOR_NAME", "agentd")
                     .env("GIT_AUTHOR_EMAIL", "agentd@mowisai.com")
                     .env("GIT_COMMITTER_NAME", "agentd")
@@ -390,15 +386,15 @@ impl Tool for GitDiffTool {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("git_diff: missing path"))?;
-        let staged = input.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
+        let staged = input
+            .get("staged")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let diff_arg = if staged { "diff --cached" } else { "diff" };
 
         let output = if let Some(root) = &ctx.root_path {
             let mut cmd = Command::new("chroot");
-            cmd.arg(root)
-                .arg("git")
-                .arg("-C")
-                .arg(path_str);
+            cmd.arg(root).arg("git").arg("-C").arg(path_str);
             // split diff_arg into two parts if it contains a space
             for part in diff_arg.split_whitespace() {
                 cmd.arg(part);
