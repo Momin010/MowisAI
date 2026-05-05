@@ -199,20 +199,52 @@ impl Tool for GitPushTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("git_push: missing branch"))?;
 
-        let path = resolve_path(ctx, path_str);
+        // SECURITY: Validate remote doesn't start with - (flag injection)
+        if remote.starts_with('-') {
+            return Err(anyhow::anyhow!("git_push: remote cannot start with '-'"));
+        }
+        if branch.starts_with('-') {
+            return Err(anyhow::anyhow!("git_push: branch cannot start with '-'"));
+        }
 
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .arg("push")
-            .arg(remote)
-            .arg(branch)
-            .output()?;
+        // Use chroot if available
+        let output = if let Some(root) = &ctx.root_path {
+            Command::new("chroot")
+                .arg(root)
+                .arg("git")
+                .arg("-C")
+                .arg(path_str)
+                .arg("push")
+                .arg("--")
+                .arg(remote)
+                .arg(branch)
+                .output()?
+        } else {
+            let path = resolve_path(ctx, path_str)?;
+            Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .arg("push")
+                .arg("--")
+                .arg(remote)
+                .arg(branch)
+                .output()?
+        };
+
+        // Sanitize stderr to prevent credential leaks
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let sanitized_stderr: String = stderr
+            .lines()
+            .filter(|l| {
+                !l.contains("password") && !l.contains("token") && !l.contains("credential")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         Ok(json!({
             "success": output.status.success(),
             "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-            "stderr": String::from_utf8_lossy(&output.stderr).to_string()
+            "stderr": sanitized_stderr
         }))
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -236,15 +268,37 @@ impl Tool for GitPullTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("git_pull: missing branch"))?;
 
-        let path = resolve_path(ctx, path_str);
+        // SECURITY: Validate remote/branch don't start with -
+        if remote.starts_with('-') {
+            return Err(anyhow::anyhow!("git_pull: remote cannot start with '-'"));
+        }
+        if branch.starts_with('-') {
+            return Err(anyhow::anyhow!("git_pull: branch cannot start with '-'"));
+        }
 
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .arg("pull")
-            .arg(remote)
-            .arg(branch)
-            .output()?;
+        // Use chroot if available
+        let output = if let Some(root) = &ctx.root_path {
+            Command::new("chroot")
+                .arg(root)
+                .arg("git")
+                .arg("-C")
+                .arg(path_str)
+                .arg("pull")
+                .arg("--")
+                .arg(remote)
+                .arg(branch)
+                .output()?
+        } else {
+            let path = resolve_path(ctx, path_str)?;
+            Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .arg("pull")
+                .arg("--")
+                .arg(remote)
+                .arg(branch)
+                .output()?
+        };
 
         Ok(json!({
             "success": output.status.success(),

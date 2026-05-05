@@ -18,6 +18,9 @@ pub struct CheckpointLog {
     pub task_id: String,
     pub checkpoints: Vec<Checkpoint>,
     pub log_path: PathBuf,
+    /// Monotonically increasing counter for checkpoint IDs (never resets)
+    #[serde(default)]
+    next_id: u64,
 }
 
 impl CheckpointLog {
@@ -30,13 +33,13 @@ impl CheckpointLog {
             task_id,
             checkpoints: Vec::new(),
             log_path,
+            next_id: 0,
         })
     }
 
     /// Load checkpoint log from file
     pub fn load(log_path: &Path) -> Result<Self> {
-        let content =
-            std::fs::read_to_string(log_path).context("Failed to read checkpoint log")?;
+        let content = std::fs::read_to_string(log_path).context("Failed to read checkpoint log")?;
         serde_json::from_str(&content).context("Failed to parse checkpoint log")
     }
 
@@ -50,6 +53,13 @@ impl CheckpointLog {
     pub fn add_checkpoint(&mut self, checkpoint: Checkpoint) -> Result<()> {
         self.checkpoints.push(checkpoint);
         self.save()
+    }
+
+    /// Get next monotonic checkpoint ID (never reuses IDs)
+    pub fn next_checkpoint_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     /// Get latest checkpoint
@@ -75,7 +85,11 @@ impl CheckpointLog {
                 let snapshot_path = PathBuf::from(&checkpoint.layer_snapshot_path);
                 if snapshot_path.exists() {
                     if let Err(e) = std::fs::remove_dir_all(&snapshot_path) {
-                        log::warn!("Failed to remove old checkpoint snapshot {}: {}", snapshot_path.display(), e);
+                        log::warn!(
+                            "Failed to remove old checkpoint snapshot {}: {}",
+                            snapshot_path.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -87,7 +101,7 @@ impl CheckpointLog {
 }
 
 /// Checkpoint manager that delegates to agentd via socket API
-/// 
+///
 /// The agentd socket server runs as root (required for overlayfs/chroot)
 /// and can access the root-owned files in container upper directories.
 /// The orchestrator (running as a regular user) cannot access these files
@@ -109,7 +123,7 @@ impl CheckpointManager {
     }
 
     /// Create checkpoint snapshot of agent's upper dir
-    /// 
+    ///
     /// This delegates to agentd via socket API because agentd runs as root
     /// and can access the root-owned files in the container's upper layer.
     pub fn create_snapshot(
@@ -125,8 +139,7 @@ impl CheckpointManager {
             .join(format!("checkpoint-{}", checkpoint_id));
 
         // Create the parent directory first (this runs as user, that's fine)
-        std::fs::create_dir_all(&snapshot_dir)
-            .context("Failed to create snapshot directory")?;
+        std::fs::create_dir_all(&snapshot_dir).context("Failed to create snapshot directory")?;
 
         // Delegate the actual snapshot to agentd via socket
         let request = json!({
@@ -151,7 +164,7 @@ impl CheckpointManager {
     }
 
     /// Restore agent's upper dir from checkpoint snapshot
-    /// 
+    ///
     /// This delegates to agentd via socket API because agentd runs as root
     /// and can modify the root-owned files in the container's upper layer.
     pub fn restore_snapshot(
@@ -214,7 +227,12 @@ impl CheckpointManager {
             let snapshot_path = PathBuf::from(&checkpoint.layer_snapshot_path);
             if snapshot_path.exists() {
                 let _ = std::process::Command::new("sudo")
-                    .args(["-n", "rm", "-rf", &snapshot_path.to_string_lossy().to_string()])
+                    .args([
+                        "-n",
+                        "rm",
+                        "-rf",
+                        &snapshot_path.to_string_lossy().to_string(),
+                    ])
                     .output();
                 let _ = std::fs::remove_dir_all(&snapshot_path);
             }
@@ -232,12 +250,8 @@ mod tests {
         let temp_dir = std::env::temp_dir().join("test_checkpoint_log");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        let mut log = CheckpointLog::new(
-            "agent-123".to_string(),
-            "task-456".to_string(),
-            &temp_dir,
-        )
-        .unwrap();
+        let mut log =
+            CheckpointLog::new("agent-123".to_string(), "task-456".to_string(), &temp_dir).unwrap();
 
         let checkpoint = Checkpoint {
             id: 0,
@@ -262,7 +276,8 @@ mod tests {
     #[test]
     fn test_checkpoint_manager_paths() {
         let temp_dir = std::env::temp_dir().join("test_checkpoint_manager_paths");
-        let manager = CheckpointManager::new(temp_dir.clone(), "/tmp/test.sock".to_string()).unwrap();
+        let manager =
+            CheckpointManager::new(temp_dir.clone(), "/tmp/test.sock".to_string()).unwrap();
 
         let checkpoint_dir = manager.get_checkpoint_dir("agent-123");
         assert!(checkpoint_dir.to_string_lossy().contains("agent-123"));
