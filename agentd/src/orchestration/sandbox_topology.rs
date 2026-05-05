@@ -814,10 +814,14 @@ impl TopologyManager {
             .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
 
         // We need to block_on here because we're in a non-async context
-        let rt = tokio::runtime::Runtime::new()?;
-        let staged = rt.block_on(async {
-            self.staged_workspaces.read().await.clone()
-        });
+        // Use try_read to avoid creating a nested tokio runtime
+        let staged = match self.staged_workspaces.try_read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                log::warn!("Could not acquire staged_workspaces lock (contended), returning empty export");
+                return Ok(HostWorkspaceExportSummary::default());
+            }
+        };
 
         let mut summary = HostWorkspaceExportSummary::default();
         summary.containers_found = staged.len();

@@ -7,15 +7,14 @@
 /// - Coordinating with peer Hub Agents via sockets
 /// - Running integration tests on combined output
 /// - Reporting completion back to Global Orchestrator
-
 use crate::protocol::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::os::unix::net::UnixListener;
-use std::io::{Read, Write};
-use std::fs;
 
 /// Errors for Hub Agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +80,7 @@ impl LocalHubAgent {
 
     /// Initialize worker pool (called after sandbox is ready)
     pub fn init_worker_pool(&self, container_ids: Vec<String>) -> HubAgentResult<()> {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
 
         for (i, container_id) in container_ids.iter().enumerate() {
             let worker_name = self.generate_worker_name(i);
@@ -102,20 +101,22 @@ impl LocalHubAgent {
 
     /// Receive team task from Global Orchestrator
     pub fn receive_team_task(&self, task: TeamTask) -> HubAgentResult<()> {
-        let mut team_task = self.team_task.lock().unwrap();
+        let mut team_task = self.team_task.lock().unwrap_or_else(|e| e.into_inner());
         *team_task = Some(task);
         Ok(())
     }
 
     /// Break down team task into worker assignments
     pub fn break_down_task(&self) -> HubAgentResult<Vec<WorkerAssignment>> {
-        let team_task = self.team_task.lock().unwrap();
+        let team_task = self.team_task.lock().unwrap_or_else(|e| e.into_inner());
         let task = team_task
             .as_ref()
-            .ok_or(HubAgentError::TaskBreakdownFailed("No task assigned".to_string()))?;
+            .ok_or(HubAgentError::TaskBreakdownFailed(
+                "No task assigned".to_string(),
+            ))?;
 
         // Simple strategy: divide task description into N subtasks
-        let workers = self.workers.lock().unwrap();
+        let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
         let num_workers = workers.len();
 
         if num_workers == 0 {
@@ -153,11 +154,14 @@ impl LocalHubAgent {
 
     /// Assign work to an idle worker
     pub fn assign_to_worker(&self, assignment: WorkerAssignment) -> HubAgentResult<()> {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
 
-        let worker = workers
-            .get_mut(&assignment.worker_name)
-            .ok_or(HubAgentError::WorkerNotFound(assignment.worker_name.clone()))?;
+        let worker =
+            workers
+                .get_mut(&assignment.worker_name)
+                .ok_or(HubAgentError::WorkerNotFound(
+                    assignment.worker_name.clone(),
+                ))?;
 
         if worker.status != WorkerStatus::Idle {
             return Err(HubAgentError::WorkerAssignmentFailed(format!(
@@ -173,11 +177,14 @@ impl LocalHubAgent {
 
     /// Record worker completion
     pub fn record_worker_completion(&self, completion: WorkerCompletion) -> HubAgentResult<()> {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
 
-        let worker = workers
-            .get_mut(&completion.worker_name)
-            .ok_or(HubAgentError::WorkerNotFound(completion.worker_name.clone()))?;
+        let worker =
+            workers
+                .get_mut(&completion.worker_name)
+                .ok_or(HubAgentError::WorkerNotFound(
+                    completion.worker_name.clone(),
+                ))?;
 
         worker.completion = Some(completion.clone());
         worker.status = if completion.success {
@@ -191,7 +198,7 @@ impl LocalHubAgent {
 
     /// Get all completed worker outputs
     pub fn collect_outputs(&self) -> Vec<serde_json::Value> {
-        let workers = self.workers.lock().unwrap();
+        let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
         workers
             .values()
             .filter_map(|w| w.completion.as_ref().map(|c| &c.output))
@@ -218,12 +225,14 @@ impl LocalHubAgent {
 
     /// Create a task completion report for Global Orchestrator
     pub fn create_completion_report(&self) -> HubAgentResult<TaskCompletion> {
-        let team_task = self.team_task.lock().unwrap();
+        let team_task = self.team_task.lock().unwrap_or_else(|e| e.into_inner());
         let task = team_task
             .as_ref()
-            .ok_or(HubAgentError::TaskBreakdownFailed("No task to report".to_string()))?;
+            .ok_or(HubAgentError::TaskBreakdownFailed(
+                "No task to report".to_string(),
+            ))?;
 
-        let workers = self.workers.lock().unwrap();
+        let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
         let mut failed_workers = Vec::new();
         for w in workers.values() {
             if w.status == WorkerStatus::Failed {
@@ -233,7 +242,9 @@ impl LocalHubAgent {
             }
         }
 
-        let all_success = workers.values().all(|w| w.status == WorkerStatus::Completed);
+        let all_success = workers
+            .values()
+            .all(|w| w.status == WorkerStatus::Completed);
 
         let combined_output = serde_json::json!({
             "workers": self.collect_outputs(),
@@ -261,7 +272,7 @@ impl LocalHubAgent {
 
         match rpc.method.as_str() {
             "get_api_contract" => {
-                let contracts = self.api_contracts.lock().unwrap();
+                let contracts = self.api_contracts.lock().unwrap_or_else(|e| e.into_inner());
                 let contract_id = rpc
                     .params
                     .get("contract_id")
@@ -295,7 +306,7 @@ impl LocalHubAgent {
 
     /// Register an API contract for other teams to discover
     pub fn register_api_contract(&self, contract: ApiContract) -> HubAgentResult<()> {
-        let mut contracts = self.api_contracts.lock().unwrap();
+        let mut contracts = self.api_contracts.lock().unwrap_or_else(|e| e.into_inner());
         contracts.insert(contract.contract_id.clone(), contract);
         Ok(())
     }
@@ -306,10 +317,9 @@ impl LocalHubAgent {
         let _ = fs::remove_file(&self.config.socket_path);
 
         // Create Unix domain socket
-        let listener = UnixListener::bind(&self.config.socket_path)
-            .map_err(|e| HubAgentError::PeerCommunicationFailed(
-                format!("Failed to bind socket: {}", e)
-            ))?;
+        let listener = UnixListener::bind(&self.config.socket_path).map_err(|e| {
+            HubAgentError::PeerCommunicationFailed(format!("Failed to bind socket: {}", e))
+        })?;
 
         // Spawn thread to accept incoming connections
         // Clone Arc pointers for thread
@@ -336,45 +346,55 @@ impl LocalHubAgent {
                                 Ok(n) => {
                                     if n > 0 {
                                         let request_str = String::from_utf8_lossy(&buffer[..n]);
-                                        
+
                                         // Parse JSON RPC request
                                         match serde_json::from_str::<InterTeamRpc>(&request_str) {
                                             Ok(rpc_request) => {
                                                 // Handle the RPC call
                                                 let response = match rpc_request.method.as_str() {
                                                     "get_api_contract" => {
-                                                        let contracts = api_contracts_c.lock().unwrap();
+                                                        let contracts = api_contracts_c
+                                                            .lock()
+                                                            .unwrap_or_else(|e| e.into_inner());
                                                         let contract_id = rpc_request
                                                             .params
                                                             .get("contract_id")
                                                             .and_then(|v| v.as_str());
 
                                                         match contract_id {
-                                                            Some(id) if contracts.contains_key(id) => {
+                                                            Some(id)
+                                                                if contracts.contains_key(id) =>
+                                                            {
                                                                 InterTeamRpcResponse {
                                                                     call_id: rpc_request.call_id,
                                                                     success: true,
                                                                     result: serde_json::to_value(
-                                                                        contracts.get(id).unwrap()
-                                                                    ).unwrap_or_default(),
+                                                                        contracts.get(id).unwrap(),
+                                                                    )
+                                                                    .unwrap_or_default(),
                                                                     error: None,
                                                                 }
                                                             }
-                                                            _ => {
-                                                                InterTeamRpcResponse {
-                                                                    call_id: rpc_request.call_id,
-                                                                    success: false,
-                                                                    result: serde_json::Value::Null,
-                                                                    error: Some("Contract not found".to_string()),
-                                                                }
-                                                            }
+                                                            _ => InterTeamRpcResponse {
+                                                                call_id: rpc_request.call_id,
+                                                                success: false,
+                                                                result: serde_json::Value::Null,
+                                                                error: Some(
+                                                                    "Contract not found"
+                                                                        .to_string(),
+                                                                ),
+                                                            },
                                                         }
                                                     }
                                                     "get_team_status" => {
-                                                        let workers = workers_c.lock().unwrap();
+                                                        let workers = workers_c
+                                                            .lock()
+                                                            .unwrap_or_else(|e| e.into_inner());
                                                         let idle_count = workers
                                                             .values()
-                                                            .filter(|w| w.status == WorkerStatus::Idle)
+                                                            .filter(|w| {
+                                                                w.status == WorkerStatus::Idle
+                                                            })
                                                             .count();
 
                                                         InterTeamRpcResponse {
@@ -388,24 +408,23 @@ impl LocalHubAgent {
                                                             error: None,
                                                         }
                                                     }
-                                                    _ => {
-                                                        InterTeamRpcResponse {
-                                                            call_id: rpc_request.call_id,
-                                                            success: false,
-                                                            result: serde_json::Value::Null,
-                                                            error: Some(format!(
-                                                                "Unknown method: {}",
-                                                                rpc_request.method
-                                                            )),
-                                                        }
-                                                    }
+                                                    _ => InterTeamRpcResponse {
+                                                        call_id: rpc_request.call_id,
+                                                        success: false,
+                                                        result: serde_json::Value::Null,
+                                                        error: Some(format!(
+                                                            "Unknown method: {}",
+                                                            rpc_request.method
+                                                        )),
+                                                    },
                                                 };
 
                                                 // Send JSON response
                                                 if let Ok(response_json) =
                                                     serde_json::to_string(&response)
                                                 {
-                                                    let _ = socket.write_all(response_json.as_bytes());
+                                                    let _ =
+                                                        socket.write_all(response_json.as_bytes());
                                                 }
                                             }
                                             Err(_) => {
@@ -414,7 +433,7 @@ impl LocalHubAgent {
                                                     "error": "Invalid JSON RPC request"
                                                 });
                                                 let _ = socket.write_all(
-                                                    error_response.to_string().as_bytes()
+                                                    error_response.to_string().as_bytes(),
                                                 );
                                             }
                                         }
@@ -436,7 +455,9 @@ impl LocalHubAgent {
 
     /// Generate a unique worker name (Jake, Mike, Sarah, etc.)
     fn generate_worker_name(&self, index: usize) -> String {
-        let names = ["Jake", "Mike", "Sarah", "Alex", "Chris", "Jordan", "Morgan", "Casey", "Devon", "Riley"];
+        let names = [
+            "Jake", "Mike", "Sarah", "Alex", "Chris", "Jordan", "Morgan", "Casey", "Devon", "Riley",
+        ];
         let name = names.get(index % names.len()).unwrap_or(&"Worker");
         format!("{}-{}", name, index)
     }
@@ -496,7 +517,7 @@ impl LocalHubAgent {
     pub fn list_workers(&self) -> Vec<String> {
         self.workers
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .keys()
             .cloned()
             .collect()

@@ -435,7 +435,12 @@ async fn generate_text_anthropic(
 
     // When json_mode prefill was used the model continues from "{", so restore it.
     if json_mode {
-        Ok(format!("{{{}", text))
+        // Avoid double-brace if model already starts with {
+        if text.starts_with('{') {
+            Ok(text.to_string())
+        } else {
+            Ok(format!("{{{}", text))
+        }
     } else {
         Ok(text.to_string())
     }

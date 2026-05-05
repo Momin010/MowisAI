@@ -373,11 +373,11 @@ impl Tool for GitCheckoutTool {
                 cmd.arg("-b");
             }
             cmd.arg(branch);
-            // use explicit identity for chrooted operations (pattern from spec)
-            cmd.env("GIT_AUTHOR_NAME", "MowisAI Agent")
-                .env("GIT_AUTHOR_EMAIL", "agent@mowisai.com")
-                .env("GIT_COMMITTER_NAME", "MowisAI Agent")
-                .env("GIT_COMMITTER_EMAIL", "agent@mowisai.com");
+            // use explicit identity for chrooted operations
+            cmd.env("GIT_AUTHOR_NAME", "agentd")
+                .env("GIT_AUTHOR_EMAIL", "agentd@mowisai.com")
+                .env("GIT_COMMITTER_NAME", "agentd")
+                .env("GIT_COMMITTER_EMAIL", "agentd@mowisai.com");
 
             let output = cmd.output()?;
             return Ok(json!({
