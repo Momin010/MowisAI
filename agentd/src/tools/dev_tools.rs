@@ -18,23 +18,35 @@ impl Tool for LintTool {
             .and_then(|v| v.as_str())
             .unwrap_or("auto");
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
 
-        let (linter, _cmd, output) = match language {
+        // SECURITY: Use Command args instead of shell string interpolation
+        let (linter, output) = match language {
             "js" | "javascript" | "typescript" | "auto" => {
-                let cmd = format!("timeout 5 eslint {} < /dev/null", path.display());
-                let output = Command::new("sh").arg("-c").arg(&cmd).output();
-                ("eslint", cmd, output)
+                let output = Command::new("timeout")
+                    .arg("5")
+                    .arg("eslint")
+                    .arg(&path)
+                    .output();
+                ("eslint", output)
             }
             "python" => {
-                let cmd = format!("timeout 5 pylint {} < /dev/null", path.display());
-                let output = Command::new("sh").arg("-c").arg(&cmd).output();
-                ("pylint", cmd, output)
+                let output = Command::new("timeout")
+                    .arg("5")
+                    .arg("pylint")
+                    .arg(&path)
+                    .output();
+                ("pylint", output)
             }
             "rust" => {
-                let cmd = format!("timeout 5 cargo clippy -- {} < /dev/null", path.display());
-                let output = Command::new("sh").arg("-c").arg(&cmd).output();
-                ("cargo clippy", cmd, output)
+                let output = Command::new("timeout")
+                    .arg("5")
+                    .arg("cargo")
+                    .arg("clippy")
+                    .arg("--")
+                    .arg(&path)
+                    .output();
+                ("cargo clippy", output)
             }
             _ => {
                 return Ok(json!({ "success": false, "output": "unknown language" }));
@@ -44,7 +56,8 @@ impl Tool for LintTool {
         match output {
             Ok(out) => Ok(json!({
                 "success": out.status.success(),
-                "output": String::from_utf8_lossy(&out.stdout).to_string()
+                "output": String::from_utf8_lossy(&out.stdout).to_string(),
+                "linter": linter
             })),
             Err(e) => Ok(json!({
                 "success": false,
@@ -63,27 +76,61 @@ impl Tool for TestTool {
         "test"
     }
     fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
-        let path_str = input["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("test: missing path"))?;
+        let path_str = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let command = input.get("command").and_then(|v| v.as_str());
 
-        let command = input.get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("echo \"tests passed\"");
+        let path = resolve_path(ctx, path_str)?;
 
-        let path = resolve_path(ctx, path_str);
+        let output = if let Some(cmd) = command {
+            // SECURITY: Parse command into args instead of passing to sh -c
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            if parts.is_empty() {
+                return Err(anyhow::anyhow!("test: empty command"));
+            }
+            let mut c = Command::new("timeout");
+            c.arg("30");
+            for part in &parts {
+                c.arg(part);
+            }
+            c.current_dir(&path);
+            c.output()
+        } else {
+            // Default: try cargo test, npm test, pytest
+            let output = Command::new("timeout")
+                .arg("30")
+                .arg("cargo")
+                .arg("test")
+                .current_dir(&path)
+                .output();
+            if let Ok(ref out) = output {
+                if out.status.success() || std::path::Path::new(&path).join("Cargo.toml").exists() {
+                    return match output {
+                        Ok(out) => Ok(json!({
+                            "success": out.status.success(),
+                            "stdout": String::from_utf8_lossy(&out.stdout).to_string(),
+                            "stderr": String::from_utf8_lossy(&out.stderr).to_string(),
+                            "runner": "cargo"
+                        })),
+                        Err(e) => Ok(json!({ "success": false, "error": e.to_string() })),
+                    };
+                }
+            }
+            Command::new("timeout")
+                .arg("30")
+                .arg("npm")
+                .arg("test")
+                .current_dir(&path)
+                .output()
+        };
 
-        let timeout_cmd = format!("timeout 10 {}", command);
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(&timeout_cmd)
-            .current_dir(&path)
-            .output()?;
-
-        Ok(json!({
-            "success": output.status.success(),
-            "stdout": String::from_utf8_lossy(&output.stdout).to_string()
-        }))
+        match output {
+            Ok(out) => Ok(json!({
+                "success": out.status.success(),
+                "stdout": String::from_utf8_lossy(&out.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&out.stderr).to_string()
+            })),
+            Err(e) => Ok(json!({ "success": false, "error": e.to_string() })),
+        }
     }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(TestTool)
@@ -96,27 +143,62 @@ impl Tool for BuildTool {
         "build"
     }
     fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
-        let path_str = input["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("build: missing path"))?;
+        let path_str = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let command = input.get("command").and_then(|v| v.as_str());
 
-        let command = input.get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("echo \"build ok\"");
+        let path = resolve_path(ctx, path_str)?;
 
-        let path = resolve_path(ctx, path_str);
+        let output = if let Some(cmd) = command {
+            // SECURITY: Parse command into args instead of passing to sh -c
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            if parts.is_empty() {
+                return Err(anyhow::anyhow!("build: empty command"));
+            }
+            let mut c = Command::new("timeout");
+            c.arg("120");
+            for part in &parts {
+                c.arg(part);
+            }
+            c.current_dir(&path);
+            c.output()
+        } else {
+            // Auto-detect build system
+            if std::path::Path::new(&path).join("Cargo.toml").exists() {
+                Command::new("timeout")
+                    .arg("120")
+                    .arg("cargo")
+                    .arg("build")
+                    .current_dir(&path)
+                    .output()
+            } else if std::path::Path::new(&path).join("package.json").exists() {
+                Command::new("timeout")
+                    .arg("120")
+                    .arg("npm")
+                    .arg("run")
+                    .arg("build")
+                    .current_dir(&path)
+                    .output()
+            } else if std::path::Path::new(&path).join("Makefile").exists() {
+                Command::new("timeout")
+                    .arg("120")
+                    .arg("make")
+                    .current_dir(&path)
+                    .output()
+            } else {
+                return Ok(
+                    json!({ "success": false, "error": "No build system detected (Cargo.toml, package.json, Makefile)" }),
+                );
+            }
+        };
 
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&path)
-            .output()?;
-
-        Ok(json!({
-            "success": output.status.success(),
-            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-            "stderr": String::from_utf8_lossy(&output.stderr).to_string()
-        }))
+        match output {
+            Ok(out) => Ok(json!({
+                "success": out.status.success(),
+                "stdout": String::from_utf8_lossy(&out.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&out.stderr).to_string()
+            })),
+            Err(e) => Ok(json!({ "success": false, "error": e.to_string() })),
+        }
     }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(BuildTool)
@@ -129,35 +211,57 @@ impl Tool for TypeCheckTool {
         "type_check"
     }
     fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
-        let path_str = input["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("type_check: missing path"))?;
+        let path_str = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let language = input
             .get("language")
             .and_then(|v| v.as_str())
-            .unwrap_or("typescript");
+            .unwrap_or("auto");
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
 
+        // SECURITY: Use Command args instead of shell interpolation
         let output = match language {
-            "typescript" | "ts" => {
-                let cmd = format!("timeout 5 tsc --noEmit {} < /dev/null", path.display());
-                Command::new("sh").arg("-c").arg(&cmd).output()
+            "typescript" | "ts" | "auto" => {
+                let has_tsconfig = std::path::Path::new(&path).join("tsconfig.json").exists();
+                if has_tsconfig {
+                    Command::new("timeout")
+                        .arg("30")
+                        .arg("npx")
+                        .arg("tsc")
+                        .arg("--noEmit")
+                        .current_dir(&path)
+                        .output()
+                } else {
+                    return Ok(
+                        json!({ "success": true, "output": "No tsconfig.json found, skipping TypeScript check" }),
+                    );
+                }
             }
+            "python" | "py" => Command::new("timeout")
+                .arg("30")
+                .arg("mypy")
+                .arg(&path)
+                .output(),
+            "rust" | "rs" => Command::new("timeout")
+                .arg("60")
+                .arg("cargo")
+                .arg("check")
+                .current_dir(&path)
+                .output(),
             _ => {
-                return Ok(json!({ "success": false, "output": "unsupported language" }));
+                return Ok(
+                    json!({ "success": false, "output": format!("Unsupported language: {}", language) }),
+                )
             }
         };
 
         match output {
             Ok(out) => Ok(json!({
                 "success": out.status.success(),
-                "output": String::from_utf8_lossy(&out.stdout).to_string()
+                "output": String::from_utf8_lossy(&out.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&out.stderr).to_string()
             })),
-            Err(e) => Ok(json!({
-                "success": false,
-                "output": format!("type check failed: {}", e)
-            })),
+            Err(e) => Ok(json!({ "success": false, "error": e.to_string() })),
         }
     }
     fn clone_box(&self) -> Box<dyn Tool> {
@@ -171,48 +275,61 @@ impl Tool for FormatTool {
         "format"
     }
     fn invoke(&self, ctx: &ToolContext, input: Value) -> anyhow::Result<Value> {
-        let path_str = input["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("format: missing path"))?;
+        let path_str = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let language = input
             .get("language")
             .and_then(|v| v.as_str())
             .unwrap_or("auto");
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
 
+        // SECURITY: Use Command args instead of shell interpolation
         let output = match language {
-            "javascript" | "js" | "typescript" | "ts" | "auto" => {
-                let cmd = format!("timeout 5 prettier --write {} < /dev/null", path.display());
-                Command::new("sh").arg("-c").arg(&cmd).output()
+            "rust" | "rs" | "auto" => {
+                if std::path::Path::new(&path).join("Cargo.toml").exists() {
+                    Command::new("timeout")
+                        .arg("30")
+                        .arg("cargo")
+                        .arg("fmt")
+                        .current_dir(&path)
+                        .output()
+                } else {
+                    Command::new("timeout")
+                        .arg("30")
+                        .arg("prettier")
+                        .arg("--write")
+                        .arg(&path)
+                        .output()
+                }
             }
-            "python" => {
-                let cmd = format!("timeout 5 black {} < /dev/null", path.display());
-                Command::new("sh").arg("-c").arg(&cmd).output()
-            }
-            "rust" => {
-                let cmd = format!("timeout 5 rustfmt {} < /dev/null", path.display());
-                Command::new("sh").arg("-c").arg(&cmd).output()
-            }
+            "python" | "py" => Command::new("timeout")
+                .arg("30")
+                .arg("black")
+                .arg(&path)
+                .output(),
+            "js" | "javascript" | "typescript" | "ts" => Command::new("timeout")
+                .arg("30")
+                .arg("prettier")
+                .arg("--write")
+                .arg(&path)
+                .output(),
             _ => {
-                return Ok(json!({ "success": false, "output": "unsupported language" }));
+                return Ok(
+                    json!({ "success": false, "output": format!("Unsupported language: {}", language) }),
+                )
             }
         };
 
         match output {
             Ok(out) => Ok(json!({
                 "success": out.status.success(),
-                "output": String::from_utf8_lossy(&out.stdout).to_string()
+                "output": String::from_utf8_lossy(&out.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&out.stderr).to_string()
             })),
-            Err(e) => Ok(json!({
-                "success": false,
-                "output": format!("format failed: {}", e)
-            })),
+            Err(e) => Ok(json!({ "success": false, "error": e.to_string() })),
         }
     }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(FormatTool)
     }
 }
-
-// ============== ECHO TOOL (Legacy) ==============

@@ -11,7 +11,7 @@ impl Tool for CreateChannelTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("create_channel: missing name"))?;
 
-        let mut channels = CHANNELS.lock().unwrap();
+        let mut channels = CHANNELS.lock().unwrap_or_else(|e| e.into_inner());
         channels.insert(name.to_string(), vec![]);
 
         Ok(json!({ "success": true, "name": name }))
@@ -36,7 +36,7 @@ impl Tool for SendMessageTool {
             .and_then(|v| v.as_str())
             .unwrap_or("system");
 
-        let mut channels = CHANNELS.lock().unwrap();
+        let mut channels = CHANNELS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(msgs) = channels.get_mut(channel) {
             msgs.push(json!({ "sender": sender, "message": message }));
             Ok(json!({ "success": true }))
@@ -59,7 +59,7 @@ impl Tool for ReadMessagesTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("read_messages: missing channel"))?;
 
-        let channels = CHANNELS.lock().unwrap();
+        let channels = CHANNELS.lock().unwrap_or_else(|e| e.into_inner());
         let messages = channels
             .get(channel)
             .map(|msgs| msgs.clone())
@@ -84,7 +84,7 @@ impl Tool for BroadcastTool {
             .and_then(|v| v.as_str())
             .unwrap_or("system");
 
-        let mut channels = CHANNELS.lock().unwrap();
+        let mut channels = CHANNELS.lock().unwrap_or_else(|e| e.into_inner());
         let msg = json!({ "sender": sender, "message": message });
         let channels_count = channels.len();
 
@@ -110,7 +110,7 @@ impl Tool for WaitForTool {
             .ok_or_else(|| anyhow::anyhow!("wait_for: missing channel"))?;
         let _timeout = input.get("timeout").and_then(|v| v.as_u64());
 
-        let channels = CHANNELS.lock().unwrap();
+        let channels = CHANNELS.lock().unwrap_or_else(|e| e.into_inner());
         let has_messages = channels
             .get(channel)
             .map(|msgs| !msgs.is_empty())
