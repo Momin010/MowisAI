@@ -325,9 +325,7 @@ impl AgentExecutor {
                     id: checkpoint_id,
                     tool_call: tool_call.name.clone(),
                     tool_args: tool_call.args.clone(),
-                    tool_result: serde_json::Value::String(
-                        serde_json::to_string(&tool_result).unwrap_or_default()
-                    ),
+                    tool_result: serde_json::to_value(&tool_result).unwrap_or_default(),
                     timestamp: current_timestamp(),
                     layer_snapshot_path: snapshot_path,
                 };

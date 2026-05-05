@@ -417,7 +417,7 @@ impl NewOrchestrator {
                     // If no tasks found, check if all done
                     if !task_found {
                         let stats = scheduler_clone.get_stats().await;
-                        if stats.completed + stats.failed >= stats.total_tasks {
+                        if stats.completed + stats.failed + stats.skipped >= stats.total_tasks {
                             // All done - worker can exit
                             break;
                         }
@@ -440,7 +440,7 @@ impl NewOrchestrator {
                 if let Some(ref tx) = event_tx_for_stats {
                     let _ = tx.send(OrchestratorEvent::StatsUpdate { stats: stats.clone() });
                 }
-                if stats.completed + stats.failed >= stats.total_tasks && stats.total_tasks > 0 {
+                if stats.completed + stats.failed + stats.skipped >= stats.total_tasks && stats.total_tasks > 0 {
                     break;
                 }
             }
@@ -1100,10 +1100,21 @@ impl NewOrchestrator {
                             {
                                 Ok(r) => r,
                                 Err(e) => {
-                                    errors_clone.write().await.push(format!(
+                                    let error_msg = format!(
                                         "[Worker {}] Task '{}' failed: {}",
                                         worker_id, task_description, e
-                                    ));
+                                    );
+                                    errors_clone.write().await.push(error_msg.clone());
+                                    // CRITICAL: Report failure to scheduler so dependents are skipped
+                                    let fail_result = agentd_protocol::AgentResult {
+                                        task_id: ready_task_id.clone(),
+                                        success: false,
+                                        git_diff: None,
+                                        error: Some(error_msg),
+                                        checkpoint_log: vec![],
+                                        timestamp: agentd_protocol::current_timestamp_ms(),
+                                    };
+                                    let _ = scheduler_clone.handle_task_completion(fail_result).await;
                                     continue;
                                 }
                             };
@@ -1196,7 +1207,7 @@ impl NewOrchestrator {
                     }
                     if !task_found {
                         let stats = scheduler_clone.get_stats().await;
-                        if stats.completed + stats.failed >= stats.total_tasks {
+                        if stats.completed + stats.failed + stats.skipped >= stats.total_tasks {
                             break;
                         }
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -1330,9 +1341,9 @@ impl NewOrchestrator {
                             verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
                         }
                         Err(_) => {
-                            log::warn!("  âš  Verification timed out for {}", sandbox_name);
-                            sandbox_result.verification_status = VerificationStatus::NotStarted;
-                            verification_status.insert(sandbox_name.clone(), VerificationStatus::NotStarted);
+                            log::warn!("  Verification timed out for {}", sandbox_name);
+                            sandbox_result.verification_status = VerificationStatus::TimedOut;
+                            verification_status.insert(sandbox_name.clone(), VerificationStatus::TimedOut);
                         }
                     }
                 } else {
@@ -1397,5 +1408,5 @@ fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_millis() as u64
 }

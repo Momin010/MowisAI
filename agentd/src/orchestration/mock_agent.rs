@@ -42,7 +42,7 @@ impl MockAgentExecutor {
     ) -> Result<AgentResult> {
         if self.verbose {
             log::info!("\n┌─────────────────────────────────────────────────────────");
-            log::info!("│ 🤖 MOCK AGENT: {}", &agent.agent_id[..8]);
+            log::info!("│ 🤖 MOCK AGENT: {}", &agent.agent_id.chars().take(8).collect::<String>());
             log::info!("│ 📋 TASK: {} / {}", task_index + 1, total_tasks);
             log::info!("└─────────────────────────────────────────────────────────");
         }
@@ -58,7 +58,7 @@ impl MockAgentExecutor {
 
         let file_content = format!(
             "// File created by mock agent {}\n// Task: {} / {}\n// Timestamp: {}\n\nconsole.log('Hello from mock agent!');\nconsole.log('Task {} completed successfully');\n",
-            &agent.agent_id[..8],
+            &agent.agent_id.chars().take(8).collect::<String>(),
             task_index + 1,
             total_tasks,
             current_timestamp(),
@@ -178,7 +178,7 @@ impl MockAgentExecutor {
         if self.verbose {
             log::info!(
                 "  [VERIFY] Mock test agent {}: {}",
-                &agent.agent_id[..8],
+                &agent.agent_id.chars().take(8).collect::<String>(),
                 test_description
             );
         }
@@ -243,7 +243,7 @@ impl MockAgentExecutor {
         if self.verbose {
             log::info!(
                 "  [VERIFY] Mock fix agent {}: {}",
-                &agent.agent_id[..8],
+                &agent.agent_id.chars().take(8).collect::<String>(),
                 fix_description
             );
         }
@@ -253,7 +253,7 @@ impl MockAgentExecutor {
         // Write a mock fix marker file so the sandbox has evidence of fix application
         let fix_content = format!(
             "// Fix applied by mock agent {}\n// Fix: {}\n// Timestamp: {}\n",
-            &agent.agent_id[..8],
+            &agent.agent_id.chars().take(8).collect::<String>(),
             fix_description,
             current_timestamp()
         );
@@ -264,7 +264,7 @@ impl MockAgentExecutor {
             "container": &agent.container_id,
             "name": "write_file",
             "input": {
-                "path": format!("/workspace/.fix_{}.txt", &agent.agent_id[..8]),
+                "path": format!("/workspace/.fix_{}.txt", &agent.agent_id.chars().take(8).collect::<String>()),
                 "content": fix_content
             }
         });

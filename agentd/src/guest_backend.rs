@@ -27,13 +27,15 @@ pub fn boot_guest_os_scaffold(root: &Path, image_hint: &str) -> Result<u32> {
 
     // Alpine usually doesn't ship init; run a minimal keepalive loop.
     let (cmd, args) = if let Some(c) = chosen {
-        // Some init scripts expect to be PID1; we run it as the main process.
         (c.to_string(), vec![])
     } else {
-        let _ = image_hint; // for future per-distro choices
+        let _ = image_hint;
         (
             "/bin/sh".to_string(),
-            vec!["-lc".to_string(), "while true; do sleep 10; done".to_string()],
+            vec![
+                "-lc".to_string(),
+                "while true; do sleep 10; done".to_string(),
+            ],
         )
     };
 
@@ -46,22 +48,61 @@ pub fn boot_guest_os_scaffold(root: &Path, image_hint: &str) -> Result<u32> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let child = command.spawn().context("failed to spawn guest scaffold process")?;
+    let child = command
+        .spawn()
+        .context("failed to spawn guest scaffold process")?;
     let pid = child.id();
+
+    // SECURITY: Validate PID before returning
+    if pid == 0 {
+        return Err(anyhow!("Guest scaffold spawned with PID 0 (invalid)"));
+    }
 
     // Detach: we intentionally do not keep the `Child` handle.
     // On `destroy_sandbox`, the supervisor PID is killed.
+    // The child will be reparented to PID 1 when this process exits.
     Ok(pid)
 }
 
 pub fn stop_guest_os(pid: u32) -> Result<()> {
-    // Best-effort kill. We do not require SIGKILL; SIGTERM is enough for scaffold.
+    // SECURITY: Never kill PID 0
+    if pid == 0 {
+        return Ok(());
+    }
+
     #[cfg(unix)]
     {
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
-        kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
-            .map_err(|e| anyhow!("failed to stop guest pid {}: {}", pid, e))?;
+        use std::time::{Duration, Instant};
+
+        // Send SIGTERM first
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+
+        // Wait up to 5 seconds for process to exit
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            // Check if process still exists
+            match kill(Pid::from_raw(pid as i32), None) {
+                Ok(_) => {
+                    // Process still alive, wait a bit
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => {
+                    // Process gone
+                    return Ok(());
+                }
+            }
+        }
+
+        // SIGTERM didn't work, use SIGKILL
+        log::warn!(
+            "Guest OS pid {} didn't respond to SIGTERM, sending SIGKILL",
+            pid
+        );
+        kill(Pid::from_raw(pid as i32), Signal::SIGKILL)
+            .map_err(|e| anyhow!("failed to SIGKILL guest pid {}: {}", pid, e))?;
+
         Ok(())
     }
     #[cfg(not(unix))]
@@ -70,4 +111,3 @@ pub fn stop_guest_os(pid: u32) -> Result<()> {
         Err(anyhow!("stop_guest_os scaffold requires Unix"))
     }
 }
-
