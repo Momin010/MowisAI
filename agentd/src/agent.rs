@@ -1,4 +1,5 @@
 use crate::sandbox::{ResourceLimits, Sandbox};
+use crate::tool_registry;
 use serde::{Deserialize, Serialize};
 
 /// Configuration used when spawning a new agent.
@@ -11,6 +12,8 @@ pub struct AgentConfig {
     pub system_prompt: Option<String>,
     /// Maximum number of tool-calling rounds
     pub max_rounds: u32,
+    /// Socket path for communicating with agentd
+    pub socket_path: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -21,6 +24,7 @@ impl Default for AgentConfig {
             resources: ResourceLimits::default(),
             system_prompt: None,
             max_rounds: 50,
+            socket_path: Some("/tmp/agentd.sock".to_string()),
         }
     }
 }
@@ -43,68 +47,154 @@ pub struct AgentResult {
 pub struct Agent {
     sandbox: Sandbox,
     config: AgentConfig,
+    /// Tools registered with this agent
+    registered_tools: Vec<String>,
 }
 
 impl Agent {
     pub fn spawn(config: AgentConfig) -> Result<Self, anyhow::Error> {
         let sandbox = Sandbox::new(config.resources.clone())?;
-        log::info!(
-            "Spawned agent in sandbox {} with model {} and {} tools",
-            sandbox.id(),
-            config.model,
-            config.tools.len()
-        );
-        Ok(Agent { sandbox, config })
-    }
 
-    /// Run the agent with a prompt. Executes tool-calling loop.
-    pub fn run(&mut self, prompt: &str) -> Result<AgentResult, anyhow::Error> {
-        let mut rounds = 0u32;
-        let mut tools_invoked = Vec::new();
-        let mut last_output = String::new();
-
-        // Register configured tools
-        for tool_name in &self.config.tools {
-            // Tools should already be registered via the tool registry
-            log::debug!("Agent has tool available: {}", tool_name);
+        // Register all configured tools with the sandbox
+        let mut registered_tools = Vec::new();
+        if config.tools.is_empty() {
+            // Register all available tools
+            for tool in tool_registry::create_all_tools() {
+                let name = tool.name().to_string();
+                sandbox.register_tool(tool);
+                registered_tools.push(name);
+            }
+        } else {
+            // Register only specified tools
+            let all_tools = tool_registry::create_all_tools();
+            for tool in all_tools {
+                if config.tools.contains(&tool.name().to_string()) {
+                    let name = tool.name().to_string();
+                    sandbox.register_tool(tool);
+                    registered_tools.push(name);
+                }
+            }
         }
 
-        // Build the initial context
+        log::info!(
+            "Spawned agent in sandbox {} with model {} and {}/{} tools",
+            sandbox.id(),
+            config.model,
+            registered_tools.len(),
+            config.tools.len().max(75),
+        );
+
+        Ok(Agent {
+            sandbox,
+            config,
+            registered_tools,
+        })
+    }
+
+    /// Run the agent with a prompt. Executes a single tool invocation step.
+    ///
+    /// For full multi-round tool-calling loops, use the orchestration layer's
+    /// `AgentExecutor` which manages the LLM conversation and tool dispatch.
+    /// This method provides direct single-step execution.
+    pub fn run(&mut self, prompt: &str) -> Result<AgentResult, anyhow::Error> {
+        let mut tools_invoked = Vec::new();
+
         let system_prompt =
             self.config.system_prompt.as_deref().unwrap_or(
                 "You are a helpful AI agent. Use the available tools to complete tasks.",
             );
 
-        // Execute tool-calling loop
-        // In a real implementation, this would call the LLM API and dispatch tools
-        // For now, we create the execution context and return
         log::info!(
-            "Agent starting execution: prompt='{}', max_rounds={}",
+            "Agent {} starting execution: prompt='{}', tools={}, max_rounds={}",
+            self.sandbox.id(),
             if prompt.len() > 100 {
                 &prompt[..100]
             } else {
                 prompt
             },
-            self.config.max_rounds
+            self.registered_tools.len(),
+            self.config.max_rounds,
         );
 
-        // The actual tool-calling loop is handled by the orchestration layer
-        // (agent_execution.rs) which uses the socket API. This method provides
-        // the basic agent lifecycle.
-        rounds += 1;
-        last_output = prompt.to_string();
+        // Build the tool invocation context
+        let ctx = crate::tools::common::ToolContext::new(
+            self.sandbox.id(),
+            Some(self.sandbox.root_path().to_path_buf()),
+        );
+
+        // Execute the prompt as a single tool call if it matches a tool pattern
+        // For complex multi-step tasks, the orchestration layer handles the loop
+        let output = if prompt.starts_with("run:") {
+            // Direct command execution
+            let cmd = prompt.strip_prefix("run:").unwrap_or(prompt).trim();
+            let input = serde_json::json!({"cmd": cmd, "cwd": "/workspace"});
+            match self.sandbox.invoke_tool_by_name("run_command", &ctx, input) {
+                Ok(result) => {
+                    tools_invoked.push("run_command".to_string());
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                }
+                Err(e) => format!("Tool error: {}", e),
+            }
+        } else if prompt.starts_with("read:") {
+            let path = prompt.strip_prefix("read:").unwrap_or(prompt).trim();
+            let input = serde_json::json!({"path": path});
+            match self.sandbox.invoke_tool_by_name("read_file", &ctx, input) {
+                Ok(result) => {
+                    tools_invoked.push("read_file".to_string());
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                }
+                Err(e) => format!("Tool error: {}", e),
+            }
+        } else if prompt.starts_with("write:") {
+            // Format: write:path:content
+            let parts: Vec<&str> = prompt
+                .strip_prefix("write:")
+                .unwrap_or("")
+                .splitn(2, ':')
+                .collect();
+            if parts.len() == 2 {
+                let input = serde_json::json!({"path": parts[0].trim(), "content": parts[1]});
+                match self.sandbox.invoke_tool_by_name("write_file", &ctx, input) {
+                    Ok(result) => {
+                        tools_invoked.push("write_file".to_string());
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }
+                    Err(e) => format!("Tool error: {}", e),
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Invalid write format. Use write:path:content"
+                ));
+            }
+        } else {
+            // For non-direct commands, return the prompt for the orchestration layer to handle
+            prompt.to_string()
+        };
 
         // Capture any changes made
         let git_diff = self.capture_diff().ok();
 
         Ok(AgentResult {
             success: true,
-            output: Some(last_output),
+            output: Some(output),
             git_diff,
             error: None,
-            rounds_executed: rounds,
+            rounds_executed: 1,
             tools_invoked,
         })
+    }
+
+    /// Invoke a specific tool with input
+    pub fn invoke_tool(
+        &self,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, anyhow::Error> {
+        let ctx = crate::tools::common::ToolContext::new(
+            self.sandbox.id(),
+            Some(self.sandbox.root_path().to_path_buf()),
+        );
+        self.sandbox.invoke_tool_by_name(tool_name, &ctx, input)
     }
 
     /// Capture git diff of changes in the sandbox
@@ -124,10 +214,7 @@ impl Agent {
 
     pub fn spawn_subagent(&self, config: AgentConfig) -> Result<Agent, anyhow::Error> {
         let child_sandbox = self.sandbox.spawn_child(config.resources.clone())?;
-        let agent = Agent {
-            sandbox: child_sandbox,
-            config,
-        };
+        let agent = Agent::spawn(config)?;
         log::info!(
             "spawned subagent {} from parent {}",
             agent.sandbox.id(),
@@ -144,5 +231,15 @@ impl Agent {
     /// Get the agent's model
     pub fn model(&self) -> &str {
         &self.config.model
+    }
+
+    /// Get list of registered tools
+    pub fn tools(&self) -> &[String] {
+        &self.registered_tools
+    }
+
+    /// Get the sandbox root path
+    pub fn root_path(&self) -> &std::path::Path {
+        self.sandbox.root_path()
     }
 }

@@ -455,8 +455,9 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let display_text = if app.is_loading {
         "(waiting for response...)".to_string()
     } else {
-        let before = &app.input_text[..app.input_cursor];
-        let after = &app.input_text[app.input_cursor..];
+        // Use char-aware slicing for cursor display
+        let before: String = app.input_text.chars().take(app.input_cursor).collect();
+        let after: String = app.input_text.chars().skip(app.input_cursor).collect();
         format!("> {}\u{2588}{}", before, after)
     };
 

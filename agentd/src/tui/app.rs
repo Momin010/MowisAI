@@ -298,13 +298,26 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
-                self.input_text.insert(self.input_cursor, c);
+                // Use char-aware insertion
+                let byte_pos = self.input_text
+                    .char_indices()
+                    .nth(self.input_cursor)
+                    .map(|(pos, _)| pos)
+                    .unwrap_or(self.input_text.len());
+                self.input_text.insert(byte_pos, c);
                 self.input_cursor += 1;
             }
             KeyCode::Backspace => {
                 if self.input_cursor > 0 {
                     self.input_cursor -= 1;
-                    self.input_text.remove(self.input_cursor);
+                    let byte_pos = self.input_text
+                        .char_indices()
+                        .nth(self.input_cursor)
+                        .map(|(pos, _)| pos)
+                        .unwrap_or(0);
+                    if byte_pos < self.input_text.len() {
+                        self.input_text.remove(byte_pos);
+                    }
                 }
             }
             KeyCode::Left => {
@@ -313,7 +326,8 @@ impl App {
                 }
             }
             KeyCode::Right => {
-                if self.input_cursor < self.input_text.len() {
+                let char_count = self.input_text.chars().count();
+                if self.input_cursor < char_count {
                     self.input_cursor += 1;
                 }
             }

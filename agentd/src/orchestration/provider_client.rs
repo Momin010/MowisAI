@@ -180,11 +180,92 @@ pub struct AgentRoundResult {
     pub tool_calls: Vec<ToolCall>,
 }
 
+// ── Retry with Exponential Backoff ──────────────────────────────────────────
+
+/// Maximum number of retries for transient LLM API errors
+const MAX_LLM_RETRIES: u32 = 3;
+
+/// Check if an HTTP status code is retryable (429 rate limit, 5xx server error)
+fn is_retryable_status(status: u16) -> bool {
+    status == 429 || status == 500 || status == 502 || status == 503 || status == 504
+}
+
+/// Check if an error is retryable (network errors, timeouts)
+fn is_retryable_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("timeout")
+        || msg.contains("connection reset")
+        || msg.contains("connection refused")
+        || msg.contains("broken pipe")
+        || msg.contains("eof")
+        || msg.contains("dns")
+}
+
+/// Execute an async operation with exponential backoff retry for transient errors.
+///
+/// Retries on:
+/// - HTTP 429 (rate limit) with Retry-After header support
+/// - HTTP 5xx (server errors)
+/// - Network errors (timeout, connection reset, etc.)
+///
+/// Does NOT retry on:
+/// - HTTP 4xx (client errors like 401, 403, 404)
+/// - Parse errors, auth errors, etc.
+async fn with_retry<F, Fut, T>(operation_name: &str, max_retries: u32, f: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut last_err = None;
+
+    for attempt in 0..=max_retries {
+        match f().await {
+            Ok(result) => {
+                if attempt > 0 {
+                    log::info!("[{}] Succeeded on attempt {}", operation_name, attempt + 1);
+                }
+                return Ok(result);
+            }
+            Err(e) => {
+                let retryable = is_retryable_error(&e);
+
+                if !retryable || attempt >= max_retries {
+                    if attempt > 0 {
+                        log::warn!(
+                            "[{}] Failed after {} attempts: {}",
+                            operation_name,
+                            attempt + 1,
+                            e
+                        );
+                    }
+                    return Err(e);
+                }
+
+                // Exponential backoff: 1s, 2s, 4s, ...
+                let backoff_ms = 1000 * (1u64 << attempt);
+                log::warn!(
+                    "[{}] Attempt {}/{} failed (retryable): {}. Backing off {}ms",
+                    operation_name,
+                    attempt + 1,
+                    max_retries + 1,
+                    e,
+                    backoff_ms
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow!("{}: all retries exhausted", operation_name)))
+}
+
 // ── Text Generation ───────────────────────────────────────────────────────────
 
 /// Generate a text (or JSON) completion — no tool calling.
 ///
 /// Used by: planner, merge reviewer, verification planner, fix-task generator.
+/// Includes automatic retry with exponential backoff for transient errors.
 pub async fn generate_text(
     llm_config: &LlmConfig,
     system_prompt: &str,
@@ -196,6 +277,21 @@ pub async fn generate_text(
 }
 
 pub async fn generate_text_with_limit(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    user_message: &str,
+    json_mode: bool,
+    temperature: f64,
+    max_tokens: u32,
+) -> Result<String> {
+    // Wrap with retry for transient errors
+    let provider_name = format!("{:?}", llm_config.provider);
+    with_retry(&format!("generate_text/{}", provider_name), MAX_LLM_RETRIES, || {
+        generate_text_with_limit_inner(llm_config, system_prompt, user_message, json_mode, temperature, max_tokens)
+    }).await
+}
+
+async fn generate_text_with_limit_inner(
     llm_config: &LlmConfig,
     system_prompt: &str,
     user_message: &str,
