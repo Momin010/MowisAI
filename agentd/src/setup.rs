@@ -18,12 +18,36 @@ struct GrokModel {
 }
 
 const GROK_MODELS: &[GrokModel] = &[
-    GrokModel { id: "grok-3",           label: "grok-3",           note: "Flagship — best quality"        },
-    GrokModel { id: "grok-3-fast",      label: "grok-3-fast",      note: "Faster, lower latency"          },
-    GrokModel { id: "grok-3-mini",      label: "grok-3-mini",      note: "Lightweight, cost-efficient"    },
-    GrokModel { id: "grok-3-mini-fast", label: "grok-3-mini-fast", note: "Lightweight + fast"             },
-    GrokModel { id: "grok-2-1212",      label: "grok-2-1212",      note: "Previous generation"            },
-    GrokModel { id: "grok-2-vision-1212", label: "grok-2-vision-1212", note: "Vision capabilities"       },
+    GrokModel {
+        id: "grok-3",
+        label: "grok-3",
+        note: "Flagship — best quality",
+    },
+    GrokModel {
+        id: "grok-3-fast",
+        label: "grok-3-fast",
+        note: "Faster, lower latency",
+    },
+    GrokModel {
+        id: "grok-3-mini",
+        label: "grok-3-mini",
+        note: "Lightweight, cost-efficient",
+    },
+    GrokModel {
+        id: "grok-3-mini-fast",
+        label: "grok-3-mini-fast",
+        note: "Lightweight + fast",
+    },
+    GrokModel {
+        id: "grok-2-1212",
+        label: "grok-2-1212",
+        note: "Previous generation",
+    },
+    GrokModel {
+        id: "grok-2-vision-1212",
+        label: "grok-2-vision-1212",
+        note: "Vision capabilities",
+    },
 ];
 
 struct GroqModel {
@@ -33,10 +57,26 @@ struct GroqModel {
 }
 
 const GROQ_MODELS: &[GroqModel] = &[
-    GroqModel { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", note: "Powerful & versatile"    },
-    GroqModel { id: "llama-3.1-8b-instant",    label: "Llama 3.1 8B",  note: "Blazing fast"           },
-    GroqModel { id: "mixtral-8x7b-32768",      label: "Mixtral 8x7B",  note: "Great reasoning"        },
-    GroqModel { id: "gemma2-9b-it",            label: "Gemma 2 9B",    note: "Google lightweight"     },
+    GroqModel {
+        id: "llama-3.3-70b-versatile",
+        label: "Llama 3.3 70B",
+        note: "Powerful & versatile",
+    },
+    GroqModel {
+        id: "llama-3.1-8b-instant",
+        label: "Llama 3.1 8B",
+        note: "Blazing fast",
+    },
+    GroqModel {
+        id: "mixtral-8x7b-32768",
+        label: "Mixtral 8x7B",
+        note: "Great reasoning",
+    },
+    GroqModel {
+        id: "gemma2-9b-it",
+        label: "Gemma 2 9B",
+        note: "Google lightweight",
+    },
 ];
 
 struct ModelOption {
@@ -46,22 +86,95 @@ struct ModelOption {
 }
 
 const ANTHROPIC_MODELS: &[ModelOption] = &[
-    ModelOption { id: "claude-opus-4-7",           label: "Claude Opus 4.7",   note: "Most capable — complex tasks"  },
-    ModelOption { id: "claude-sonnet-4-6",         label: "Claude Sonnet 4.6", note: "Smart + fast, 1M context"      },
-    ModelOption { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5",  note: "Fast, cost-efficient"          },
+    ModelOption {
+        id: "claude-opus-4-7",
+        label: "Claude Opus 4.7",
+        note: "Most capable — complex tasks",
+    },
+    ModelOption {
+        id: "claude-sonnet-4-6",
+        label: "Claude Sonnet 4.6",
+        note: "Smart + fast, 1M context",
+    },
+    ModelOption {
+        id: "claude-haiku-4-5-20251001",
+        label: "Claude Haiku 4.5",
+        note: "Fast, cost-efficient",
+    },
 ];
 
 const OPENAI_MODELS: &[ModelOption] = &[
-    ModelOption { id: "gpt-4o",            label: "GPT-4o",            note: "Standard flagship"          },
-    ModelOption { id: "o1",                label: "o1",                note: "Full reasoning capabilities" },
-    ModelOption { id: "o3-mini",           label: "o3-mini",           note: "Fast reasoning"             },
-    ModelOption { id: "gpt-4o-mini",       label: "GPT-4o Mini",       note: "Cost efficient"             },
+    ModelOption {
+        id: "gpt-4o",
+        label: "GPT-4o",
+        note: "Standard flagship",
+    },
+    ModelOption {
+        id: "o1",
+        label: "o1",
+        note: "Full reasoning capabilities",
+    },
+    ModelOption {
+        id: "o3-mini",
+        label: "o3-mini",
+        note: "Fast reasoning",
+    },
+    ModelOption {
+        id: "gpt-4o-mini",
+        label: "GPT-4o Mini",
+        note: "Cost efficient",
+    },
 ];
 
 const GEMINI_MODELS: &[ModelOption] = &[
-    ModelOption { id: "gemini-2.5-pro",        label: "Gemini 2.5 Pro",        note: "Frontier — highest quality"  },
-    ModelOption { id: "gemini-2.5-flash",      label: "Gemini 2.5 Flash",      note: "Fast, balanced"              },
-    ModelOption { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", note: "Lightweight, cost-efficient" },
+    ModelOption {
+        id: "gemini-2.5-pro",
+        label: "Gemini 2.5 Pro",
+        note: "Frontier — highest quality",
+    },
+    ModelOption {
+        id: "gemini-2.5-flash",
+        label: "Gemini 2.5 Flash",
+        note: "Fast, balanced",
+    },
+    ModelOption {
+        id: "gemini-2.5-flash-lite",
+        label: "Gemini 2.5 Flash-Lite",
+        note: "Lightweight, cost-efficient",
+    },
+];
+
+const MIMO_MODELS: &[ModelOption] = &[
+    ModelOption {
+        id: "MiMo-V2.5-Pro",
+        label: "MiMo-V2.5 Pro",
+        note: "Flagship — highest quality",
+    },
+    ModelOption {
+        id: "MiMo-V2.5",
+        label: "MiMo-V2.5",
+        note: "Balanced performance",
+    },
+    ModelOption {
+        id: "MiMo-V2-Pro",
+        label: "MiMo-V2 Pro",
+        note: "Previous gen flagship",
+    },
+    ModelOption {
+        id: "MiMo-V2-Omni",
+        label: "MiMo-V2 Omni",
+        note: "Multimodal capabilities",
+    },
+    ModelOption {
+        id: "MiMo-V2.5-TTS",
+        label: "MiMo-V2.5 TTS",
+        note: "Text-to-speech",
+    },
+    ModelOption {
+        id: "MiMo-V2-TTS",
+        label: "MiMo-V2 TTS",
+        note: "Previous gen TTS",
+    },
 ];
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -86,11 +199,12 @@ impl SetupWizard {
 
         let config = match provider {
             AiProvider::VertexAi => setup_vertex(&mut stdout)?,
-            AiProvider::Grok     => setup_grok(&mut stdout)?,
-            AiProvider::Groq     => setup_groq(&mut stdout)?,
+            AiProvider::Grok => setup_grok(&mut stdout)?,
+            AiProvider::Groq => setup_groq(&mut stdout)?,
             AiProvider::Anthropic => setup_anthropic(&mut stdout)?,
-            AiProvider::OpenAi    => setup_openai(&mut stdout)?,
-            AiProvider::Gemini    => setup_gemini_api(&mut stdout)?,
+            AiProvider::OpenAi => setup_openai(&mut stdout)?,
+            AiProvider::Gemini => setup_gemini_api(&mut stdout)?,
+            AiProvider::Mimo => setup_mimo(&mut stdout)?,
         };
 
         config.save()?;
@@ -149,11 +263,24 @@ where
 fn pick_provider(stdout: &mut io::Stdout) -> Result<AiProvider> {
     let options = [
         ("Vertex AI", "Google Cloud — requires gcloud CLI + auth"),
-        ("Grok AI",   "xAI — requires an API key from console.x.ai"),
-        ("Groq",      "Groq Cloud — ultra-fast Llama/Mixtral (console.groq.com)"),
-        ("Anthropic", "Claude — requires API key from console.anthropic.com"),
-        ("OpenAI",    "GPT-4/o1 — requires API key from platform.openai.com"),
+        ("Grok AI", "xAI — requires an API key from console.x.ai"),
+        (
+            "Groq",
+            "Groq Cloud — ultra-fast Llama/Mixtral (console.groq.com)",
+        ),
+        (
+            "Anthropic",
+            "Claude — requires API key from console.anthropic.com",
+        ),
+        (
+            "OpenAI",
+            "GPT-4/o1 — requires API key from platform.openai.com",
+        ),
         ("Gemini API", "Google AI Studio — standalone API key setup"),
+        (
+            "Xiaomi MiMo",
+            "MiMo — requires API key from token-plan-ams.xiaomimimo.com",
+        ),
     ];
     let mut cursor_idx: usize = 0;
 
@@ -201,16 +328,30 @@ fn pick_provider(stdout: &mut io::Stdout) -> Result<AiProvider> {
             stdout.flush()?;
 
             match event::read()? {
-                Event::Key(KeyEvent { code: KeyCode::Up, .. }) => {
-                    if cursor_idx > 0 { cursor_idx -= 1; }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Up, ..
+                }) => {
+                    if cursor_idx > 0 {
+                        cursor_idx -= 1;
+                    }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Down, .. }) => {
-                    if cursor_idx < options.len() - 1 { cursor_idx += 1; }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Down,
+                    ..
+                }) => {
+                    if cursor_idx < options.len() - 1 {
+                        cursor_idx += 1;
+                    }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => break,
-                Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. })
-                    if modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                }) => break,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     terminal::disable_raw_mode()?;
                     anyhow::bail!("Setup cancelled");
                 }
@@ -223,7 +364,8 @@ fn pick_provider(stdout: &mut io::Stdout) -> Result<AiProvider> {
             2 => AiProvider::Groq,
             3 => AiProvider::Anthropic,
             4 => AiProvider::OpenAi,
-            _ => AiProvider::Gemini,
+            5 => AiProvider::Gemini,
+            _ => AiProvider::Mimo,
         })
     })();
     terminal::disable_raw_mode()?;
@@ -247,7 +389,9 @@ fn setup_vertex(stdout: &mut io::Stdout) -> Result<MowisConfig> {
         _ => {
             println!("\u{2717} not found");
             println!();
-            println!("  gcloud CLI is required. Install: https://cloud.google.com/sdk/docs/install");
+            println!(
+                "  gcloud CLI is required. Install: https://cloud.google.com/sdk/docs/install"
+            );
             anyhow::bail!("gcloud CLI not found");
         }
     }
@@ -255,7 +399,10 @@ fn setup_vertex(stdout: &mut io::Stdout) -> Result<MowisConfig> {
     // Check auth
     print!("  Checking gcloud auth... ");
     stdout.flush()?;
-    match Command::new("gcloud").args(["auth", "print-access-token"]).output() {
+    match Command::new("gcloud")
+        .args(["auth", "print-access-token"])
+        .output()
+    {
         Ok(o) if o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty() => {
             println!("\u{2713} authenticated");
         }
@@ -276,7 +423,11 @@ fn setup_vertex(stdout: &mut io::Stdout) -> Result<MowisConfig> {
         .and_then(|o| {
             if o.status.success() {
                 let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if !s.is_empty() && s != "(unset)" { Some(s) } else { None }
+                if !s.is_empty() && s != "(unset)" {
+                    Some(s)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -390,7 +541,9 @@ fn setup_anthropic(stdout: &mut io::Stdout) -> Result<MowisConfig> {
     clear_screen(stdout)?;
     print_banner(stdout)?;
     let api_key = read_masked_api_key_custom(stdout, "Anthropic", "console.anthropic.com")?;
-    if !api_key.starts_with("sk-ant-") { anyhow::bail!("Invalid Anthropic key format."); }
+    if !api_key.starts_with("sk-ant-") {
+        anyhow::bail!("Invalid Anthropic key format.");
+    }
 
     let model = pick_model_generic(stdout, "Anthropic", ANTHROPIC_MODELS)?;
     let encrypted = crate::crypto::encrypt(&api_key)?;
@@ -408,7 +561,9 @@ fn setup_openai(stdout: &mut io::Stdout) -> Result<MowisConfig> {
     clear_screen(stdout)?;
     print_banner(stdout)?;
     let api_key = read_masked_api_key_custom(stdout, "OpenAI", "platform.openai.com")?;
-    if !api_key.starts_with("sk-") { anyhow::bail!("Invalid OpenAI key format."); }
+    if !api_key.starts_with("sk-") {
+        anyhow::bail!("Invalid OpenAI key format.");
+    }
 
     let model = pick_model_generic(stdout, "OpenAI", OPENAI_MODELS)?;
     let encrypted = crate::crypto::encrypt(&api_key)?;
@@ -426,7 +581,7 @@ fn setup_gemini_api(stdout: &mut io::Stdout) -> Result<MowisConfig> {
     clear_screen(stdout)?;
     print_banner(stdout)?;
     let api_key = read_masked_api_key_custom(stdout, "Gemini", "aistudio.google.com")?;
-    
+
     let model = pick_model_generic(stdout, "Gemini", GEMINI_MODELS)?;
     let encrypted = crate::crypto::encrypt(&api_key)?;
 
@@ -439,10 +594,38 @@ fn setup_gemini_api(stdout: &mut io::Stdout) -> Result<MowisConfig> {
     })
 }
 
-fn pick_model_generic(stdout: &mut io::Stdout, name: &str, options: &[ModelOption]) -> Result<String> {
+fn setup_mimo(stdout: &mut io::Stdout) -> Result<MowisConfig> {
+    clear_screen(stdout)?;
+    print_banner(stdout)?;
+    let api_key = read_masked_api_key_custom(stdout, "MiMo", "token-plan-ams.xiaomimimo.com")?;
+
+    let model = pick_model_generic(stdout, "MiMo", MIMO_MODELS)?;
+    let encrypted = crate::crypto::encrypt(&api_key)?;
+
+    Ok(MowisConfig {
+        provider: AiProvider::Mimo,
+        mimo_api_key_enc: Some(encrypted),
+        mimo_model: model.clone(),
+        model,
+        ..MowisConfig::default()
+    })
+}
+
+fn pick_model_generic(
+    stdout: &mut io::Stdout,
+    name: &str,
+    options: &[ModelOption],
+) -> Result<String> {
     let mut cursor_idx: usize = 0;
-    queue!(stdout, SetForegroundColor(Color::White), Print(format!("  Choose an {} model:\r\n", name)), ResetColor,
-           SetForegroundColor(Color::DarkGrey), Print("  \u{2191}/\u{2193} navigate   Space/Enter select\r\n\r\n"), ResetColor)?;
+    queue!(
+        stdout,
+        SetForegroundColor(Color::White),
+        Print(format!("  Choose an {} model:\r\n", name)),
+        ResetColor,
+        SetForegroundColor(Color::DarkGrey),
+        Print("  \u{2191}/\u{2193} navigate   Space/Enter select\r\n\r\n"),
+        ResetColor
+    )?;
     stdout.flush()?;
 
     let menu_top_row = cursor::position()?.1;
@@ -451,29 +634,69 @@ fn pick_model_generic(stdout: &mut io::Stdout, name: &str, options: &[ModelOptio
         loop {
             execute!(stdout, cursor::MoveTo(0, menu_top_row))?;
             for (i, opt) in options.iter().enumerate() {
-                let radio = if i == cursor_idx { "\u{25c9}" } else { "\u{25cb}" };
+                let radio = if i == cursor_idx {
+                    "\u{25c9}"
+                } else {
+                    "\u{25cb}"
+                };
                 let arrow = if i == cursor_idx { "\u{25ba}" } else { " " };
                 queue!(
                     stdout,
                     terminal::Clear(ClearType::CurrentLine),
                     Print(format!("  {} ", arrow)),
-                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::DarkGrey }),
+                    SetForegroundColor(if i == cursor_idx {
+                        Color::Green
+                    } else {
+                        Color::DarkGrey
+                    }),
                     Print(format!("{} ", radio)),
-                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::Reset }),
+                    SetForegroundColor(if i == cursor_idx {
+                        Color::Green
+                    } else {
+                        Color::Reset
+                    }),
                     Print(format!("{:<25}", opt.label)),
                     SetForegroundColor(Color::DarkGrey),
                     Print(format!("  {}\r\n", opt.note)),
                     ResetColor,
                 )?;
             }
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine), Print("\r\n  Press Enter to confirm\r\n"))?;
+            queue!(
+                stdout,
+                terminal::Clear(ClearType::CurrentLine),
+                Print("\r\n  Press Enter to confirm\r\n")
+            )?;
             stdout.flush()?;
 
             match event::read()? {
-                Event::Key(KeyEvent { code: KeyCode::Up, .. }) => if cursor_idx > 0 { cursor_idx -= 1; },
-                Event::Key(KeyEvent { code: KeyCode::Down, .. }) => if cursor_idx < options.len() - 1 { cursor_idx += 1; },
-                Event::Key(KeyEvent { code: KeyCode::Enter, .. }) | Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => break,
-                Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Up, ..
+                }) => {
+                    if cursor_idx > 0 {
+                        cursor_idx -= 1;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Down,
+                    ..
+                }) => {
+                    if cursor_idx < options.len() - 1 {
+                        cursor_idx += 1;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                })
+                | Event::Key(KeyEvent {
+                    code: KeyCode::Char(' '),
+                    ..
+                }) => break,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     terminal::disable_raw_mode()?;
                     anyhow::bail!("Setup cancelled");
                 }
@@ -508,24 +731,29 @@ fn read_masked_api_key(stdout: &mut io::Stdout) -> Result<String> {
     let result = (|| -> Result<String> {
         loop {
             match event::read()? {
-                Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                }) => {
                     if !key_buf.is_empty() {
                         break;
                     }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Backspace, .. }) => {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Backspace,
+                    ..
+                }) => {
                     if key_buf.pop().is_some() {
                         // Erase one asterisk
-                        queue!(
-                            stdout,
-                            cursor::MoveLeft(1),
-                            Print(" "),
-                            cursor::MoveLeft(1),
-                        )?;
+                        queue!(stdout, cursor::MoveLeft(1), Print(" "), cursor::MoveLeft(1),)?;
                         stdout.flush()?;
                     }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Char(c), modifiers, .. }) => {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char(c),
+                    modifiers,
+                    ..
+                }) => {
                     if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
                         terminal::disable_raw_mode()?;
                         anyhow::bail!("Setup cancelled");
@@ -568,16 +796,28 @@ fn read_masked_api_key_custom(stdout: &mut io::Stdout, name: &str, url: &str) ->
     let result = (|| -> Result<String> {
         loop {
             match event::read()? {
-                Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
-                    if !key_buf.is_empty() { break; }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                }) => {
+                    if !key_buf.is_empty() {
+                        break;
+                    }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Backspace, .. }) => {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Backspace,
+                    ..
+                }) => {
                     if key_buf.pop().is_some() {
                         queue!(stdout, cursor::MoveLeft(1), Print(" "), cursor::MoveLeft(1))?;
                         stdout.flush()?;
                     }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Char(c), modifiers, .. }) => {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char(c),
+                    modifiers,
+                    ..
+                }) => {
                     if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
                         terminal::disable_raw_mode()?;
                         anyhow::bail!("Setup cancelled");
@@ -627,7 +867,11 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
             execute!(stdout, cursor::MoveTo(0, menu_top_row))?;
             for (i, model) in GROK_MODELS.iter().enumerate() {
                 // ◉ = selected, ○ = not selected — exactly one ◉ at a time.
-                let radio = if i == cursor_idx { "\u{25c9}" } else { "\u{25cb}" };
+                let radio = if i == cursor_idx {
+                    "\u{25c9}"
+                } else {
+                    "\u{25cb}"
+                };
                 let arrow = if i == cursor_idx { "\u{25ba}" } else { " " };
 
                 queue!(
@@ -635,9 +879,17 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
                     terminal::Clear(ClearType::CurrentLine),
                     SetForegroundColor(Color::DarkGrey),
                     Print(format!("  {} ", arrow)),
-                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::DarkGrey }),
+                    SetForegroundColor(if i == cursor_idx {
+                        Color::Green
+                    } else {
+                        Color::DarkGrey
+                    }),
                     Print(format!("{} ", radio)),
-                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::Reset }),
+                    SetForegroundColor(if i == cursor_idx {
+                        Color::Green
+                    } else {
+                        Color::Reset
+                    }),
                     Print(format!("{:<22}", model.label)),
                     SetForegroundColor(Color::DarkGrey),
                     Print(format!("  {}\r\n", model.note)),
@@ -656,17 +908,34 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
             stdout.flush()?;
 
             match event::read()? {
-                Event::Key(KeyEvent { code: KeyCode::Up, .. }) => {
-                    if cursor_idx > 0 { cursor_idx -= 1; }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Up, ..
+                }) => {
+                    if cursor_idx > 0 {
+                        cursor_idx -= 1;
+                    }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Down, .. }) => {
-                    if cursor_idx < GROK_MODELS.len() - 1 { cursor_idx += 1; }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Down,
+                    ..
+                }) => {
+                    if cursor_idx < GROK_MODELS.len() - 1 {
+                        cursor_idx += 1;
+                    }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Enter, .. })
-                | Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => break,
-                Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. })
-                    if modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                })
+                | Event::Key(KeyEvent {
+                    code: KeyCode::Char(' '),
+                    ..
+                }) => break,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     terminal::disable_raw_mode()?;
                     anyhow::bail!("Setup cancelled");
                 }
@@ -684,8 +953,15 @@ fn pick_grok_model(stdout: &mut io::Stdout) -> Result<String> {
 
 fn pick_groq_model(stdout: &mut io::Stdout) -> Result<String> {
     let mut cursor_idx: usize = 0;
-    queue!(stdout, SetForegroundColor(Color::White), Print("  Choose a Groq model:\r\n"), ResetColor,
-           SetForegroundColor(Color::DarkGrey), Print("  \u{2191}/\u{2193} navigate   Space/Enter select\r\n\r\n"), ResetColor)?;
+    queue!(
+        stdout,
+        SetForegroundColor(Color::White),
+        Print("  Choose a Groq model:\r\n"),
+        ResetColor,
+        SetForegroundColor(Color::DarkGrey),
+        Print("  \u{2191}/\u{2193} navigate   Space/Enter select\r\n\r\n"),
+        ResetColor
+    )?;
     stdout.flush()?;
 
     let menu_top_row = cursor::position()?.1;
@@ -694,36 +970,69 @@ fn pick_groq_model(stdout: &mut io::Stdout) -> Result<String> {
         loop {
             execute!(stdout, cursor::MoveTo(0, menu_top_row))?;
             for (i, model) in GROQ_MODELS.iter().enumerate() {
-                let radio = if i == cursor_idx { "\u{25c9}" } else { "\u{25cb}" };
+                let radio = if i == cursor_idx {
+                    "\u{25c9}"
+                } else {
+                    "\u{25cb}"
+                };
                 let arrow = if i == cursor_idx { "\u{25ba}" } else { " " };
                 queue!(
                     stdout,
                     terminal::Clear(ClearType::CurrentLine),
                     Print(format!("  {} ", arrow)),
-                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::DarkGrey }),
+                    SetForegroundColor(if i == cursor_idx {
+                        Color::Green
+                    } else {
+                        Color::DarkGrey
+                    }),
                     Print(format!("{} ", radio)),
-                    SetForegroundColor(if i == cursor_idx { Color::Green } else { Color::Reset }),
+                    SetForegroundColor(if i == cursor_idx {
+                        Color::Green
+                    } else {
+                        Color::Reset
+                    }),
                     Print(format!("{:<25}", model.label)),
                     SetForegroundColor(Color::DarkGrey),
                     Print(format!("  {}\r\n", model.note)),
                     ResetColor,
                 )?;
             }
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine), Print("\r\n  Press Enter to confirm\r\n"))?;
+            queue!(
+                stdout,
+                terminal::Clear(ClearType::CurrentLine),
+                Print("\r\n  Press Enter to confirm\r\n")
+            )?;
             stdout.flush()?;
 
             match event::read()? {
-                Event::Key(KeyEvent { code: KeyCode::Up, .. }) => {
-                    if cursor_idx > 0 { cursor_idx -= 1; }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Up, ..
+                }) => {
+                    if cursor_idx > 0 {
+                        cursor_idx -= 1;
+                    }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Down, .. }) => {
-                    if cursor_idx < GROQ_MODELS.len() - 1 { cursor_idx += 1; }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Down,
+                    ..
+                }) => {
+                    if cursor_idx < GROQ_MODELS.len() - 1 {
+                        cursor_idx += 1;
+                    }
                 }
-                Event::Key(KeyEvent { code: KeyCode::Enter, .. })
-                | Event::Key(KeyEvent { code: KeyCode::Char(' '), .. }) => break,
-                Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. })
-                    if modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                })
+                | Event::Key(KeyEvent {
+                    code: KeyCode::Char(' '),
+                    ..
+                }) => break,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     terminal::disable_raw_mode()?;
                     anyhow::bail!("Setup cancelled");
                 }
