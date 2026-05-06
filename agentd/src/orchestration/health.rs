@@ -344,6 +344,7 @@ impl SystemResources {
     fn read_disk(path: &str) -> (u64, f64) {
         #[cfg(unix)]
         {
+            use nix::libc;
             use std::ffi::CString;
             let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
             if let Ok(c_path) = CString::new(path) {

@@ -120,7 +120,7 @@ impl Tool for MemorySaveTool {
             serde_json::to_string_pretty(&*store)?
         };
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -144,7 +144,7 @@ impl Tool for MemoryLoadTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("memory_load: missing path"))?;
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
         let content = fs::read_to_string(&path)?;
         let data: HashMap<String, Value> = serde_json::from_str(&content)?;
         let keys_loaded = data.len();

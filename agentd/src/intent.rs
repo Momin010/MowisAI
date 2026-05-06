@@ -109,17 +109,18 @@ pub fn classify_intent(message: &str) -> UserIntent {
     ];
 
     // ── Score ────────────────────────────────────────────────────────────────
-    let build_score: u32 = strong_build.iter().filter(|k| lower.contains(*k)).count() as u32 * 2
+    let strong_build_score: u32 =
+        strong_build.iter().filter(|k| lower.contains(*k)).count() as u32 * 2;
+    let build_score: u32 = strong_build_score
         + weak_build.iter().filter(|k| lower.contains(*k)).count() as u32;
 
     let chat_score: u32 = strong_chat.iter().filter(|k| lower.contains(*k)).count() as u32 * 2;
 
-    // Hard chat override — a pure question pattern wins unless there's a
-    // strong build signal (score ≥ 2, meaning at least one strong_build keyword).
-    // This catches "how does authentication work?" (weak build score from "auth")
-    // but still routes "how do I add authentication to my app?" → Build
-    // because "add" (strong_build, +2) pushes score above the threshold.
-    if is_hard_chat && build_score < 2 {
+    // Hard chat override — a pure question wins unless there's an explicit
+    // action verb (strong_build keyword like "add", "implement", "fix", etc.).
+    // Weak-build noun matches alone (e.g. "api", "auth" in "what is a REST API?")
+    // are not enough to override a question pattern.
+    if is_hard_chat && strong_build_score == 0 {
         return UserIntent::Chat;
     }
 

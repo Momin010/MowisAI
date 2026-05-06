@@ -176,3 +176,21 @@ pub enum CircuitState {
     Open,
     HalfOpen,
 }
+
+/// Project context for interactive orchestration sessions
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectContext {
+    pub project_id: String,
+    pub description: String,
+    pub languages: Vec<String>,
+    pub frameworks: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+/// Warm sandbox state for session persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxWarmState {
+    pub sandbox_id: String,
+    pub container_id: Option<String>,
+    pub paused_at: u64,
+}

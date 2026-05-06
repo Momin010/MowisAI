@@ -257,7 +257,7 @@ mod tests {
             id: 0,
             tool_call: "write_file".to_string(),
             tool_args: serde_json::json!({"path": "test.txt"}),
-            tool_result: "success".to_string(),
+            tool_result: serde_json::Value::String("success".to_string()),
             timestamp: 1234567890,
             layer_snapshot_path: "/tmp/snapshot".to_string(),
         };

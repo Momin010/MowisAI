@@ -438,11 +438,12 @@ fn shell_escape(s: &str) -> String {
 
 /// Simple base64 encoding (for SSH command safety)
 fn base64_encode(input: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use std::io::Write;
-    let mut encoder = base64::write::EncoderWriter::new(Vec::new(), base64::STANDARD);
+    let mut encoder = base64::write::EncoderWriter::new(Vec::new(), &STANDARD);
     let _ = encoder.write_all(input.as_bytes());
-    let _ = encoder.finish();
-    String::from_utf8_lossy(&encoder.into_inner().unwrap_or_default()).to_string()
+    let inner = encoder.finish().unwrap_or_default();
+    String::from_utf8_lossy(&inner).to_string()
 }
 
 /// Generate an SSH keypair for VM access
@@ -602,7 +603,7 @@ fn find_or_create_rootfs(sandbox_id: &str, host_root: &Path, image_hint: &str) -
 
 /// Inject an SSH public key into the rootfs
 fn inject_ssh_key(rootfs_path: &Path, ssh_pub: &str) -> Result<()> {
-    let mount_dir = PathBuf::from(format!("/tmp/vm-inject-{}", rootfs_path.display().len()));
+    let mount_dir = PathBuf::from(format!("/tmp/vm-inject-{}", rootfs_path.to_string_lossy().len()));
     fs::create_dir_all(&mount_dir)?;
 
     let output = Command::new("mount")

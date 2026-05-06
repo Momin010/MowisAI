@@ -93,7 +93,7 @@ impl Tool for WebScreenshotTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("web_screenshot: missing output"))?;
 
-        let output_path = resolve_path(ctx, output_str);
+        let output_path = resolve_path(ctx, output_str)?;
 
         // Try chromium, use the actual URL
         let cmd_result = Command::new("chromium")

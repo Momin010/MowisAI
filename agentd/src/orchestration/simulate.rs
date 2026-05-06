@@ -57,6 +57,7 @@ impl SimulatedVerificationPlanner {
                 expected_schema: None,
                 assertion: None,
                 deps: vec![],
+                timeout_secs: 30,
             },
             VerificationFunction {
                 id: format!("test-{}-content-valid", sandbox_name),
@@ -65,6 +66,7 @@ impl SimulatedVerificationPlanner {
                 expected_schema: None,
                 assertion: None,
                 deps: vec![format!("test-{}-file-exists", sandbox_name)],
+                timeout_secs: 30,
             },
         ];
 
@@ -768,7 +770,7 @@ impl SimulateCommand {
                     "write_file".to_string(),
                     "run_command".to_string(),
                 ],
-                max_agents: (self.max_agents / self.sandboxes).max(1),
+                max_agents: ((self.max_agents / self.sandboxes).max(1)) as u32,
                 image: None,
             };
 

@@ -1183,6 +1183,7 @@ fn init_logging(level: &str) {
 fn has_root_privileges() -> bool {
     #[cfg(unix)]
     {
+        use nix::libc;
         unsafe { libc::geteuid() == 0 }
     }
     #[cfg(not(unix))]
@@ -1383,6 +1384,7 @@ fn default_plugins() -> Vec<PluginInfo> {
     ]
 }
 
+#[derive(serde::Serialize)]
 struct SessionSummary {
     id: String,
     status: String,

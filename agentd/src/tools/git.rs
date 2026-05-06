@@ -72,7 +72,7 @@ impl Tool for GitStatusTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("git_status: missing path"))?;
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
 
         let output = Command::new("git")
             .arg("-C")
@@ -117,7 +117,7 @@ impl Tool for GitAddTool {
                 .env("GIT_COMMITTER_EMAIL", "agentd@mowisai.com")
                 .output()?
         } else {
-            let path = resolve_path(ctx, path_str);
+            let path = resolve_path(ctx, path_str)?;
             let mut cmd = Command::new("git");
             cmd.arg("-C").arg(&path).arg("add");
             for file in &file_args {
@@ -169,7 +169,7 @@ impl Tool for GitCommitTool {
                 .env("GIT_COMMITTER_EMAIL", "agentd@mowisai.com")
                 .output()?
         } else {
-            let path = resolve_path(ctx, path_str);
+            let path = resolve_path(ctx, path_str)?;
             let mut cmd = Command::new("git");
             cmd.arg("-C")
                 .arg(&path)
@@ -333,7 +333,7 @@ impl Tool for GitBranchTool {
             .ok_or_else(|| anyhow::anyhow!("git_branch: missing path"))?;
         let name = input.get("name").and_then(|v| v.as_str());
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
 
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(&path).arg("branch");
@@ -397,7 +397,7 @@ impl Tool for GitCheckoutTool {
                 "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
             }));
         } else {
-            let path = resolve_path(ctx, path_str);
+            let path = resolve_path(ctx, path_str)?;
 
             // Try with -b flag first (create and checkout)
             let mut cmd = Command::new("git");
@@ -466,7 +466,7 @@ impl Tool for GitDiffTool {
             }
             cmd.output()?
         } else {
-            let path = resolve_path(ctx, path_str);
+            let path = resolve_path(ctx, path_str)?;
             let mut cmd = Command::new("git");
             cmd.arg("-C").arg(&path);
             for part in diff_arg.split_whitespace() {
