@@ -4,9 +4,10 @@
 
 MowisAI is an OS-level AI agent execution engine. It runs thousands of isolated AI agents in parallel using overlayfs/chroot sandboxing on Linux. It targets European regulated enterprises (GDPR, DORA). The competitive gap it fills: E2B/Daytona are cloud-only, CrewAI/LangGraph have no execution layer. MowisAI provides both the orchestration brain and the sandboxed execution body.
 
-The system has two primary interfaces:
-1. **mowis-desktop** — A Tauri 2.0 desktop app with a chat UI, supporting two modes: full orchestration (via agentd daemon) and "zero mode" (direct LLM API calls writing to disk)
-2. **mowis-cli** — A standalone CLI that connects to the agentd daemon via Unix socket or TCP bridge
+The system has three primary interfaces:
+1. **mowis-desktop** — A Tauri 2.0 desktop app with a chat UI. Talks to **mowis-agent** via HTTP for single-agent coding tasks, and to **agentd** for multi-agent orchestration.
+2. **mowis-cli** — A standalone CLI that connects to both agentd (via Unix socket/TCP) and mowis-agent (via HTTP).
+3. **mowis-agent** — A Go binary (forked from OpenCode) that provides the unified coding agent: agent loop, 13+ tools, session management, LLM providers, permissions. Runs as an HTTP server on localhost:4096.
 
 The core daemon **agentd** is a single Rust binary that provides:
 - A Unix socket API for sandbox/container management
@@ -21,13 +22,21 @@ The core daemon **agentd** is a single Rust binary that provides:
 ```
 MowisAI/                          # Workspace root
 ├── Cargo.toml                    # Workspace manifest (4 members)
-├── agentd/                       # Main daemon — binary + library
+├── agentd/                       # Main daemon — binary + library (Rust)
 ├── agentd-protocol/              # Shared protocol types (no circular deps)
 ├── runtime/                      # Control plane — state management
-├── mowis-cli/                    # Standalone CLI (not in workspace)
+├── mowis-agent/                  # Unified coding agent (Go, forked from OpenCode)
+│   ├── cmd/                      # CLI commands (root, serve, setup, schema)
+│   ├── internal/                 # Backend: agent, tools, providers, sessions, server
+│   ├── main.go                   # Entry point
+│   ├── go.mod                    # Module: github.com/mowisai/mowis-agent
+│   └── sqlc.yaml                 # SQL code generation config
+├── mowis-cli/                    # Standalone CLI (Rust, not in workspace)
 ├── mowis-desktop/                # Tauri desktop app
 │   ├── src-tauri/                # Rust backend (workspace member)
 │   └── src/                      # Frontend (JS/HTML/CSS)
+├── .cargo/config.toml            # Cargo build config
+├── .github/workflows/            # CI: build-windows.yml (3 jobs)
 ├── AGENTS.md                     # Architecture specification
 ├── README.md                     # Project documentation
 ├── CLAUDE.md                     # Claude-specific instructions
@@ -785,30 +794,55 @@ Unix socket client for communicating with agentd daemon.
 
 ## Crate 4: `mowis-cli`
 
-**File:** `mowis-cli/Cargo.toml` (22 lines)
+**File:** `mowis-cli/Cargo.toml` (24 lines)
 **Version:** 0.1.0, Edition 2021
 **NOT a workspace member** — standalone crate
-**Dependencies:** anyhow, serde, serde_json, tokio (full), log, env_logger, rand, hex, dirs, async-trait, which, chrono, colored, rustyline
+**Dependencies:** anyhow, serde, serde_json, tokio (full), log, env_logger, rand, hex, dirs, async-trait, which, chrono, colored, rustyline, reqwest, futures-util
 
-### `src/main.rs` (410 lines)
+### `src/main.rs` (~480 lines)
 
-CLI entry point with platform auto-detection.
+CLI entry point with platform auto-detection and agent commands.
 
-**Module declarations (lines 21-32):**
-- Always compiled: `auth`, `connection`, `qemu`, `types`
+**Module declarations (lines 21-33):**
+- Always compiled: `auth`, `connection`, `qemu`, `types`, `agent_client`
 - Linux only: `linux`
 - macOS only: `macos`
 - Windows only: `windows`, `developer_mode`
 
 **Functions:**
 - `banner()` (line 43): ASCII-art MOWIS logo
-- `help()` (line 58): structured help with options, commands, env vars, examples
+- `help()` (line 58): structured help with options, commands, agent commands, env vars, examples
 - `setup_logging()` (line 94): colored log prefixes (ERR/WRN/INF/DBG/TRC), timestamps via chrono
 - `create_launcher()` (line 127): platform dispatch — Linux → `LinuxDirectLauncher`, macOS → `MacOSLauncher`, Windows → `WindowsLauncher`
 - `boot_and_connect(skip_boot, tcp_override)` (line 156): full boot sequence with progress channel, or direct TCP connection
 - `repl(stream)` (line 217): interactive REPL with shortcuts (list/ls, create/new, quit/exit/q, help/?)
 - `single_command(stream, cmd)` (line 329): send one JSON command, print response
-- `main()` (line 352): manual arg parsing (--help, --skip-boot, --socket, --tcp), dispatches to repl or single_command
+- `agent_chat(port)` (~line 380): interactive chat with mowis-agent via HTTP — creates session, loops prompts, prints responses
+- `agent_ask(port, prompt)` (~line 430): one-shot prompt to mowis-agent, prints response
+- `main()` (line 352): manual arg parsing (--help, --skip-boot, --socket, --tcp, --agent-port), dispatches to agent commands (agent/chat/ask/sessions) or agentd commands (repl/single_command)
+
+**Agent subcommands:**
+- `agent` — health check mowis-agent
+- `chat` — interactive chat session
+- `ask <prompt>` — one-shot prompt
+- `sessions` — list mowis-agent sessions
+
+### `src/agent_client.rs` (~120 lines)
+
+HTTP client for mowis-agent.
+
+- `HealthResponse` (line 7): `{ healthy, version, cwd }`
+- `Session` (line 13): `{ id, title, message_count, created_at }`
+- `AgentMessage` (line 20): `{ id, session_id, role, parts, created_at }`
+- `AgentClient` (line 28): `{ base_url, http: reqwest::Client }`
+- `AgentClient::new(port)` (line 30): constructs client for `http://127.0.0.1:{port}`
+- `health()` (line 40): GET /health
+- `create_session(title)` (line 48): POST /session
+- `send_message(session_id, text)` (line 58): POST /session/{id}/message (blocking)
+- `send_message_async(session_id, text)` (line 70): POST /session/{id}/message/async
+- `list_messages(session_id)` (line 82): GET /session/{id}/message
+- `list_sessions()` (line 92): GET /session
+- `abort(session_id)` (line 102): POST /session/{id}/abort
 
 ### `src/types.rs` (92 lines)
 
@@ -893,79 +927,170 @@ Full automated Alpine Linux VM bootstrap on Windows for non-admin users.
 
 ---
 
+## Component 6: `mowis-agent` (Unified Coding Agent — Go)
+
+**Location:** `mowis-agent/`
+**Language:** Go 1.24
+**Module:** `github.com/mowisai/mowis-agent`
+**Origin:** Forked from OpenCode (github.com/opencode-ai/opencode), TUI stripped, HTTP server added
+**Binary:** `mowis-agent` (built with `-tags headless` for bundled distribution)
+
+### Architecture
+
+mowis-agent is the unified coding agent that powers all single-agent coding tasks. It runs as an HTTP server on localhost:4096 and is called by the desktop app, CLI, and potentially agentd.
+
+```
+mowis-agent (Go binary)
+├── Agent Loop (tool-calling loop with LLM)
+├── 13+ Tools (bash, edit, write, read, glob, grep, patch, fetch, etc.)
+├── LLM Providers (Anthropic, OpenAI, Gemini, Vertex AI, Azure, Bedrock, Groq, xAI, Copilot, OpenRouter)
+├── Session/Message Store (SQLite)
+├── Permission System (blocking request-grant)
+├── LSP Integration (code intelligence)
+├── Pub/Sub Event Bus (real-time events)
+└── HTTP Server (REST API + SSE)
+```
+
+### HTTP API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check + version |
+| `GET` | `/session` | List all sessions |
+| `POST` | `/session` | Create session `{ "title": "..." }` |
+| `GET` | `/session/:id` | Get session details |
+| `DELETE` | `/session/:id` | Delete session |
+| `GET` | `/session/:id/message` | List messages |
+| `POST` | `/session/:id/message` | Send message (blocking — waits for agent) |
+| `POST` | `/session/:id/message/async` | Send message (non-blocking) |
+| `POST` | `/session/:id/abort` | Abort running agent |
+| `POST` | `/session/:id/permission/:pid` | Approve/deny permission |
+| `GET` | `/event` | SSE event stream |
+| `GET` | `/config` | Get config |
+| `GET` | `/provider` | List providers |
+| `GET` | `/agent` | List agents (Build/Plan) |
+
+### Key Go Packages
+
+| Package | Purpose |
+|---------|---------|
+| `internal/app/` | App bootstrap — creates services, wires dependencies |
+| `internal/llm/agent/` | Agent loop — stream LLM → process tool calls → loop |
+| `internal/llm/tools/` | 13 tools: bash, edit, write, view, glob, grep, ls, patch, fetch, diagnostics, sourcegraph, file, shell |
+| `internal/llm/provider/` | LLM provider abstraction (8 providers) |
+| `internal/llm/models/` | Model definitions (Anthropic, OpenAI, Gemini, etc.) |
+| `internal/llm/prompt/` | System prompts (coder, summarizer, task, title) |
+| `internal/session/` | Session CRUD (SQLite-backed) |
+| `internal/message/` | Message types + content parts |
+| `internal/permission/` | Blocking permission requests |
+| `internal/pubsub/` | Event bus (generic broker with typed subscribers) |
+| `internal/db/` | SQLite database (migrations, queries via sqlc) |
+| `internal/lsp/` | LSP client integration |
+| `internal/diff/` | Diff engine + patch application |
+| `internal/history/` | File version history |
+| `internal/config/` | Configuration loading |
+| `internal/server/` | HTTP API server (new — added for MowisAI) |
+| `cmd/` | CLI commands (root, serve, setup, schema) |
+| `internal/tui/theme/` | Theme definitions (kept for app.go dependency) |
+
+### Build Tags
+
+- `headless` — builds without TUI dependencies (used for bundled binary)
+- `!headless` — builds with TUI (default, for standalone OpenCode usage)
+
+### cmd/ Structure
+
+- `root_tui.go` (`!headless`): Original OpenCode interactive TUI mode
+- `root_headless.go` (`headless`): Headless mode — default to serve, no TUI
+- `serve.go`: `mowis-agent serve --port 4096 --hostname 127.0.0.1`
+- `setup.go`: Shared setup code (config loading, DB connection, app creation)
+
+### CI/CD
+
+Built in GitHub Actions as Job 2 (`build-mowis-agent`):
+- Runs on `ubuntu-latest`
+- Cross-compiles for Windows: `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags headless -o mowis-agent.exe .`
+- Uploads as artifact, downloaded by Job 3 and bundled into Tauri NSIS installer
+
+---
+
 ## Crate 5: `mowis-desktop` (Tauri App)
 
 **File:** `mowis-desktop/src-tauri/Cargo.toml` (35 lines)
 **Version:** 0.1.0, Edition 2021
-**Dependencies:** tauri (2.0), tauri-plugin-dialog, serde, serde_json, tokio (full), uuid, anyhow, log, which, sha2, rand, hex, dirs, async-trait, tokio-util, reqwest, lazy_static, gcp_auth, base64, rsa
+**Dependencies:** tauri (2.0), tauri-plugin-dialog, serde, serde_json, tokio (full), uuid, anyhow, log, which, sha2, rand, hex, dirs, async-trait, tokio-util, reqwest (json, rustls-tls, stream), futures-util, lazy_static, gcp_auth, base64, rsa
 
-### `src-tauri/src/main.rs` (67 lines)
+### `src-tauri/src/main.rs` (~80 lines)
 
-Tauri entry point. Registers **30 Tauri commands** (lines 31-63). Creates `BackendBridge`, wraps `AppState`, starts bridge loop.
+Tauri entry point. Registers **37 Tauri commands** (30 existing + 7 new agent commands). Creates `BackendBridge`, wraps `AppState`, starts bridge loop.
 
-### `src-tauri/src/types.rs` (305 lines)
+### `src-tauri/src/agent_client.rs` (~300 lines)
 
-- `TaskStatus` enum (line 9): `Pending`, `Running`, `Complete`, `Failed`
-- `Task` (line 24): `{ id, description, sandbox, status, started_at, completed_at, files, summary, views }`
-- `ChatMessage` enum (line 43, tagged): `User { content, ts }`, `Agent { content, streaming, ts }`, `System { content, ts }`, `Plan { sandboxes, task_count, agent_count, mode, ts }`, `Error { content, ts }`
-- `SessionSummary` (line 72): `{ id, prompt, status, started_at, completed_at, task_count, tasks_done, tokens_total, duration_secs, mode }`
-- `Config` (line 89): `{ socket_path, max_agents, mode, provider, model, api_key, gcp_project, gcp_region, gcp_service_account_key_path, sandbox_enabled }`
-- `UsageRecord` (line 135): `{ session_id, prompt_short, ts, task_count, tokens, tool_calls, duration_secs, status }`
-- `GitRepositoryInfo` (line 147): `{ path, name, branch, remote_url, source, repo_url }`
-- `ImageAttachment` (line 157): `{ data_url, media_type, name }`
-- `RepositoryContext` (line 164): `{ project_path, repo_source, repo_url }`
-- `SessionRecord` (line 171): `{ summary, messages, tasks, tokens_total, tool_calls_total }`
-- `SessionDetail` (line 180): same as SessionRecord, with `From<SessionRecord>`
-- `PersistedState` (line 201): `{ version, config, current_session_id, sessions, session_history, usage_history }`
-- `FileChange` (line 224): `{ path, action: FileAction, lines_added, lines_deleted, before_content, content }`
-- `FileAction` enum (line 239): `Created`, `Modified`, `Deleted`, `Read`, `Moved`
-- `BridgeCommand` enum (line 249): `StartOrchestration`, `StartZeroMode`, `ContinueZeroMode`, `StopOrchestration`, `CheckSocket`
-- `BridgeEvent` enum (line 278): `DaemonConnected`, `DaemonDisconnected`, `TaskAdded`, `TaskUpdated`, `AgentChunk`, `AgentMessage`, `PlanReady`, `OrchestrationComplete`, `OrchestrationFailed`, `SimulationTick`, `FileChanges`
+HTTP client for mowis-agent — shared types and request methods.
 
-### `src-tauri/src/state.rs` (356 lines)
+**Types:**
+- `HealthResponse` (line 12): `{ healthy, version, cwd }`
+- `Session` (line 18): `{ id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, created_at, updated_at }`
+- `AgentMessage` (line 30): `{ id, session_id, role, parts: Vec<ContentPart>, model, created_at, updated_at }`
+- `ContentPart` enum (line 40): `Text { text }`, `Reasoning { text }`, `ToolCall { call_id, name, input }`, `ToolResult { call_id, name, content, is_error }`, `Finish { reason }`
+- `PermissionRequest` (line 62): `{ id, session_id, tool_name, description, action, params, path }`
+- `SseEvent` (line 72): `{ event_type, payload: Value }`
 
-- `AppState` (line 16): `{ bridge, config, current_session_id, messages, tasks, sessions, session_history, usage_history, daemon_connected, tokens_total, tool_calls_total, storage_path, cmd_tx, active_sandbox, zero_workspace }`
-- `AppState::new(bridge)` (line 41): loads persisted state, restores current session
-- `save_state(state)` (line 169): serialize to PersistedState, write to disk
-- `sync_current_session(state, status, completed_at)` (line 226): sync in-memory to persisted SessionRecord
-- `record_usage_for_current(state, status)` (line 313): create/update UsageRecord
+**AgentClient methods:**
+- `new(port)` / `with_base_url(url)` — constructors
+- `health()` — GET /health
+- `create_session(title)` — POST /session
+- `list_sessions()` — GET /session
+- `get_session(id)` — GET /session/{id}
+- `delete_session(id)` — DELETE /session/{id}
+- `list_messages(session_id)` — GET /session/{id}/message
+- `send_message(session_id, text)` — POST /session/{id}/message (blocking)
+- `send_message_async(session_id, text)` — POST /session/{id}/message/async
+- `abort(session_id)` — POST /session/{id}/abort
+- `approve_permission(session_id, perm_id)` — POST /session/{id}/permission/{pid} (approve)
+- `deny_permission(session_id, perm_id)` — POST /session/{id}/permission/{pid} (deny)
+- `subscribe_events()` — GET /event (SSE stream → mpsc::Receiver)
 
-### `src-tauri/src/backend.rs` (321 lines)
+### `src-tauri/src/agent_manager.rs` (~160 lines)
 
-- `SetupProgress` (line 25): `{ stage, message, pct, detail, kind, timestamp }`
-- `ConnectionState` (line 50): `{ connected, launcher, addr }`
-- `BackendBridge` (line 59): `{ launcher, conn_info, stream, state_tx/rx, progress_tx/rx }`
-- `start()` (line 97): emits progress, calls `connect_with_retry(5)`, spawns `health_loop`
-- `connect_with_retry(max_attempts)` (line 139): exponential backoff 1s to 10s
-- `health_loop()` (line 216): infinite loop — sleep 30s, health check, reconnect on failure
+Manages mowis-agent subprocess lifecycle.
 
-### `src-tauri/src/sandbox.rs` (142 lines)
+- `DEFAULT_AGENT_PORT` (line 9): 4096
+- `AgentManager` (line 13): `{ process: Option<Child>, client: AgentClient, port }`
+- `new(port)` (line 20): creates manager with client
+- `client()` (line 26): returns reference to AgentClient
+- `start(resource_dir)` (line 30): finds mowis-agent binary in resources, spawns subprocess, waits for health check
+- `stop()` (line 56): graceful shutdown with 5s timeout
+- `is_healthy()` (line 72): health check
+- `find_agent_binary(resource_dir)` (line 77): looks in Tauri resources, then executable directory
+- `wait_for_health()` (line 95): exponential backoff (100ms → 1s), max 30 attempts
 
-Cross-platform soft sandbox (no overlayfs/kernel isolation).
+### `src-tauri/src/types.rs` (~305 lines)
 
-- `SandboxInfo` (line 19): `{ id, lower_dir, upper_dir }`
-- `create_sandbox(project_path)` (line 35): generates UUID, creates `{temp}/mowis-sandbox/{id}/upper/`, copies project files (skipping .git/target/node_modules/etc.)
-- `destroy_sandbox(sandbox_id)` (line 56): `remove_dir_all`
-- `SKIP_DIRS` (line 75): `.git`, `target`, `node_modules`, `.next`, `dist`, `build`, `__pycache__`, `.venv`, `venv`
+- `BridgeCommand` enum (line 249): `StartOrchestration`, `StartZeroMode` (deprecated), `ContinueZeroMode` (deprecated), `StopOrchestration`, `CheckSocket`
+- Note: `StartZeroMode` and `ContinueZeroMode` now use `serde_json::Value` for workspace (was `zero_mode::ZeroWorkspaceInfo`)
 
-### `src-tauri/src/bridge_loop.rs` (564 lines)
+### `src-tauri/src/state.rs` (~356 lines)
+
+- `AppState` (line 16): `{ bridge, config, current_session_id, messages, tasks, sessions, session_history, usage_history, daemon_connected, tokens_total, tool_calls_total, storage_path, cmd_tx, active_sandbox, agent_manager }`
+- Note: `zero_workspace` field replaced by `agent_manager: Mutex<Option<AgentManager>>`
+
+### `src-tauri/src/bridge_loop.rs` (~570 lines)
 
 Central event loop connecting backend to frontend.
 
-- `start_bridge(app, state)` (line 10): creates 4 concurrent subsystems:
-  1. Platform harness startup (forwards SetupProgress, calls bridge.start())
-  2. Connection state watcher
-  3. Command handler (dedicated OS thread with own tokio runtime)
-  4. Event consumer
+- `start_bridge(app, state)` (line 10): creates 5 concurrent subsystems:
+  1. Platform harness startup
+  2. **mowis-agent subprocess startup** (new) — spawns agent, waits for health, stores in state
+  3. Connection state watcher
+  4. Command handler (dedicated OS thread with own tokio runtime)
+  5. Event consumer
 
-- `handle_bridge_event(event, state, app)` (line 142): handles each BridgeEvent variant, updates AppState, persists, emits to frontend
+- Note: `StartZeroMode` and `ContinueZeroMode` command handlers now log deprecation warnings
 
-- `run_orchestration(...)` (line 363): sends orchestration payload to daemon, streams events
-- `simulate_session(...)` (line 433): full UI simulation without daemon — streams chunks, creates sample tasks, runs in waves
+### `src-tauri/src/commands.rs` (~760 lines)
 
-### `src-tauri/src/commands.rs` (686 lines)
-
-30 Tauri commands exposed to frontend:
+37 Tauri commands exposed to frontend (30 existing + 7 new agent commands):
 
 | Command | Line | Purpose |
 |---------|------|---------|
@@ -979,14 +1104,14 @@ Central event loop connecting backend to frontend.
 | `save_config` | 240 | Persist new Config |
 | `get_daemon_status` | 246 | Return bool: daemon connected? |
 | `check_daemon` | 251 | Send CheckSocket command |
-| `start_session` | 261 | Start orchestration or zero-mode session |
+| `start_session` | 261 | Start orchestration (zero mode deprecated) |
 | `stop_session` | 404 | Stop active session, destroy sandbox |
-| `send_message` | 430 | Send follow-up in zero mode |
+| `send_message` | 430 | Send follow-up (deprecated zero mode path) |
 | `get_current_session` | 464 | Return Option<SessionDetail> |
 | `load_session` | 474 | Load persisted session by ID |
 | `clear_current_session` | 499 | Clear current session |
-| `get_zero_workspace` | 510 | Return zero-mode workspace |
-| `get_zero_workspace_base` | 516 | Return base dir for workspaces |
+| `get_zero_workspace` | 510 | Deprecated — returns null |
+| `get_zero_workspace_base` | 516 | Deprecated — returns empty string |
 | `get_sandbox_status` | 522 | Return active sandbox info |
 | `discard_sandbox` | 528 | Remove sandbox from disk |
 | `get_sandbox_size` | 538 | Return sandbox upper_dir size |
@@ -1000,56 +1125,26 @@ Central event loop connecting backend to frontend.
 | `validate_developer_config` | 645 | Validate, return warnings |
 | `start_developer_bootstrap` | 650 | Save config, return boot instructions |
 | `clear_developer_config` | 678 | Delete developer config file |
+| **`agent_health`** | 700 | **Check mowis-agent health** |
+| **`agent_create_session`** | 710 | **Create session via mowis-agent** |
+| **`agent_list_sessions`** | 720 | **List mowis-agent sessions** |
+| **`agent_send_message`** | 730 | **Send message to mowis-agent (blocking or async)** |
+| **`agent_abort`** | 750 | **Abort mowis-agent session** |
+| **`agent_approve_permission`** | 760 | **Approve tool permission** |
+| **`agent_deny_permission`** | 770 | **Deny tool permission** |
 
-### Zero Mode (`src-tauri/src/zero_mode/`)
+### ~~Zero Mode~~ (DELETED)
 
-Direct LLM execution mode bypassing agentd entirely.
+The `src-tauri/src/zero_mode/` directory has been deleted. All zero-mode functionality is replaced by mowis-agent.
 
-#### `mod.rs` (950 lines)
+Previous zero-mode files:
+- `mod.rs` (950 lines) — tool-calling loop, intent classification, quality gates
+- `llm.rs` (712 lines) — 7 LLM providers
+- `tools.rs` (745 lines) — 13 filesystem/shell tools
+- `workspace.rs` (139 lines) — workspace folder management
+- `intent.rs` (107 lines) — intent classifier
 
-- `run_zero_session(session_id, prompt, config, workspace, event_tx)` (line 142): classifies intent, dispatches to `run_chat_mode()` or `run_build_mode()`
-- `run_chat_mode(...)` (line 166): single LLM call, no tools, stream response
-- `run_build_mode(...)` (line 226): tool-calling loop up to 40 rounds
-  - Calls LLM, streams text, executes tools sequentially
-  - Quality gate for `write_file` via `validate_file_quality()`
-  - Validation round after main loop
-  - Context budget management via `shrink_context_for_budget()` (36,000 chars)
-- `system_prompt_for(workspace, skills)` (line 635): builds full system prompt with workspace path, tool descriptions, quality rules
-- `validate_file_quality(path, content)` (line 760): checks HTML/CSS/JS quality (minified, placeholder text, missing tags)
-- `load_frontend_skills()` (line 47): searches for SKILL_FRONTNED/SKILL_FRONTEND markdown files
-
-#### `llm.rs` (712 lines)
-
-7 LLM providers: Gemini, Vertex AI, Anthropic, OpenAI, xAI Grok, Groq, Mimo.
-
-- `Role` enum (line 17): `System`, `User`, `Assistant`, `Tool`
-- `ToolCallRequest` (line 24): `{ id, name, args }`
-- `MessageContent` enum (line 32): `Text`, `ToolCall`, `ToolResult`
-- `LlmMessage` (line 39): `{ role, parts }`
-- `LlmResponse` (line 67): `{ text, tool_calls, finished }`
-- `call_llm(config, system_prompt, messages, tool_defs)` (line 79): dispatches to provider-specific function
-- `get_token_from_service_account()` (line 316): full OAuth2 SA flow with RS256 JWT signing
-
-#### `tools.rs` (745 lines)
-
-13 tools for zero mode: `read_file`, `read_file_lines`, `write_file`, `append_file`, `replace_in_file`, `edit_file_lines`, `list_directory`, `create_directory`, `delete_file`, `move_file`, `search_files`, `search_in_files`, `run_command`
-
-- `safe_path(workspace, rel)` (line 226): path traversal prevention
-- `execute_tool(workspace, name, args)` (line 203): dispatcher
-- `tool_run_command()` (line 689): blocks dangerous commands (rm -rf /, format, del /f /s, mkfs, dd if=)
-
-#### `workspace.rs` (139 lines)
-
-- `WorkspaceInfo` (line 18): `{ session_id, slug, path }`
-- `create_workspace(session_id)` (line 31): creates `~/Documents/MowisAI/workspaces/{slug}/`
-- `use_existing_workspace(session_id, path)` (line 63): uses existing directory
-- `workspace_base_dir()` (line 100): Linux `~/MowisAI/workspaces/`, others `~/Documents/MowisAI/workspaces/`
-
-#### `intent.rs` (107 lines)
-
-Score-based intent classifier (same logic as agentd's intent.rs).
-
-- `classify_intent(message)` (line 14): 18 hard chat overrides, 55 strong build signals (2pts), 39 weak build signals (1pt), 14 strong chat signals (2pts)
+All of this is now handled by mowis-agent's Go backend (better tools, more providers, session persistence, permission system, LSP integration).
 
 ---
 
@@ -1116,13 +1211,18 @@ Orchestration modules contain ~60+ inline tests:
 |------|---------|
 | `scripts/perf-gate.sh` | Performance gate: 2000 tasks, 420s budget |
 | `agentd/scripts/build-rootfs.sh` | Build rootfs script |
-| `.github/workflows/build-windows.yml` | CI: Windows build |
+| `.github/workflows/build-windows.yml` | CI: 3-job Windows build (agentd, mowis-agent, Tauri installer) |
+| `.cargo/config.toml` | Cargo build configuration |
 | `codemagic.yaml` | CI configuration |
 | `deny.toml` | cargo-deny config |
 | `AGENTS.md` | Architecture specification for new 7-layer system |
 | `CLAUDE.md` | Claude-specific instructions |
 | `system.md` | System instructions |
 | `SKILL_FRONTNED (1).md`, `SKILL_FRONTNED (2).md` | Frontend skill docs |
+| `mowis-agent/go.mod` | Go module definition for mowis-agent |
+| `mowis-agent/go.sum` | Go dependency checksums |
+| `mowis-agent/sqlc.yaml` | SQL code generation config |
+| `mowis-agent/opencode-schema.json` | Config schema (from OpenCode) |
 
 ---
 
@@ -1140,10 +1240,12 @@ Orchestration modules contain ~60+ inline tests:
 
 6. **Platform abstraction:** mowis-cli and mowis-desktop both use the `VmLauncher` trait with platform-specific implementations (Linux direct socket, macOS QEMU+HVF, Windows WSL2/QEMU+WHPX/Developer Mode).
 
-7. **Two execution modes in desktop:** Full orchestration (via agentd daemon with 7-layer pipeline) and zero mode (direct LLM API calls writing to disk, 1 agent, 13 tools).
+7. **Unified coding agent (mowis-agent):** Single-agent coding tasks go through mowis-agent (Go binary, HTTP API). Multi-agent orchestration goes through agentd (Rust binary, Unix socket). Desktop and CLI both talk to mowis-agent via HTTP.
 
-8. **C FFI:** agentd library exposes C-compatible functions for sandbox/memory/loop management, enabling integration from non-Rust languages.
+8. **Subprocess lifecycle:** mowis-desktop spawns mowis-agent as a subprocess on startup, waits for health check, stores the manager in AppState. The agent runs on localhost:4096 and is bundled inside the Tauri installer.
 
-9. **AES-256-GCM encryption:** API keys encrypted at rest with machine-derived keys (SHA-256 of machine-id + salt).
+9. **C FFI:** agentd library exposes C-compatible functions for sandbox/memory/loop management, enabling integration from non-Rust languages.
 
-10. **Constant-time auth:** Token validation uses XOR + OR accumulation to prevent timing attacks.
+10. **AES-256-GCM encryption:** API keys encrypted at rest with machine-derived keys (SHA-256 of machine-id + salt).
+
+11. **Constant-time auth:** Token validation uses XOR + OR accumulation to prevent timing attacks.
