@@ -17,10 +17,20 @@ pub mod health;
 pub mod complexity_classifier;
 pub mod provider_client;
 
+// NEW FEATURES
+pub mod planning_modes;
+pub mod agent_templates;
+pub mod cost_tracker;
+pub mod workspace;
+pub mod streaming;
+
 // Re-export main types
 pub use new_orchestrator::{NewOrchestrator, OrchestratorConfig, FinalOutput, OrchestratorEvent};
 pub use agent_execution::{set_verbose, is_verbose};
 pub use complexity_classifier::{ComplexityMode, ComplexityScore, classify_complexity};
+pub use planning_modes::{PlanningMode, PlanningConfig, recommend_mode};
+pub use cost_tracker::{CostTracker, BudgetConfig, CostSummary};
+pub use workspace::{Workspace, detect_workspace, get_dir_tree};
 
 // KEEP: Still needed files
 pub mod session_store;
