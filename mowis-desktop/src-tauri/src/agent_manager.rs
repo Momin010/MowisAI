@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use log::{info, warn};
+use log::{info, warn, error};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -22,6 +22,7 @@ pub struct AgentManager {
 
 impl AgentManager {
     pub fn new(port: u16) -> Self {
+        info!("[agent] AgentManager created for port {}", port);
         Self {
             process: None,
             client: AgentClient::new(port),
@@ -40,28 +41,50 @@ impl AgentManager {
     /// Find and spawn the mowis-agent binary, then wait for it to become healthy.
     /// Tries multiple ports if the default is occupied.
     pub async fn start(&mut self, resource_dir: &Path) -> Result<()> {
+        info!("[agent] Starting agent discovery — checking ports {}-{}", DEFAULT_AGENT_PORT, DEFAULT_AGENT_PORT + MAX_PORT_ATTEMPTS - 1);
+        info!("[agent] Resource dir: {}", resource_dir.display());
+
         // First: check if an agent is already running on any port starting from default
         for port_offset in 0..MAX_PORT_ATTEMPTS {
             let port = DEFAULT_AGENT_PORT + port_offset;
             let test_client = AgentClient::new(port);
-            if let Ok(resp) = test_client.health().await {
-                if resp.healthy {
-                    info!("mowis-agent already running on port {}", port);
-                    self.port = port;
-                    self.client = test_client;
-                    return Ok(());
+            match test_client.health().await {
+                Ok(resp) => {
+                    if resp.healthy {
+                        info!("[agent] ✓ Found running agent on port {} (v{})", port, resp.version);
+                        self.port = port;
+                        self.client = test_client;
+                        return Ok(());
+                    } else {
+                        info!("[agent] Port {} responded but not healthy: {:?}", port, resp);
+                    }
+                }
+                Err(e) => {
+                    if port_offset == 0 {
+                        info!("[agent] Port {} not available: {}", port, e);
+                    }
                 }
             }
         }
 
+        info!("[agent] No running agent found — will spawn new process");
+
         // Find the binary
-        let agent_path = self.find_agent_binary(resource_dir)?;
-        info!("Starting mowis-agent from {}", agent_path.display());
+        let agent_path = match self.find_agent_binary(resource_dir) {
+            Ok(p) => {
+                info!("[agent] ✓ Found binary at: {}", p.display());
+                p
+            }
+            Err(e) => {
+                error!("[agent] ✗ Binary not found: {}", e);
+                return Err(e);
+            }
+        };
 
         // Try ports starting from default
         for port_offset in 0..MAX_PORT_ATTEMPTS {
             let port = DEFAULT_AGENT_PORT + port_offset;
-            info!("Trying to start mowis-agent on port {}", port);
+            info!("[agent] Attempting to spawn on port {}...", port);
 
             let child = Command::new(&agent_path)
                 .arg("serve")
@@ -77,51 +100,61 @@ impl AgentManager {
 
             match child {
                 Ok(c) => {
+                    info!("[agent] Process spawned on port {}, waiting for health...", port);
                     self.process = Some(c);
                     self.port = port;
                     self.client = AgentClient::new(port);
 
-                    // Wait for health
                     match self.wait_for_health().await {
                         Ok(()) => {
-                            info!("mowis-agent started on port {}", port);
+                            info!("[agent] ✓ Agent healthy on port {}", port);
                             return Ok(());
                         }
                         Err(e) => {
-                            warn!("Agent on port {} failed health check: {}", port, e);
+                            warn!("[agent] ✗ Health check failed on port {}: {}", port, e);
                             self.stop().await;
                             continue;
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to spawn on port {}: {}", port, e);
+                    warn!("[agent] ✗ Failed to spawn on port {}: {}", port, e);
                     continue;
                 }
             }
         }
 
+        error!("[agent] ✗ Failed to start on any port ({}-{})", DEFAULT_AGENT_PORT, DEFAULT_AGENT_PORT + MAX_PORT_ATTEMPTS - 1);
         anyhow::bail!("Failed to start mowis-agent on any port ({}-{})", DEFAULT_AGENT_PORT, DEFAULT_AGENT_PORT + MAX_PORT_ATTEMPTS - 1)
     }
 
     /// Stop the agent subprocess gracefully.
     pub async fn stop(&mut self) {
         if let Some(mut child) = self.process.take() {
-            info!("Stopping mowis-agent...");
+            info!("[agent] Stopping agent on port {}...", self.port);
             if let Err(e) = child.kill().await {
-                warn!("Failed to kill mowis-agent: {}", e);
+                warn!("[agent] Failed to kill: {}", e);
             }
             match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                Ok(Ok(status)) => info!("mowis-agent exited with {}", status),
-                Ok(Err(e)) => warn!("mowis-agent wait error: {}", e),
-                Err(_) => warn!("mowis-agent did not exit within 5s"),
+                Ok(Ok(status)) => info!("[agent] Exited with {}", status),
+                Ok(Err(e)) => warn!("[agent] Wait error: {}", e),
+                Err(_) => warn!("[agent] Did not exit within 5s"),
             }
         }
     }
 
     /// Check if the agent is healthy.
     pub async fn is_healthy(&self) -> bool {
-        self.client.health().await.is_ok()
+        match self.client.health().await {
+            Ok(resp) => {
+                info!("[agent] Health check OK: v{}", resp.version);
+                true
+            }
+            Err(e) => {
+                warn!("[agent] Health check failed: {}", e);
+                false
+            }
+        }
     }
 
     fn find_agent_binary(&self, resource_dir: &Path) -> Result<PathBuf> {
@@ -131,8 +164,12 @@ impl AgentManager {
             vec!["mowis-agent"]
         };
 
+        info!("[agent] Looking for binary: {:?}", names);
+        info!("[agent]   Resource dir: {}", resource_dir.display());
+
         for name in &names {
             let path = resource_dir.join(name);
+            info!("[agent]   Checking: {}", path.display());
             if path.exists() {
                 return Ok(path);
             }
@@ -140,8 +177,10 @@ impl AgentManager {
 
         if let Ok(exe_dir) = std::env::current_exe() {
             if let Some(dir) = exe_dir.parent() {
+                info!("[agent]   Exe dir: {}", dir.display());
                 for name in &names {
                     let path = dir.join(name);
+                    info!("[agent]   Checking: {}", path.display());
                     if path.exists() {
                         return Ok(path);
                     }
@@ -162,15 +201,15 @@ impl AgentManager {
         for attempt in 1..=max_attempts {
             match self.client.health().await {
                 Ok(resp) if resp.healthy => {
-                    info!("mowis-agent healthy after {} attempts (v{})", attempt, resp.version);
+                    info!("[agent] Health check passed on attempt {}/{} (v{})", attempt, max_attempts, resp.version);
                     return Ok(());
                 }
-                Ok(_) => {
-                    info!("mowis-agent responded but not healthy, attempt {}", attempt);
+                Ok(resp) => {
+                    info!("[agent] Responded but not healthy (attempt {}/{}): {:?}", attempt, max_attempts, resp);
                 }
                 Err(e) => {
-                    if attempt % 5 == 0 {
-                        info!("Waiting for mowis-agent... attempt {}/{}: {}", attempt, max_attempts, e);
+                    if attempt <= 3 || attempt % 5 == 0 {
+                        info!("[agent] Health attempt {}/{}: {}", attempt, max_attempts, e);
                     }
                 }
             }
@@ -179,14 +218,14 @@ impl AgentManager {
             delay_ms = (delay_ms * 2).min(1000);
         }
 
-        anyhow::bail!("mowis-agent did not become healthy within {} attempts", max_attempts)
+        anyhow::bail!("Not healthy after {} attempts", max_attempts)
     }
 }
 
 impl Drop for AgentManager {
     fn drop(&mut self) {
         if self.process.is_some() {
-            warn!("AgentManager dropped without calling stop() — agent process may be orphaned");
+            warn!("[agent] AgentManager dropped without calling stop() — process may be orphaned");
         }
     }
 }

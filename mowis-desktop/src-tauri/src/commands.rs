@@ -677,15 +677,30 @@ pub async fn clear_developer_config() -> Result<(), String> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn get_agent_client(state: &State<'_, Arc<AppState>>) -> Result<agent_client::AgentClient, String> {
-    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
-    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
+    let mgr = state.agent_manager.lock().map_err(|e| {
+        log::error!("[cmd] Failed to lock agent_manager mutex: {}", e);
+        e.to_string()
+    })?;
+    let mgr = mgr.as_ref().ok_or_else(|| {
+        log::warn!("[cmd] Agent not initialized — agent_manager is None");
+        "Agent not initialized".to_string()
+    })?;
     Ok(mgr.client().clone())
 }
 
 #[tauri::command]
 pub async fn agent_health(state: State<'_, Arc<AppState>>) -> Result<agent_client::HealthResponse, String> {
     let client = get_agent_client(&state)?;
-    client.health().await.map_err(|e| e.to_string())
+    match client.health().await {
+        Ok(resp) => {
+            log::info!("[cmd] agent_health OK: v{}, healthy={}", resp.version, resp.healthy);
+            Ok(resp)
+        }
+        Err(e) => {
+            log::warn!("[cmd] agent_health FAILED: {}", e);
+            Err(e.to_string())
+        }
+    }
 }
 
 #[tauri::command]
@@ -694,7 +709,17 @@ pub async fn agent_create_session(
     title: String,
 ) -> Result<agent_client::Session, String> {
     let client = get_agent_client(&state)?;
-    client.create_session(&title).await.map_err(|e| e.to_string())
+    log::info!("[cmd] Creating agent session: {}", title);
+    match client.create_session(&title).await {
+        Ok(sess) => {
+            log::info!("[cmd] Session created: {}", sess.id);
+            Ok(sess)
+        }
+        Err(e) => {
+            log::error!("[cmd] Create session failed: {}", e);
+            Err(e.to_string())
+        }
+    }
 }
 
 #[tauri::command]
@@ -713,11 +738,21 @@ pub async fn agent_send_message(
     background: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let client = get_agent_client(&state)?;
+    let preview = if text.len() > 80 { &text[..80] } else { &text };
+    log::info!("[cmd] Sending message to session {}: \"{}\" (async={})", session_id, preview, background.unwrap_or(false));
     if background.unwrap_or(false) {
-        client.send_message_async(&session_id, &text).await.map_err(|e| e.to_string())?;
+        client.send_message_async(&session_id, &text).await.map_err(|e| {
+            log::error!("[cmd] send_message_async failed: {}", e);
+            e.to_string()
+        })?;
         Ok(serde_json::json!({ "status": "accepted" }))
     } else {
-        client.send_message(&session_id, &text).await.map_err(|e| e.to_string())
+        let result = client.send_message(&session_id, &text).await.map_err(|e| {
+            log::error!("[cmd] send_message failed: {}", e);
+            e.to_string()
+        })?;
+        log::info!("[cmd] Message sent, response received");
+        Ok(result)
     }
 }
 

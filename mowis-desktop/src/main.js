@@ -277,17 +277,25 @@ async function init() {
   await checkDaemonWithGuidance();
 
   // Check mowis-agent health (retry up to 10 times with 1s delay — agent may still be starting)
+  const splashHint = $('splash-hint');
   for (let attempt = 1; attempt <= 10; attempt++) {
+    if (splashHint) splashHint.textContent = `Connecting to agent... (${attempt}/10)`;
+    console.log(`[agent] Health check attempt ${attempt}/10`);
     try {
       const health = await invoke('agent_health');
       if (health?.healthy) {
         State.agentHealthy = true;
-        console.log('mowis-agent healthy, version:', health.version);
+        console.log(`[agent] ✓ Connected — v${health.version}, cwd: ${health.cwd}`);
+        if (splashHint) splashHint.textContent = `Agent connected (v${health.version})`;
         break;
+      } else {
+        console.log(`[agent] Responded but not healthy:`, health);
       }
     } catch (e) {
+      console.warn(`[agent] Attempt ${attempt}/10 failed:`, e);
       if (attempt === 10) {
-        console.log('mowis-agent not available after 10 attempts — using fallback mode');
+        console.log('[agent] ✗ Not available after 10 attempts — falling back to simulation mode');
+        if (splashHint) splashHint.textContent = 'Agent not available — using simulation mode';
       }
     }
     if (attempt < 10) await delay(1000);
@@ -559,29 +567,34 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
       try {
         const health = await invoke('agent_health');
         State.agentHealthy = health?.healthy === true;
-      } catch {
+        if (State.agentHealthy) console.log('[session] Agent reconnected:', health.version);
+      } catch (e) {
+        console.warn('[session] Agent re-check failed:', e);
         State.agentHealthy = false;
       }
     }
 
     if (State.agentHealthy) {
       const title = fullPrompt.slice(0, 120);
+      console.log('[session] Creating agent session:', title);
       const session = await invoke('agent_create_session', { title });
       State.agentSessionId = session.id;
       State.sessionId = session.id;
+      console.log('[session] ✓ Session created:', session.id);
       setText('compose-session-info', `session ${session.id.slice(0, 8)}`);
       setText('chat-session-title', fullPrompt.slice(0, 120));
 
       appendThinkingIndicator();
-
+      console.log('[session] Sending message (async)...');
       await invoke('agent_send_message', {
         sessionId: session.id,
         text: fullPrompt,
         background: true,
       });
-
+      console.log('[session] ✓ Message sent, starting polling');
       startAgentPolling(session.id);
     } else {
+      console.log('[session] Agent not healthy — falling back to orchestration');
       const id = await invoke('start_session', {
         prompt: fullPrompt,
         mode: mode || 'auto',
@@ -908,6 +921,7 @@ async function sendChatMessage() {
   autoResize.call(input);
 
   if (State.agentSessionId && State.agentHealthy) {
+    console.log('[chat] Sending follow-up to session:', State.agentSessionId);
     appendThinkingIndicator();
     setSessionActive(true);
     try {
@@ -916,8 +930,10 @@ async function sendChatMessage() {
         text: fullText,
         background: true,
       });
+      console.log('[chat] ✓ Message sent, restarting poll');
       startAgentPolling(State.agentSessionId);
     } catch (err) {
+      console.error('[chat] ✗ Send failed:', err);
       removeThinkingIndicator();
       appendChatMessage({ kind: 'error', content: `Failed to send: ${err}`, ts: nowTs() });
     }

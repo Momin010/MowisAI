@@ -236,9 +236,13 @@ export function removeThinkingIndicator() {
 export function startAgentPolling(sessionId) {
   stopAgentPolling();
   State.lastMessageCount = 0;
+  console.log('[poll] Starting polling for session:', sessionId);
 
   async function poll() {
-    if (!State.agentSessionId || State.agentSessionId !== sessionId) return;
+    if (!State.agentSessionId || State.agentSessionId !== sessionId) {
+      console.log('[poll] Session changed, stopping poll');
+      return;
+    }
     try {
       const messages = await invoke('agent_list_messages', { sessionId });
       if (!messages || !Array.isArray(messages)) return;
@@ -246,10 +250,12 @@ export function startAgentPolling(sessionId) {
       if (messages.length > State.lastMessageCount) {
         const newMessages = messages.slice(State.lastMessageCount);
         State.lastMessageCount = messages.length;
+        console.log(`[poll] ${newMessages.length} new message(s), total: ${messages.length}`);
 
         removeThinkingIndicator();
 
         for (const msg of newMessages) {
+          console.log(`[poll] Rendering ${msg.role} message with ${(msg.parts||[]).length} parts`);
           renderAgentMessage(msg);
         }
 
@@ -257,6 +263,7 @@ export function startAgentPolling(sessionId) {
         if (lastMsg?.role === 'assistant') {
           const hasFinish = (lastMsg.parts || []).some(p => p.type === 'finish');
           if (hasFinish) {
+            console.log('[poll] Agent finished — stopping poll');
             finalizeStreaming();
             if (_setSessionActive) _setSessionActive(false, true);
             stopAgentPolling();

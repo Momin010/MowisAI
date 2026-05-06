@@ -63,22 +63,22 @@ pub fn start_bridge(
     {
         let state_clone = Arc::clone(&state);
         tauri::async_runtime::spawn(async move {
-            // Try to find mowis-agent in Tauri resources
             let resource_dir = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|p| p.to_path_buf()))
                 .unwrap_or_default();
 
             let port = crate::agent_manager::DEFAULT_AGENT_PORT;
+            log::info!("[bridge] Initializing mowis-agent manager (default port: {})", port);
             let mut mgr = AgentManager::new(port);
             match mgr.start(&resource_dir).await {
                 Ok(()) => {
-                    log::info!("mowis-agent started successfully on port {}", port);
+                    log::info!("[bridge] ✓ mowis-agent ready on port {}", mgr.port());
                     *state_clone.agent_manager.lock().unwrap() = Some(mgr);
                 }
                 Err(e) => {
-                    log::warn!("Failed to start mowis-agent: {} — agent commands will not be available", e);
-                    // Store the manager anyway so commands can attempt to connect
+                    log::error!("[bridge] ✗ mowis-agent failed to start: {}", e);
+                    log::info!("[bridge] Agent commands will not be available — falling back to simulation");
                     *state_clone.agent_manager.lock().unwrap() = Some(mgr);
                 }
             }
