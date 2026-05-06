@@ -69,6 +69,7 @@ fn main() {
             agent_deny_permission,
             agent_list_sessions,
             agent_health,
+            agent_delete_session,
         ])
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");

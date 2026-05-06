@@ -1853,6 +1853,7 @@ function renderSessionCard(s) {
 
   return `
     <div class="session-card" data-id="${s.id}">
+      <button class="sc-delete" data-id="${s.id}" title="Delete session" aria-label="Delete session">&times;</button>
       <div class="sc-top">
         <div class="sc-prompt">${escHtml(s.prompt || '—')}</div>
         <div class="sc-badges">
@@ -1970,7 +1971,26 @@ function renderSessionsList() {
   list.innerHTML = filtered.map(s => renderSessionCard(s)).join('');
 
   list.querySelectorAll('.session-card').forEach(card => {
-    card.addEventListener('click', () => openSession(card.dataset.id));
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('.sc-delete')) return;
+      openSession(card.dataset.id);
+    });
+  });
+
+  list.querySelectorAll('.sc-delete').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      if (!id) return;
+      try {
+        await invoke('agent_delete_session', { sessionId: id });
+        SessionsState.all = SessionsState.all.filter(s => s.id !== id);
+        renderSessionsPage();
+        toast('Session deleted', 'success');
+      } catch (err) {
+        toast('Failed to delete: ' + err, 'error');
+      }
+    });
   });
 }
 
@@ -2895,7 +2915,7 @@ function initSpeechRecognition() {
   }
 
   const recognition = new SR();
-  recognition.continuous = false;
+  recognition.continuous = true;
   recognition.interimResults = true;
   recognition.lang = 'en-US';
 
@@ -2903,6 +2923,8 @@ function initSpeechRecognition() {
   let activeTextarea = null;
   let isRecording = false;
   let finalTranscript = '';
+  let silenceTimer = null;
+  const SILENCE_TIMEOUT = 3000; // 3 seconds before auto-stop
   let audioCtx = null;
   let analyser = null;
   let micStream = null;
@@ -3033,20 +3055,20 @@ function initSpeechRecognition() {
   }
 
   function showWaveformOverlay() {
-    if (waveformOverlay) {
-      waveformOverlay.classList.add('active');
-      waveformOverlay.setAttribute('aria-hidden', 'false');
-    }
+    // Removed — keep only inline mic indicator
   }
 
   function hideWaveformOverlay() {
-    if (waveformOverlay) {
-      waveformOverlay.classList.remove('active');
-      waveformOverlay.setAttribute('aria-hidden', 'true');
-    }
+    // Removed — keep only inline mic indicator
   }
 
   recognition.onresult = (event) => {
+    // Reset silence timer — speech detected
+    if (silenceTimer) clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+      if (isRecording) recognition.stop();
+    }, SILENCE_TIMEOUT);
+
     let interim = '';
     for (let i = event.resultIndex; i < event.results.length; i++) {
       if (event.results[i].isFinal) {
@@ -3062,9 +3084,9 @@ function initSpeechRecognition() {
   };
 
   recognition.onend = () => {
+    if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
     isRecording = false;
     stopAudioViz();
-    hideWaveformOverlay();
     if (activeBtn) activeBtn.classList.remove('recording');
     if (activeTextarea) {
       const base = activeTextarea.dataset.preSpeech || '';

@@ -749,3 +749,12 @@ pub async fn agent_deny_permission(
     let client = get_agent_client(&state)?;
     client.deny_permission(&session_id, &permission_id).await.map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn agent_delete_session(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<(), String> {
+    let client = get_agent_client(&state)?;
+    client.delete_session(&session_id).await.map_err(|e| e.to_string())
+}
