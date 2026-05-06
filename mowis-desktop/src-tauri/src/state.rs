@@ -1,7 +1,7 @@
+use crate::agent_manager::AgentManager;
 use crate::backend::BackendBridge;
 use crate::sandbox::SandboxInfo;
 use crate::types::*;
-use crate::zero_mode;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,8 +33,8 @@ pub struct AppState {
     // Active soft sandbox for the current session (None when sandbox is off or no session).
     pub active_sandbox: Mutex<Option<SandboxInfo>>,
 
-    // Workspace created by zero mode (None when not in zero mode).
-    pub zero_workspace: Mutex<Option<zero_mode::ZeroWorkspaceInfo>>,
+    // mowis-agent subprocess manager (None until started).
+    pub agent_manager: Mutex<Option<AgentManager>>,
 }
 
 impl AppState {
@@ -88,7 +88,7 @@ impl AppState {
             storage_path,
             cmd_tx: Mutex::new(None),
             active_sandbox: Mutex::new(None),
-            zero_workspace: Mutex::new(None),
+            agent_manager: Mutex::new(None),
         }
     }
 }

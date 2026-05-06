@@ -1,0 +1,10 @@
+# MowisAI workspace Cargo configuration
+
+[build]
+# Use workspace root for all builds
+
+[target.x86_64-pc-windows-msvc]
+rustflags = []
+
+[target.x86_64-unknown-linux-musl]
+rustflags = []

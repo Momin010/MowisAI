@@ -1,4 +1,3 @@
-use crate::zero_mode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -255,20 +254,20 @@ pub enum BridgeCommand {
         mode: String,
         repo_context: Option<RepositoryContext>,
     },
-    /// Zero-Protection mode — direct LLM + native workspace, no agentd.
+    /// Zero-Protection mode — deprecated, use agent_send_message instead.
     StartZeroMode {
         session_id: String,
         prompt: String,
         config: Config,
-        workspace: zero_mode::ZeroWorkspaceInfo,
+        workspace: serde_json::Value,
         images: Vec<ImageAttachment>,
     },
-    /// Continue an existing zero mode session with a follow-up message
+    /// Continue an existing zero mode session — deprecated, use agent_send_message instead.
     ContinueZeroMode {
         session_id: String,
         message: String,
         config: Config,
-        workspace: zero_mode::ZeroWorkspaceInfo,
+        workspace: serde_json::Value,
         images: Vec<ImageAttachment>,
     },
     StopOrchestration,

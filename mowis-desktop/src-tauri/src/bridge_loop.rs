@@ -1,7 +1,7 @@
+use crate::agent_manager::AgentManager;
 use crate::backend::BackendBridge;
 use crate::state::*;
 use crate::types::*;
-use crate::zero_mode;
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::mpsc;
@@ -59,7 +59,33 @@ pub fn start_bridge(
         });
     }
 
-    // ── 2. Watch bridge connection-state changes (health-loop reconnects) ─────
+    // ── 2. Start mowis-agent subprocess ────────────────────────────────────────
+    {
+        let state_clone = Arc::clone(&state);
+        tauri::async_runtime::spawn(async move {
+            // Try to find mowis-agent in Tauri resources
+            let resource_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_default();
+
+            let port = crate::agent_manager::DEFAULT_AGENT_PORT;
+            let mut mgr = AgentManager::new(port);
+            match mgr.start(&resource_dir).await {
+                Ok(()) => {
+                    log::info!("mowis-agent started successfully on port {}", port);
+                    *state_clone.agent_manager.lock().unwrap() = Some(mgr);
+                }
+                Err(e) => {
+                    log::warn!("Failed to start mowis-agent: {} — agent commands will not be available", e);
+                    // Store the manager anyway so commands can attempt to connect
+                    *state_clone.agent_manager.lock().unwrap() = Some(mgr);
+                }
+            }
+        });
+    }
+
+    // ── 3. Watch bridge connection-state changes (health-loop reconnects) ─────
     {
         let mut state_rx = bridge.state_rx.clone();
         let evt_tx_clone = evt_tx.clone();
@@ -77,7 +103,7 @@ pub fn start_bridge(
         });
     }
 
-    // ── 3. Command handler (background thread with its own tokio runtime) ─────
+    // ── 4. Command handler (background thread with its own tokio runtime) ─────
     let evt_tx_clone = evt_tx.clone();
     let bridge_for_cmds = Arc::clone(&bridge);
     std::thread::Builder::new()
@@ -110,16 +136,18 @@ pub fn start_bridge(
                             });
                         }
 
-                        BridgeCommand::StartZeroMode { session_id, prompt, config, workspace, images } => {
-                            tokio::spawn(async move {
-                                zero_mode::run_zero_session(session_id, prompt, config, workspace, images, tx).await;
-                            });
+                        BridgeCommand::StartZeroMode { session_id, prompt, .. } => {
+                            log::warn!("StartZeroMode is deprecated — use agent_send_message instead (session: {})", session_id);
+                            let _ = tx.send(BridgeEvent::OrchestrationFailed(
+                                format!("Zero mode is deprecated. Use agent_send_message for session {}.", session_id)
+                            )).await;
                         }
 
-                        BridgeCommand::ContinueZeroMode { session_id, message, config, workspace, images } => {
-                            tokio::spawn(async move {
-                                zero_mode::run_zero_session(session_id, message, config, workspace, images, tx).await;
-                            });
+                        BridgeCommand::ContinueZeroMode { session_id, .. } => {
+                            log::warn!("ContinueZeroMode is deprecated — use agent_send_message instead (session: {})", session_id);
+                            let _ = tx.send(BridgeEvent::OrchestrationFailed(
+                                format!("Zero mode is deprecated. Use agent_send_message for session {}.", session_id)
+                            )).await;
                         }
                     }
                 }

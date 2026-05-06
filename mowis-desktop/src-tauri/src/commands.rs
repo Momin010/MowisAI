@@ -2,7 +2,7 @@ use crate::sandbox;
 use crate::sandbox::SandboxInfo;
 use crate::state::*;
 use crate::types::*;
-use crate::zero_mode;
+use crate::agent_client;
 use crate::platform;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -367,26 +367,16 @@ pub async fn start_session(
     let tx_opt = state.cmd_tx.lock().unwrap().clone();
     if let Some(tx) = tx_opt {
         if resolved_mode == "zero" {
-            // Zero-Protection mode: write directly to a workspace on disk, bypass agentd entirely.
-            //
-            // If the user picked a repository, we treat that directory as the workspace (not an "attachment").
-            // Otherwise we create a new workspace under the default base dir.
-            let ws = match project_path_zero.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                Some(path) => zero_mode::workspace::use_existing_workspace(&session_id, path)
-                    .map_err(|e| format!("use repository as zero workspace: {e}"))?,
-                None => zero_mode::workspace::create_workspace(&session_id)
-                    .map_err(|e| format!("create zero workspace: {e}"))?,
-            };
-            *state.zero_workspace.lock().unwrap() = Some(ws.clone());
-            let _ = tx.send(BridgeCommand::StartZeroMode {
+            // Zero mode is deprecated — use agent_send_message instead.
+            log::warn!("Zero mode is deprecated for session {}", session_id);
+            let _ = tx.send(BridgeCommand::StartOrchestration {
                 session_id: session_id.clone(),
                 prompt,
-                config: cfg,
-                workspace: ws,
-                images: images.unwrap_or_default(),
+                max_agents: cfg.max_agents,
+                mode: "auto".to_string(),
+                repo_context,
             }).await;
         } else {
-            *state.zero_workspace.lock().unwrap() = None;
             let _ = tx.send(BridgeCommand::StartOrchestration {
                 session_id: session_id.clone(),
                 prompt,
@@ -436,8 +426,6 @@ pub async fn send_message(
         .ok_or_else(|| "No active session".to_string())?;
 
     let cfg = state.config.lock().unwrap().clone();
-    let workspace = state.zero_workspace.lock().unwrap().clone()
-        .ok_or_else(|| "No zero workspace active".to_string())?;
 
     // Add user message to history
     state.messages.lock().unwrap().push(ChatMessage::User {
@@ -445,14 +433,14 @@ pub async fn send_message(
         ts: now(),
     });
 
-    // Send to bridge
+    // Send to bridge — deprecated zero mode, falls back to orchestration
     let tx_opt = state.cmd_tx.lock().unwrap().clone();
     if let Some(tx) = tx_opt {
         let _ = tx.send(BridgeCommand::ContinueZeroMode {
             session_id,
             message,
             config: cfg,
-            workspace,
+            workspace: serde_json::Value::Null,
             images: images.unwrap_or_default(),
         }).await;
     }
@@ -505,16 +493,16 @@ pub async fn clear_current_session(state: State<'_, Arc<AppState>>) -> Result<()
     save_state(&state)
 }
 
-/// Return the zero-mode workspace for the current session, or null.
+/// Return the zero-mode workspace — deprecated, returns null.
 #[tauri::command]
-pub async fn get_zero_workspace(state: State<'_, Arc<AppState>>) -> Result<Option<zero_mode::ZeroWorkspaceInfo>, String> {
-    Ok(state.zero_workspace.lock().unwrap().clone())
+pub async fn get_zero_workspace() -> Result<Option<serde_json::Value>, String> {
+    Ok(None)
 }
 
-/// Return the base directory where all zero-mode workspaces are created.
+/// Return the base directory where all zero-mode workspaces are created — deprecated.
 #[tauri::command]
 pub async fn get_zero_workspace_base() -> Result<String, String> {
-    Ok(zero_mode::workspace::workspace_base_dir().to_string_lossy().into_owned())
+    Ok(String::new())
 }
 
 /// Return the active sandbox for the current session, or null if none.
@@ -682,4 +670,83 @@ pub async fn clear_developer_config() -> Result<(), String> {
             .map_err(|e| format!("Failed to remove config: {}", e))?;
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent commands — talk to mowis-agent via HTTP
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn agent_health(state: State<'_, Arc<AppState>>) -> Result<agent_client::HealthResponse, String> {
+    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
+    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
+    mgr.client().health().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn agent_create_session(
+    state: State<'_, Arc<AppState>>,
+    title: String,
+) -> Result<agent_client::Session, String> {
+    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
+    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
+    mgr.client().create_session(&title).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn agent_list_sessions(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<agent_client::Session>, String> {
+    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
+    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
+    mgr.client().list_sessions().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn agent_send_message(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    text: String,
+    background: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
+    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
+    if background.unwrap_or(false) {
+        mgr.client().send_message_async(&session_id, &text).await.map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "status": "accepted" }))
+    } else {
+        mgr.client().send_message(&session_id, &text).await.map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_abort(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<(), String> {
+    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
+    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
+    mgr.client().abort(&session_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn agent_approve_permission(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    permission_id: String,
+) -> Result<(), String> {
+    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
+    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
+    mgr.client().approve_permission(&session_id, &permission_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn agent_deny_permission(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    permission_id: String,
+) -> Result<(), String> {
+    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
+    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
+    mgr.client().deny_permission(&session_id, &permission_id).await.map_err(|e| e.to_string())
 }

@@ -30,6 +30,7 @@ mod qemu;
 mod types;
 #[cfg(windows)]
 mod windows;
+mod agent_client;
 
 use crate::connection::{open_connection, ConnectionStream};
 use crate::types::*;
@@ -71,6 +72,12 @@ fn help() {
     eprintln!("  list              List all sandboxes");
     eprintln!("  create_sandbox    Create a new sandbox");
     eprintln!("  <any JSON>        Send raw JSON command to agentd");
+    eprintln!();
+    eprintln!("AGENT COMMANDS (talk to mowis-agent):");
+    eprintln!("  agent             Check if mowis-agent is running");
+    eprintln!("  chat              Interactive chat with mowis-agent");
+    eprintln!("  ask <prompt>      Send a one-shot prompt to mowis-agent");
+    eprintln!("  sessions          List mowis-agent sessions");
     eprintln!();
     eprintln!("ENVIRONMENT:");
     eprintln!("  MOWIS_QEMU        Path to QEMU binary");
@@ -347,6 +354,112 @@ async fn single_command(mut stream: ConnectionStream, cmd: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Agent interactive chat ─────────────────────────────────────────────────
+
+async fn agent_chat(port: u16) -> Result<()> {
+    let client = agent_client::AgentClient::new(port);
+
+    // Check health
+    let health = client.health().await.context("mowis-agent not reachable")?;
+    eprintln!("{} mowis-agent v{}", "✓".green(), health.version);
+    eprintln!("{}", "━".repeat(60).dimmed());
+    eprintln!("{}", "Interactive chat — type your prompt, or 'quit' to exit.".bold());
+    eprintln!("{}", "━".repeat(60).dimmed());
+    eprintln!();
+
+    // Create session
+    let session = client.create_session("CLI Chat").await.context("create session")?;
+    eprintln!("{} Session {}", "Created".green(), session.id[..8].cyan());
+    eprintln!();
+
+    loop {
+        print!("{} ", "you>".bold().blue());
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() || input.is_empty() {
+            break;
+        }
+
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "quit" || trimmed == "exit" || trimmed == "q" {
+            eprintln!("{}", "Goodbye.".dimmed());
+            break;
+        }
+
+        eprintln!("{}", "Thinking…".dimmed());
+
+        match client.send_message(&session.id, trimmed).await {
+            Ok(resp) => {
+                // Extract assistant text from response
+                if let Some(messages) = resp.get("messages").and_then(|v| v.as_array()) {
+                    for msg in messages {
+                        if msg.get("role").and_then(|v| v.as_str()) == Some("assistant") {
+                            if let Some(parts) = msg.get("parts").and_then(|v| v.as_array()) {
+                                for part in parts {
+                                    if part.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                        if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                                            eprintln!();
+                                            eprintln!("{}", text);
+                                            eprintln!();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("{} Error: {}", "✗".red(), e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── Agent one-shot ask ─────────────────────────────────────────────────────
+
+async fn agent_ask(port: u16, prompt: &str) -> Result<()> {
+    let client = agent_client::AgentClient::new(port);
+
+    let health = client.health().await.context("mowis-agent not reachable")?;
+    eprintln!("{} mowis-agent v{}", "✓".green(), health.version);
+
+    let session = client.create_session("CLI Ask").await.context("create session")?;
+    eprintln!("{} Sending prompt…", "→".blue());
+
+    match client.send_message(&session.id, prompt).await {
+        Ok(resp) => {
+            if let Some(messages) = resp.get("messages").and_then(|v| v.as_array()) {
+                for msg in messages {
+                    if msg.get("role").and_then(|v| v.as_str()) == Some("assistant") {
+                        if let Some(parts) = msg.get("parts").and_then(|v| v.as_array()) {
+                            for part in parts {
+                                if part.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                                        println!("{}", text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{} Error: {}", "✗".red(), e);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -359,6 +472,8 @@ async fn main() -> Result<()> {
     let mut skip_boot = false;
     let mut tcp_override: Option<String> = None;
     let mut command: Option<String> = None;
+    let mut ask_prompt: Option<String> = None;
+    let mut agent_port: u16 = 4096;
 
     let mut i = 0;
     while i < args.len() {
@@ -382,11 +497,61 @@ async fn main() -> Result<()> {
                     tcp_override = Some(addr.clone());
                 }
             }
+            "--agent-port" => {
+                i += 1;
+                if let Some(port) = args.get(i) {
+                    agent_port = port.parse().unwrap_or(4096);
+                }
+            }
+            "ask" => {
+                i += 1;
+                ask_prompt = Some(args[i..].join(" "));
+                break;
+            }
             other => {
                 command = Some(other.to_string());
             }
         }
         i += 1;
+    }
+
+    // Handle agent commands that don't need agentd connection
+    match command.as_deref() {
+        Some("agent") => {
+            let client = agent_client::AgentClient::new(agent_port);
+            match client.health().await {
+                Ok(h) => {
+                    eprintln!("{} mowis-agent v{} on port {}", "✓".green(), h.version, agent_port);
+                    eprintln!("  CWD: {}", h.cwd);
+                }
+                Err(e) => {
+                    eprintln!("{} mowis-agent not reachable on port {}: {}", "✗".red(), agent_port, e);
+                    eprintln!("  Start it with: mowis-agent serve --port {}", agent_port);
+                }
+            }
+            return Ok(());
+        }
+        Some("chat") => {
+            return agent_chat(agent_port).await;
+        }
+        Some("sessions") => {
+            let client = agent_client::AgentClient::new(agent_port);
+            let sessions = client.list_sessions().await.context("list sessions")?;
+            if sessions.is_empty() {
+                eprintln!("No sessions.");
+            } else {
+                for s in &sessions {
+                    eprintln!("  {} {} ({} messages)", s.id[..8].cyan(), s.title, s.message_count);
+                }
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Handle one-shot ask
+    if let Some(ref prompt) = ask_prompt {
+        return agent_ask(agent_port, prompt).await;
     }
 
     eprintln!("{}", "Starting MowisAI CLI…".bold());
