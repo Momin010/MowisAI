@@ -3,7 +3,8 @@
 mod platform;
 mod backend;
 mod sandbox;
-mod zero_mode;
+mod agent_client;
+mod agent_manager;
 mod types;
 mod state;
 mod bridge_loop;
@@ -60,6 +61,14 @@ fn main() {
             validate_developer_config,
             start_developer_bootstrap,
             clear_developer_config,
+            // New agent commands
+            agent_create_session,
+            agent_send_message,
+            agent_abort,
+            agent_approve_permission,
+            agent_deny_permission,
+            agent_list_sessions,
+            agent_health,
         ])
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");
