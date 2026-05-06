@@ -10,6 +10,8 @@ use crate::agent_client::AgentClient;
 
 /// Default port for the mowis-agent HTTP server.
 pub const DEFAULT_AGENT_PORT: u16 = 4096;
+/// Maximum ports to try if the default is occupied.
+const MAX_PORT_ATTEMPTS: u16 = 10;
 
 /// Manages the mowis-agent subprocess lifecycle.
 pub struct AgentManager {
@@ -31,48 +33,84 @@ impl AgentManager {
         &self.client
     }
 
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     /// Find and spawn the mowis-agent binary, then wait for it to become healthy.
+    /// Tries multiple ports if the default is occupied.
     pub async fn start(&mut self, resource_dir: &Path) -> Result<()> {
-        // Check if already running (e.g. user started it manually)
-        if self.client.health().await.is_ok() {
-            info!("mowis-agent already running on port {}", self.port);
-            return Ok(());
+        // First: check if an agent is already running on any port starting from default
+        for port_offset in 0..MAX_PORT_ATTEMPTS {
+            let port = DEFAULT_AGENT_PORT + port_offset;
+            let test_client = AgentClient::new(port);
+            if let Ok(resp) = test_client.health().await {
+                if resp.healthy {
+                    info!("mowis-agent already running on port {}", port);
+                    self.port = port;
+                    self.client = test_client;
+                    return Ok(());
+                }
+            }
         }
 
+        // Find the binary
         let agent_path = self.find_agent_binary(resource_dir)?;
         info!("Starting mowis-agent from {}", agent_path.display());
 
-        let child = Command::new(&agent_path)
-            .arg("serve")
-            .arg("--port")
-            .arg(self.port.to_string())
-            .arg("--hostname")
-            .arg("127.0.0.1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .context("failed to spawn mowis-agent")?;
+        // Try ports starting from default
+        for port_offset in 0..MAX_PORT_ATTEMPTS {
+            let port = DEFAULT_AGENT_PORT + port_offset;
+            info!("Trying to start mowis-agent on port {}", port);
 
-        self.process = Some(child);
+            let child = Command::new(&agent_path)
+                .arg("serve")
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--hostname")
+                .arg("127.0.0.1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn();
 
-        // Wait for health check with exponential backoff
-        self.wait_for_health().await?;
+            match child {
+                Ok(c) => {
+                    self.process = Some(c);
+                    self.port = port;
+                    self.client = AgentClient::new(port);
 
-        info!("mowis-agent is healthy on port {}", self.port);
-        Ok(())
+                    // Wait for health
+                    match self.wait_for_health().await {
+                        Ok(()) => {
+                            info!("mowis-agent started on port {}", port);
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!("Agent on port {} failed health check: {}", port, e);
+                            self.stop().await;
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to spawn on port {}: {}", port, e);
+                    continue;
+                }
+            }
+        }
+
+        anyhow::bail!("Failed to start mowis-agent on any port ({}-{})", DEFAULT_AGENT_PORT, DEFAULT_AGENT_PORT + MAX_PORT_ATTEMPTS - 1)
     }
 
     /// Stop the agent subprocess gracefully.
     pub async fn stop(&mut self) {
         if let Some(mut child) = self.process.take() {
             info!("Stopping mowis-agent...");
-            // Try graceful shutdown first
             if let Err(e) = child.kill().await {
                 warn!("Failed to kill mowis-agent: {}", e);
             }
-            // Wait for process to exit
             match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
                 Ok(Ok(status)) => info!("mowis-agent exited with {}", status),
                 Ok(Err(e)) => warn!("mowis-agent wait error: {}", e),
@@ -87,7 +125,6 @@ impl AgentManager {
     }
 
     fn find_agent_binary(&self, resource_dir: &Path) -> Result<PathBuf> {
-        // Look in Tauri resources first
         let names = if cfg!(target_os = "windows") {
             vec!["mowis-agent.exe", "mowis-agent"]
         } else {
@@ -101,7 +138,6 @@ impl AgentManager {
             }
         }
 
-        // Fallback: look in the same directory as the executable
         if let Ok(exe_dir) = std::env::current_exe() {
             if let Some(dir) = exe_dir.parent() {
                 for name in &names {
@@ -120,16 +156,13 @@ impl AgentManager {
     }
 
     async fn wait_for_health(&self) -> Result<()> {
-        let max_attempts = 30;
-        let mut delay_ms = 100u64;
+        let max_attempts = 20;
+        let mut delay_ms = 200u64;
 
         for attempt in 1..=max_attempts {
             match self.client.health().await {
                 Ok(resp) if resp.healthy => {
-                    info!(
-                        "mowis-agent healthy after {} attempts (v{})",
-                        attempt, resp.version
-                    );
+                    info!("mowis-agent healthy after {} attempts (v{})", attempt, resp.version);
                     return Ok(());
                 }
                 Ok(_) => {
@@ -137,22 +170,16 @@ impl AgentManager {
                 }
                 Err(e) => {
                     if attempt % 5 == 0 {
-                        info!(
-                            "Waiting for mowis-agent... attempt {}/{}: {}",
-                            attempt, max_attempts, e
-                        );
+                        info!("Waiting for mowis-agent... attempt {}/{}: {}", attempt, max_attempts, e);
                     }
                 }
             }
 
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            delay_ms = (delay_ms * 2).min(1000); // cap at 1s
+            delay_ms = (delay_ms * 2).min(1000);
         }
 
-        anyhow::bail!(
-            "mowis-agent did not become healthy within {} attempts",
-            max_attempts
-        )
+        anyhow::bail!("mowis-agent did not become healthy within {} attempts", max_attempts)
     }
 }
 

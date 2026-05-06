@@ -205,14 +205,23 @@ export function renderSessionsList() {
       e.stopPropagation();
       const id = btn.dataset.id;
       if (!id) return;
-      try {
-        await invoke('agent_delete_session', { sessionId: id });
-        SessionsState.all = SessionsState.all.filter(s => s.id !== id);
-        renderSessionsPage();
-        toast('Session deleted', 'success');
-      } catch (err) {
-        toast('Failed to delete: ' + err, 'error');
+
+      // If this is the running session, abort it first
+      if (State.agentSessionId === id) {
+        try { await invoke('agent_abort', { sessionId: id }); } catch {}
+        State.agentSessionId = null;
+        State.sessionActive = false;
       }
+
+      try {
+        // Delete from mowis-agent
+        await invoke('agent_delete_session', { sessionId: id });
+      } catch {}
+
+      // Delete from local history
+      SessionsState.all = SessionsState.all.filter(s => s.id !== id);
+      renderSessionsPage();
+      toast('Session deleted', 'success');
     });
   });
 }
@@ -220,13 +229,8 @@ export function renderSessionsList() {
 // ── Session actions ──────────────────────────────────────────────────────────
 
 async function openSession(sessionId) {
-  if (State.sessionActive && State.sessionId && sessionId !== State.sessionId) {
-    toast('Stop the running session before opening another one', 'error');
-    return;
-  }
   try {
     const detail = await invoke('load_session', { sessionId });
-    // Dynamic import to avoid circular dependency with main.js
     const { navigate, renderSessionDetail } = await import('./main.js');
     renderSessionDetail(detail);
     navigate('home', { preserveHomeMode: true });

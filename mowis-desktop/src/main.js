@@ -276,15 +276,21 @@ async function init() {
 
   await checkDaemonWithGuidance();
 
-  try {
-    const health = await invoke('agent_health');
-    State.agentHealthy = health?.healthy === true;
-    if (State.agentHealthy) {
-      console.log('mowis-agent healthy, version:', health.version);
+  // Check mowis-agent health (retry up to 10 times with 1s delay — agent may still be starting)
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      const health = await invoke('agent_health');
+      if (health?.healthy) {
+        State.agentHealthy = true;
+        console.log('mowis-agent healthy, version:', health.version);
+        break;
+      }
+    } catch (e) {
+      if (attempt === 10) {
+        console.log('mowis-agent not available after 10 attempts — using fallback mode');
+      }
     }
-  } catch {
-    State.agentHealthy = false;
-    console.log('mowis-agent not available — using fallback mode');
+    if (attempt < 10) await delay(1000);
   }
 
   try { await setupListeners(); } catch (e) { console.error('Listener setup failed:', e); }

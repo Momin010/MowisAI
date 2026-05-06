@@ -112,14 +112,14 @@ export function renderUsageChart(usage, stats) {
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img">
     <defs>
       <linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="rgba(255,255,255,0.08)"/>
-        <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+        <stop offset="0%" stop-color="rgba(59,139,255,0.25)"/>
+        <stop offset="100%" stop-color="rgba(59,139,255,0)"/>
       </linearGradient>
     </defs>
     ${gridLines}
     <path d="${areaD}" fill="url(#chart-fill)" class="chart-area"/>
-    <path d="${lineD}" fill="none" stroke="var(--tx-3)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>
-    ${pts.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--tx)" opacity="0" class="chart-dot" data-idx="${i}" style="cursor:pointer"/>`).join('')}
+    <path d="${lineD}" fill="none" stroke="#3b8bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>
+    ${pts.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="#3b8bff" opacity="0" class="chart-dot" data-idx="${i}" style="cursor:pointer"/>`).join('')}
     ${xLabels}
   </svg>
   <div class="chart-tooltip hidden" id="chart-tooltip"></div>`;
@@ -172,11 +172,11 @@ export function renderDonutChart(stats) {
   }
 
   const segments = [
-    { label: 'Code Generation', pct: 0.32, color: 'rgba(255,255,255,0.5)' },
-    { label: 'Planning', pct: 0.22, color: 'rgba(255,255,255,0.35)' },
-    { label: 'Tool Calls', pct: 0.20, color: 'rgba(255,255,255,0.25)' },
-    { label: 'Code Review', pct: 0.15, color: 'rgba(255,255,255,0.15)' },
-    { label: 'Thinking', pct: 0.11, color: 'rgba(255,255,255,0.08)' },
+    { label: 'Code Generation', pct: 0.32, color: '#3b8bff' },
+    { label: 'Planning', pct: 0.22, color: '#a78bfa' },
+    { label: 'Tool Calls', pct: 0.20, color: '#3ecf72' },
+    { label: 'Code Review', pct: 0.15, color: '#e8be4a' },
+    { label: 'Thinking', pct: 0.11, color: '#f05050' },
   ];
 
   const cx = 100, cy = 90, r = 65, sw = 18;
@@ -193,6 +193,18 @@ export function renderDonutChart(stats) {
 
   svg.innerHTML = arcs + `<text x="${cx}" y="${cy - 4}" text-anchor="middle" fill="var(--tx)" font-family="var(--serif)" font-size="20">${fmtTokens(total)}</text><text x="${cx}" y="${cy + 12}" text-anchor="middle" fill="var(--tx-4)" font-size="9" font-family="var(--sans)">total tokens</text>`;
 
+  // Animate donut arcs
+  requestAnimationFrame(() => {
+    svg.querySelectorAll('circle').forEach((circle, i) => {
+      const targetLen = parseFloat(circle.getAttribute('stroke-dasharray').split(' ')[0]);
+      circle.style.strokeDasharray = `0 ${circ}`;
+      circle.style.transition = `stroke-dasharray 0.8s cubic-bezier(0.4, 0, 0.2, 1) ${i * 0.1}s`;
+      requestAnimationFrame(() => {
+        circle.style.strokeDasharray = `${targetLen} ${circ - targetLen}`;
+      });
+    });
+  });
+
   legend.innerHTML = segments.map(s => `<div class="usage-donut-item"><span class="usage-donut-dot" style="background:${s.color}"></span><span class="usage-donut-label">${s.label}</span><span class="usage-donut-pct">${Math.round(s.pct * 100)}%</span></div>`).join('');
 }
 
@@ -207,20 +219,32 @@ export function renderSuccessRate(hist) {
   const total = hist.length;
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
+  const statusColor = pct >= 80 ? '#3ecf72' : pct >= 50 ? '#e8be4a' : '#f05050';
+
   el.innerHTML = `
     <div class="usage-rate-ring-wrap">
       <svg class="usage-rate-ring" viewBox="0 0 120 120">
         <circle cx="60" cy="60" r="48" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="10"/>
-        <circle cx="60" cy="60" r="48" fill="none" stroke="var(--tx-3)" stroke-width="10" stroke-dasharray="${(pct / 100) * 301.6} ${301.6}" stroke-linecap="round" transform="rotate(-90 60 60)"/>
+        <circle cx="60" cy="60" r="48" fill="none" stroke="${statusColor}" stroke-width="10" stroke-dasharray="0 301.6" stroke-linecap="round" transform="rotate(-90 60 60)" class="rate-ring-fill"/>
         <text x="60" y="56" text-anchor="middle" fill="var(--tx)" font-family="var(--serif)" font-size="24">${pct}%</text>
         <text x="60" y="72" text-anchor="middle" fill="var(--tx-4)" font-size="9" font-family="var(--sans)">success</text>
       </svg>
     </div>
     <div class="usage-rate-bars">
-      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--tx-3)"></span><span>Completed</span><span class="usage-rate-count">${done}</span></div>
-      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--tx-4)"></span><span>Failed</span><span class="usage-rate-count">${failed}</span></div>
-      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--tx-5)"></span><span>Stopped</span><span class="usage-rate-count">${stopped}</span></div>
+      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:#3ecf72"></span><span>Completed</span><span class="usage-rate-count">${done}</span></div>
+      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:#f05050"></span><span>Failed</span><span class="usage-rate-count">${failed}</span></div>
+      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:#e8be4a"></span><span>Stopped</span><span class="usage-rate-count">${stopped}</span></div>
     </div>`;
+
+  // Animate the ring
+  requestAnimationFrame(() => {
+    const ring = el.querySelector('.rate-ring-fill');
+    if (ring) {
+      const target = (pct / 100) * 301.6;
+      ring.style.transition = 'stroke-dasharray 1s cubic-bezier(0.4, 0, 0.2, 1)';
+      ring.style.strokeDasharray = `${target} ${301.6}`;
+    }
+  });
 }
 
 export function renderTimeline(hist) {
@@ -233,9 +257,19 @@ export function renderTimeline(hist) {
 
   el.innerHTML = `<div class="usage-timeline-track">${sorted.map((s, i) => {
     const h = Math.max(8, ((s.tokens || 0) / maxTokens) * 60);
-    const color = s.status === 'running' ? 'var(--tx-2)' : 'var(--tx-4)';
-    return `<div class="usage-timeline-bar" style="height:${h}px;background:${color}" title="${escHtml(s.prompt?.slice(0, 40) || 'Session')} — ${fmtTokens(s.tokens || 0)} tokens"></div>`;
+    const color = s.status === 'done' || s.status === 'complete' ? '#3ecf72' : s.status === 'error' || s.status === 'failed' ? '#f05050' : s.status === 'running' ? '#3b8bff' : '#e8be4a';
+    return `<div class="usage-timeline-bar" style="height:0px;background:${color}" data-h="${h}" title="${escHtml(s.prompt?.slice(0, 40) || 'Session')} — ${fmtTokens(s.tokens || 0)} tokens"></div>`;
   }).join('')}</div>`;
+
+  // Animate bars
+  requestAnimationFrame(() => {
+    el.querySelectorAll('.usage-timeline-bar').forEach((bar, i) => {
+      setTimeout(() => {
+        bar.style.transition = 'height 0.5s cubic-bezier(0.4, 0, 0.2, 1)';
+        bar.style.height = bar.dataset.h + 'px';
+      }, i * 30);
+    });
+  });
 }
 
 export function renderUsageTable(hist) {
