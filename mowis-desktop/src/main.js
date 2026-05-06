@@ -1,199 +1,40 @@
 /**
- * MowisAI Desktop — Minimal Chat-First Application
+ * MowisAI Desktop — Main Entry Point
  * Tauri v2 + Vite. Graceful browser fallback.
  */
 
 import { loadTauri, isTauri, invoke, listen, openDialogNative } from './bridge.js';
-import { delay, nowTs, fmtNumber, fmtTs, escapeHtml, parseGitHubRepoName } from './utils.js';
+import { delay, nowTs, fmtNumber, fmtTs, escapeHtml } from './utils.js';
+import {
+  State, $, setText, toast, escHtml, setSidebarCollapsed,
+  updateHomeAgentHint, renderRepoChip, syncCustomSelect,
+} from './state.js';
+import {
+  appendChatMessage, appendAgentChunk, finalizeStreaming,
+  appendFileChanges, scrollToBottom, renderDiffPanel,
+  startAgentPolling, stopAgentPolling,
+  appendThinkingIndicator, removeThinkingIndicator,
+  setChatCallbacks,
+} from './chat.js';
+import { renderSessionsPage, setupSessionsHandlers } from './sessions.js';
+import { renderUsagePage } from './usage.js';
+import { loadSettings, saveSettings, isAgentMode, setupSettingsHandlers } from './settings.js';
+import { initSpeechRecognition } from './speech.js';
+import { initFileUpload, pendingAttachments, clearAttachments } from './file-upload.js';
+import {
+  showEngineSetupModal, setupEngineSetupModalHandlers,
+  hideEngineSetupModal, setupRepoHandlers,
+  showDeveloperBootstrap, setupDeveloperBootstrapHandlers,
+  handlePointInstallationFlow,
+} from './modals.js';
 
-// ── App State ─────────────────────────────────────────────────────────────────
+// ── Wire chat callbacks (breaks circular dependency) ─────────────────────────
 
-const State = {
-  page: 'home',
-  homeMode: 'new',
-  sessionActive: false,
-  sessionId: null,           // agent session ID (from mowis-agent)
-  agentSessionId: null,      // mowis-agent session ID
-  taskPanelOpen: false,
-  selectedTaskId: null,
-  sidebarCollapsed: localStorage.getItem('mowis_sidebar_collapsed') === '1',
-  tasks: {},
-  streamingContent: '',
-  isStreaming: false,
-  daemonConnected: false,
-  agentHealthy: false,       // mowis-agent health status
-  config: null,
-  selectedRepo: null,
-  cloneDestination: null,
-  setupError: null,
-  stats: { tasks_total: 0, tasks_done: 0, tasks_running: 0, tokens_total: 0, tool_calls: 0 },
-  zeroWorkspacePath: null,
-  fileChanges: [],
-  selectedChangePath: null,
-  planCardShown: false,
-  pollTimer: null,           // polling timer for agent messages
-  lastMessageCount: 0,       // track message count for polling
-  diffTree: {
-    query: '',
-    actions: new Set(['created', 'modified', 'deleted', 'moved', 'read']),
-    expanded: new Set(),
-  },
-};
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-const $ = (id) => document.getElementById(id);
-const setText = (id, v) => { const e = $(id); if (e) e.textContent = v; };
-
-function toast(msg, type = 'info') {
-  const c = $('toasts');
-  if (!c) return;
-  const t = document.createElement('div');
-  t.className = `toast ${type}`;
-  t.textContent = msg;
-  c.appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s'; setTimeout(() => t.remove(), 320); }, 3200);
-}
-
-// ── Engine setup modal helpers ────────────────────────────────────────────────
-
-function hideEngineSetupModal() {
-  const modal = $('engine-setup-modal');
-  if (!modal) return;
-  modal.classList.add('hidden');
-  modal.setAttribute('aria-hidden', 'true');
-}
-
-function setModeToAgentAndReflectUI() {
-  if (!State.config) State.config = {};
-  State.config.mode = 'agent';
-
-  const homeMode = $('home-mode');
-  if (homeMode) {
-    homeMode.value = 'agent';
-    updateHomeAgentHint('agent');
-    syncCustomSelect(homeMode);
-  }
-
-  const setMode = $('set-mode');
-  if (setMode) {
-    setMode.value = 'agent';
-    syncCustomSelect(setMode);
-  }
-}
-
-async function pickPathWithDialog({ title, directory = false }) {
-  try {
-    const selected = await openDialogNative({
-      title,
-      multiple: false,
-      directory,
-    });
-    if (!selected) return null;
-    return Array.isArray(selected) ? selected[0] : selected;
-  } catch {
-    return null;
-  }
-}
-
-function normalizeQemuPathFromSelection(selection) {
-  if (!selection) return '';
-  const normalized = String(selection).replace(/\//g, '\\');
-  if (normalized.toLowerCase().endsWith('.exe')) return normalized;
-  return `${normalized.replace(/[\\\/]+$/, '')}\\qemu-system-x86_64.exe`;
-}
-
-async function handlePointInstallationFlow() {
-  const qemuSelection = await pickPathWithDialog({
-    title: 'Select qemu-system-x86_64.exe or QEMU folder',
-    directory: false,
-  }) || await pickPathWithDialog({
-    title: 'Select QEMU installation folder',
-    directory: true,
-  });
-
-  if (!qemuSelection) {
-    toast('Installation path selection cancelled', 'info');
-    return;
-  }
-
-  const qemuPath = normalizeQemuPathFromSelection(qemuSelection);
-
-  // Save only the QEMU path for the WHPX fallback launcher.
-  // The full developer bootstrap (ISO + disk) is handled separately.
-  const defaultCfg = {
-    qemu_path: qemuPath,
-    iso_path: '',
-    disk_path: '',
-    mount_point: '/mnt/mowisai',
-    disk_device: '/dev/sda',
-    ram_mb: 512,
-    agent_port: 8080,
-    monitor_port: 4445,
-    serial_port: 4444,
-    agentd_path: '/mnt/mowisai/agentd',
-  };
-
-  try {
-    const existing = await invoke('get_developer_config');
-    const cfg = { ...existing, qemu_path: qemuPath };
-
-    await invoke('save_developer_config', { config: cfg });
-    hideEngineSetupModal();
-    toast('QEMU path saved. Retrying engine startup...', 'success');
-    setTimeout(() => window.location.reload(), 350);
-  } catch (e) {
-    toast(`Could not save installation: ${e}`, 'error');
-  }
-}
-
-function setupEngineSetupModalHandlers() {
-  const retryBtn = $('engine-retry');
-  if (retryBtn) {
-    retryBtn.onclick = () => {
-      hideEngineSetupModal();
-      window.location.reload();
-    };
-  }
-
-  const continueBtn = $('engine-continue');
-  if (continueBtn) {
-    continueBtn.onclick = async () => {
-      hideEngineSetupModal();
-      setModeToAgentAndReflectUI();
-      try { await invoke('save_config', { config: State.config }); } catch {}
-      toast('Continuing in Agent mode', 'success');
-    };
-  }
-
-  const manualBtn = $('engine-manual');
-  if (manualBtn) {
-    manualBtn.onclick = async () => {
-      toast('Point to your QEMU installation', 'info');
-      await handlePointInstallationFlow();
-    };
-  }
-
-  const helpWsl = $('engine-help-wsl');
-  if (helpWsl) {
-    helpWsl.onclick = (e) => {
-      e.preventDefault();
-      toast('Open PowerShell (Admin) and run: wsl --install', 'info');
-    };
-  }
-
-  const helpQemu = $('engine-help-qemu');
-  if (helpQemu) {
-    helpQemu.onclick = (e) => {
-      e.preventDefault();
-      toast('Install QEMU, then restart the app', 'info');
-    };
-  }
-}
+setChatCallbacks({ setTaskPanelOpen, renderTaskPanel, setSessionActive });
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 
-function navigate(page, opts = {}) {
+export function navigate(page, opts = {}) {
   State.page = page;
   document.querySelectorAll('.sb-item').forEach(i => i.classList.toggle('active', i.dataset.page === page));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === `page-${page}`));
@@ -209,7 +50,7 @@ function navigate(page, opts = {}) {
   if (page === 'settings') loadSettings();
 }
 
-async function showHomeLanding({ clearBackend = false } = {}) {
+export async function showHomeLanding({ clearBackend = false } = {}) {
   State.homeMode = 'new';
   State.taskPanelOpen = false;
   State.selectedTaskId = null;
@@ -236,14 +77,14 @@ async function showHomeLanding({ clearBackend = false } = {}) {
   }
 }
 
-function showSessionShell() {
+export function showSessionShell() {
   State.homeMode = 'session';
   $('home-empty')?.classList.add('hidden');
   $('home-chat')?.classList.remove('hidden');
   updateTaskPanelVisibility();
 }
 
-function renderSessionDetail(detail) {
+export function renderSessionDetail(detail) {
   if (!detail) return;
   State.sessionId = detail.summary?.id || State.sessionId;
   State.sessionActive = detail.summary?.status === 'running';
@@ -271,43 +112,9 @@ function renderSessionDetail(detail) {
   showSessionShell();
 }
 
-async function openSession(sessionId) {
-  if (State.sessionActive && State.sessionId && sessionId !== State.sessionId) {
-    toast('Stop the running session before opening another one', 'error');
-    return;
-  }
-  try {
-    const detail = await invoke('load_session', { sessionId });
-    renderSessionDetail(detail);
-    navigate('home', { preserveHomeMode: true });
-  } catch (err) {
-    toast('Could not open session: ' + err, 'error');
-  }
-}
-
-async function restoreInitialSession() {
-  try {
-    const [hist, detail] = await Promise.all([
-      invoke('get_session_history'),
-      invoke('get_current_session'),
-    ]);
-    setText('sb-badge-sessions', hist?.length ? String(hist.length) : '');
-    if (detail?.summary?.status === 'running') {
-      renderSessionDetail(detail);
-      navigate('home', { preserveHomeMode: true });
-    } else {
-      await showHomeLanding({ clearBackend: false });
-    }
-  } catch {
-    await showHomeLanding({ clearBackend: false });
-  }
-}
-
 // ── Window controls (decorations: false) ─────────────────────────────────────
 
 async function runWindowAction(action) {
-  // Use the Tauri JS API directly — do NOT also call the custom window_control
-  // command, as that would double-toggle (e.g. maximize then unmaximize).
   if (!isTauri()) return;
   try {
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
@@ -318,7 +125,7 @@ async function runWindowAction(action) {
   } catch {}
 }
 
-function bindWindowControls(root = document) {
+export function bindWindowControls(root = document) {
   const bindings = [
     ['.tl-red', 'close'],
     ['.tl-yellow', 'minimize'],
@@ -394,7 +201,6 @@ async function runSplash() {
     terminalBody.scrollTop = terminalBody.scrollHeight;
   }
 
-  // Forward real setup-progress events from BackendBridge while booting.
   let unlisten = null;
   let resolved = false;
   let lastErrorMessage = null;
@@ -417,12 +223,10 @@ async function runSplash() {
     }).then(u => { unlisten = u; });
   });
 
-  // Show "Continue in background" button after 3 seconds
   const showContinueTimer = delay(3000).then(() => {
     if (continueBtn) continueBtn.classList.remove('hidden');
   });
 
-  // "Continue in background" dismisses the splash early
   let earlyDismiss = null;
   if (continueBtn) {
     continueBtn.addEventListener('click', () => {
@@ -430,7 +234,6 @@ async function runSplash() {
     }, { once: true });
   }
 
-  // Give the backend up to 90 s (WSL install + QEMU can take a while).
   const result = await Promise.race([
     backendReady,
     delay(90000).then(() => ({ stage: 'timeout' })),
@@ -438,7 +241,6 @@ async function runSplash() {
   ]);
   if (unlisten) unlisten();
 
-  // Store any setup error so we can show it in the modal
   if (lastErrorMessage) State.setupError = lastErrorMessage;
 
   if (fill) fill.style.width = '100%';
@@ -446,7 +248,6 @@ async function runSplash() {
   $('splash')?.classList.add('hidden');
   $('app')?.classList.remove('hidden');
 
-  // If there was an error, show the engine setup modal
   if (result && (result.stage === 'error' || result.stage === 'timeout')) {
     const fullError = lastErrorDetail
       ? `${lastErrorMessage || 'Connection failed'}\n\n${lastErrorDetail}`
@@ -455,47 +256,26 @@ async function runSplash() {
   }
 }
 
-function showEngineSetupModal(errorMessage) {
-  const modal = $('engine-setup-modal');
-  if (!modal) return;
-
-  const statusMsg = $('engine-status-message');
-  const errorBlock = $('engine-error');
-  const errorMsg = $('engine-error-message');
-
-  if (statusMsg) statusMsg.textContent = 'Could not detect WSL or QEMU on your system';
-  if (errorMsg) errorMsg.textContent = errorMessage;
-  if (errorBlock) errorBlock.classList.remove('hidden');
-
-  modal.classList.remove('hidden');
-  modal.setAttribute('aria-hidden', 'false');
-}
-
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
   await loadTauri();
-  setupWindowControls();   // non-blocking, sets up dot handlers
+  setupWindowControls();
   setupEngineSetupModalHandlers();
   await runSplash();
 
-  // Load config
   try { State.config = await invoke('get_config'); } catch { State.config = { socket_path: '/tmp/agentd.sock', max_agents: 100, mode: 'auto', provider: 'gemini', model: 'gemini-2.0-flash', api_key: '', gcp_project: '', gcp_region: 'us-central1', gcp_service_account_key_path: '' }; }
 
-  // System info
   try {
     const info = await invoke('get_system_info');
     setText('about-meta', `${info.os} · ${info.arch} · MowisAI v${info.version}`);
     setText('tl-version', `v${info.version}`);
   } catch {}
 
-  // Welcome screen on first launch
   await maybeShowWelcome();
 
-  // Check daemon — show guidance banner if offline
   await checkDaemonWithGuidance();
 
-  // Check mowis-agent health
   try {
     const health = await invoke('agent_health');
     State.agentHealthy = health?.healthy === true;
@@ -507,10 +287,8 @@ async function init() {
     console.log('mowis-agent not available — using fallback mode');
   }
 
-  // Setup event listeners — wrapped so a listener failure doesn't kill navigation
   try { await setupListeners(); } catch (e) { console.error('Listener setup failed:', e); }
 
-  // Setup UI handlers
   setupHandlers();
   initCustomSelects();
   initSpeechRecognition();
@@ -518,10 +296,8 @@ async function init() {
   setSidebarCollapsed(State.sidebarCollapsed);
   await restoreInitialSession();
 
-  // Statusbar provider
   setText('sb-provider', State.config?.provider || '—');
 
-  // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === '1') { e.preventDefault(); navigate('home'); }
     if ((e.metaKey || e.ctrlKey) && e.key === '2') { e.preventDefault(); navigate('sessions'); }
@@ -545,18 +321,14 @@ async function maybeShowWelcome() {
 
   bindWindowControls(welcome);
 
-  // Trigger blur-to-clear animation after a short pause
   await delay(200);
   word?.classList.add('clear');
 
-  // Show continue button after blur settles
   await delay(2200);
   cont?.classList.add('visible');
 
-  // Wait for continue click
   await new Promise(resolve => {
     btn?.addEventListener('click', resolve, { once: true });
-    // Also let Enter key proceed
     document.addEventListener('keydown', function handler(e) {
       if (e.key === 'Enter' || e.key === ' ') {
         document.removeEventListener('keydown', handler);
@@ -565,7 +337,6 @@ async function maybeShowWelcome() {
     });
   });
 
-  // Fade out
   welcome.style.opacity  = '0';
   welcome.style.transition = 'opacity 0.55s ease';
   await delay(560);
@@ -609,7 +380,6 @@ async function checkDaemonWithGuidance() {
     showOfflineBanner(os, launcher);
   }
 
-  // Start polling loop
   setTimeout(checkDaemon, 8000);
 }
 
@@ -621,7 +391,7 @@ const OFFLINE_GUIDANCE = {
 };
 
 function showOfflineBanner(os, launcher) {
-  if ($('offline-banner')) return; // already shown
+  if ($('offline-banner')) return;
   const guidance = OFFLINE_GUIDANCE[os] || OFFLINE_GUIDANCE.unknown;
   const errorBlock = State.setupError
     ? `<div class="offline-banner-error"><strong>Setup error:</strong><br><code>${escapeHtml(State.setupError)}</code></div>`
@@ -697,7 +467,6 @@ async function setupListeners() {
     State.fileChanges.unshift({ ts: nowTs(), changes });
     State.fileChanges = State.fileChanges.slice(0, 20);
 
-    // Prefer showing diffs in the right panel instead of task inspector.
     State.taskPanelOpen = true;
     $('home-chat')?.classList.add('task-panel-open');
     renderDiffPanel();
@@ -731,35 +500,26 @@ async function setupListeners() {
   });
 
   await listen('session_complete', async () => {
-    // Finalize streaming
     finalizeStreaming();
 
-    // Reload sessions
     try {
       const hist = await invoke('get_session_history');
       if (State.page === 'sessions') renderSessionsPage();
-      // Update badge
       setText('sb-badge-sessions', String(hist.length));
     } catch {}
 
-    // DON'T call setSessionActive(false) - this would disable the send button
-    // In zero mode, the session should stay active for follow-up messages
-    // In orchestration mode, the session naturally completes but user can still send new messages
-
     updateStatusBar();
-    // Don't show "Session complete" toast - it's confusing in zero mode
   });
 }
 
 // ── Session start (via mowis-agent) ─────────────────────────────────────────
 
-async function startSession(prompt, mode, repo = State.selectedRepo) {
+export async function startSession(prompt, mode, repo = State.selectedRepo) {
   if (!prompt.trim() && pendingAttachments.length === 0) { toast('Enter a task description', 'error'); return; }
 
   const fullPrompt = prompt.trim();
   clearAttachments();
 
-  // Reset chat
   State.tasks = {};
   State.selectedTaskId = null;
   State.taskPanelOpen = false;
@@ -777,7 +537,6 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
   showSessionShell();
   setSessionActive(true);
 
-  // Show user message immediately
   appendChatMessage({ kind: 'user', content: fullPrompt, ts: nowTs() });
   if (repo?.path) {
     appendChatMessage({
@@ -790,7 +549,6 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
   updateTaskPanelVisibility();
 
   try {
-    // Check agent health first
     if (!State.agentHealthy) {
       try {
         const health = await invoke('agent_health');
@@ -801,7 +559,6 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
     }
 
     if (State.agentHealthy) {
-      // Create agent session
       const title = fullPrompt.slice(0, 120);
       const session = await invoke('agent_create_session', { title });
       State.agentSessionId = session.id;
@@ -809,20 +566,16 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
       setText('compose-session-info', `session ${session.id.slice(0, 8)}`);
       setText('chat-session-title', fullPrompt.slice(0, 120));
 
-      // Show thinking indicator
       appendThinkingIndicator();
 
-      // Send message async — response comes via polling
       await invoke('agent_send_message', {
         sessionId: session.id,
         text: fullPrompt,
         background: true,
       });
 
-      // Start polling for messages
       startAgentPolling(session.id);
     } else {
-      // Fallback: use old orchestration path
       const id = await invoke('start_session', {
         prompt: fullPrompt,
         mode: mode || 'auto',
@@ -844,7 +597,7 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
   navigate('home', { preserveHomeMode: true });
 }
 
-function setSessionActive(active, keepChat = false) {
+export function setSessionActive(active, keepChat = false) {
   State.sessionActive = active;
   const stopBtn = $('btn-stop');
   const sendBtn = $('btn-chat-send');
@@ -852,824 +605,6 @@ function setSessionActive(active, keepChat = false) {
   if (stopBtn) stopBtn.style.display = active ? '' : 'none';
   if (sendBtn) sendBtn.disabled = active;
   if (homeBtn) homeBtn.disabled = active;
-}
-
-// ── Agent polling ─────────────────────────────────────────────────────────
-
-function appendThinkingIndicator() {
-  const container = $('chat-messages');
-  if (!container) return;
-  const row = document.createElement('div');
-  row.className = 'msg-row agent';
-  row.id = 'thinking-indicator';
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble thinking';
-  bubble.innerHTML = '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>';
-  row.appendChild(bubble);
-  container.appendChild(row);
-  scrollToBottom(container);
-}
-
-function removeThinkingIndicator() {
-  $('thinking-indicator')?.remove();
-}
-
-function startAgentPolling(sessionId) {
-  stopAgentPolling();
-  State.lastMessageCount = 0;
-
-  async function poll() {
-    if (!State.agentSessionId || State.agentSessionId !== sessionId) return;
-    try {
-      const messages = await invoke('agent_list_messages', { sessionId });
-      if (!messages || !Array.isArray(messages)) return;
-
-      // Check if we have new messages
-      if (messages.length > State.lastMessageCount) {
-        const newMessages = messages.slice(State.lastMessageCount);
-        State.lastMessageCount = messages.length;
-
-        // Remove thinking indicator when we get new messages
-        removeThinkingIndicator();
-
-        for (const msg of newMessages) {
-          renderAgentMessage(msg);
-        }
-
-        // Check if agent is done (last message has finish part)
-        const lastMsg = messages[messages.length - 1];
-        if (lastMsg?.role === 'assistant') {
-          const hasFinish = (lastMsg.parts || []).some(p => p.type === 'finish');
-          if (hasFinish) {
-            // Agent finished — stop polling
-            finalizeStreaming();
-            setSessionActive(false, true);
-            stopAgentPolling();
-            return;
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Agent poll error:', e);
-    }
-
-    // Continue polling
-    if (State.agentSessionId === sessionId) {
-      State.pollTimer = setTimeout(poll, 1000);
-    }
-  }
-
-  // Start first poll after a short delay
-  State.pollTimer = setTimeout(poll, 500);
-}
-
-function stopAgentPolling() {
-  if (State.pollTimer) {
-    clearTimeout(State.pollTimer);
-    State.pollTimer = null;
-  }
-}
-
-function renderAgentMessage(msg) {
-  if (!msg) return;
-
-  if (msg.role === 'user') {
-    // User messages are already rendered — skip duplicates
-    return;
-  }
-
-  if (msg.role === 'assistant') {
-    const parts = msg.parts || [];
-    for (const part of parts) {
-      if (part.type === 'text' && part.text) {
-        appendChatMessage({ kind: 'agent', content: part.text, streaming: false, ts: nowTs() });
-      } else if (part.type === 'tool_call') {
-        renderToolCall(part);
-      } else if (part.type === 'tool_result') {
-        renderToolResult(part);
-      }
-    }
-  }
-}
-
-function renderToolCall(part) {
-  const container = $('chat-messages');
-  if (!container) return;
-
-  // Finalize any streaming
-  if (State.isStreaming) finalizeStreaming();
-
-  const row = document.createElement('div');
-  row.className = 'msg-row tool-call';
-
-  const card = document.createElement('div');
-  card.className = 'tool-call-card';
-
-  const icon = getToolIcon(part.name);
-  const inputPreview = formatToolInput(part.name, part.input);
-
-  card.innerHTML = `
-    <div class="tool-call-header">
-      <span class="tool-call-icon">${icon}</span>
-      <span class="tool-call-name">${escHtml(part.name)}</span>
-      <span class="tool-call-status running">running</span>
-    </div>
-    ${inputPreview ? `<div class="tool-call-input">${inputPreview}</div>` : ''}
-  `;
-
-  row.appendChild(card);
-  container.appendChild(row);
-  scrollToBottom(container);
-}
-
-function renderToolResult(part) {
-  const container = $('chat-messages');
-  if (!container) return;
-
-  // Find the last tool-call card and update its status
-  const toolCards = container.querySelectorAll('.tool-call-card');
-  const lastCard = toolCards[toolCards.length - 1];
-  if (lastCard) {
-    const statusEl = lastCard.querySelector('.tool-call-status');
-    if (statusEl) {
-      statusEl.className = `tool-call-status ${part.is_error ? 'error' : 'done'}`;
-      statusEl.textContent = part.is_error ? 'error' : 'done';
-    }
-
-    // Add result preview
-    if (part.content) {
-      const resultEl = document.createElement('div');
-      resultEl.className = `tool-call-result ${part.is_error ? 'error' : ''}`;
-      const preview = part.content.length > 500 ? part.content.slice(0, 500) + '…' : part.content;
-      resultEl.textContent = preview;
-      lastCard.appendChild(resultEl);
-    }
-  }
-
-  scrollToBottom(container);
-}
-
-function getToolIcon(name) {
-  const icons = {
-    bash: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>',
-    edit: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>',
-    write: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>',
-    read: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M16 13H8"></path><path d="M16 17H8"></path></svg>',
-    glob: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
-    grep: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
-  };
-  return icons[name] || icons.bash;
-}
-
-function formatToolInput(name, input) {
-  if (!input) return '';
-  if (name === 'bash' && input.command) {
-    return `<code>${escHtml(input.command)}</code>`;
-  }
-  if ((name === 'edit' || name === 'write') && input.path) {
-    return `<code>${escHtml(input.path)}</code>`;
-  }
-  if (name === 'read' && input.path) {
-    return `<code>${escHtml(input.path)}</code>`;
-  }
-  if (name === 'glob' && input.pattern) {
-    return `<code>${escHtml(input.pattern)}</code>`;
-  }
-  if (name === 'grep' && input.pattern) {
-    return `<code>${escHtml(input.pattern)}</code>`;
-  }
-  return '';
-}
-
-// ── Chat rendering ────────────────────────────────────────────────────────────
-
-function appendChatMessage(msg) {
-  const container = $('chat-messages');
-  if (!container) return;
-
-  // Finalize any open streaming bubble first
-  if (State.isStreaming && msg.kind !== 'agent_chunk') {
-    finalizeStreaming();
-  }
-
-  let row;
-
-  if (msg.kind === 'user') {
-    row = createMessageRow('user', msg.content);
-  } else if (msg.kind === 'agent') {
-    row = createMessageRow('agent', msg.content);
-    if (msg.streaming) State.isStreaming = true;
-  } else if (msg.kind === 'system') {
-    row = createMessageRow('system', msg.content);
-  } else if (msg.kind === 'plan') {
-    // Only show the first plan card; subsequent ones are clutter.
-    if (!State.planCardShown) {
-      State.planCardShown = true;
-      row = createPlanCard(msg);
-    }
-  } else if (msg.kind === 'error') {
-    row = createErrorCard(msg.content);
-  }
-
-  if (row) {
-    container.appendChild(row);
-    scrollToBottom(container);
-  }
-}
-
-function appendAgentChunk(chunk) {
-  const container = $('chat-messages');
-  if (!container) return;
-
-  if (!State.isStreaming) {
-    // Open a new streaming bubble
-    State.streamingContent = '';
-    State.isStreaming = true;
-    const row = document.createElement('div');
-    row.className = 'msg-row agent';
-    row.id = 'streaming-bubble';
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
-    bubble.id = 'streaming-text';
-    const cursor = document.createElement('span');
-    cursor.className = 'cursor';
-    cursor.id = 'streaming-cursor';
-    bubble.appendChild(cursor);
-    row.appendChild(bubble);
-    container.appendChild(row);
-  }
-
-  State.streamingContent += chunk;
-
-  const textEl = $('streaming-text');
-  const cursor = $('streaming-cursor');
-  if (textEl) {
-    // Render markdown-lite: bold, italic
-    const html = mdLite(State.streamingContent);
-    textEl.innerHTML = html;
-    // Re-append cursor
-    const cur = document.createElement('span');
-    cur.className = 'cursor';
-    cur.id = 'streaming-cursor';
-    textEl.appendChild(cur);
-  }
-
-  scrollToBottom(container);
-}
-
-function finalizeStreaming() {
-  if (!State.isStreaming) return;
-  State.isStreaming = false;
-  const cursor = $('streaming-cursor');
-  if (cursor) cursor.remove();
-  // Remove id from bubble
-  const bubble = $('streaming-bubble');
-  if (bubble) bubble.removeAttribute('id');
-  const text = $('streaming-text');
-  if (text) text.removeAttribute('id');
-  State.streamingContent = '';
-}
-
-function appendFileChanges(changes) {
-  const container = $('chat-messages');
-  if (!container) return;
-
-  // Finalize any streaming first
-  if (State.isStreaming) {
-    finalizeStreaming();
-  }
-
-  const row = document.createElement('div');
-  row.className = 'msg-row file-changes';
-  
-  const card = document.createElement('div');
-  card.className = 'file-changes-card';
-  
-  changes.forEach(change => {
-    const item = document.createElement('div');
-    item.className = 'file-change-item';
-    item.dataset.action = change.action;
-    item.title = change.path; // Tooltip shows full path
-    
-    // Icon based on action
-    const icon = document.createElement('span');
-    icon.className = 'file-icon';
-    icon.innerHTML = getFileActionIcon(change.action);
-    
-    // Filename only (not full path)
-    const filename = change.path.split('/').pop() || change.path;
-    const label = document.createElement('span');
-    label.className = 'file-label';
-    label.textContent = filename;
-    
-    // Line count badge (show +X/-Y if available)
-    if (change.lines_added > 0 || change.lines_deleted > 0) {
-      const badge = document.createElement('span');
-      badge.className = 'line-count-badge';
-      const parts = [];
-      if (change.lines_added > 0) parts.push(`+${change.lines_added}`);
-      if (change.lines_deleted > 0) parts.push(`-${change.lines_deleted}`);
-      badge.textContent = parts.join(' ');
-      label.appendChild(badge);
-    }
-    
-    item.appendChild(icon);
-    item.appendChild(label);
-    
-    // Click to open diff viewer
-    item.addEventListener('click', () => {
-      openDiffViewer(change);
-    });
-    
-    card.appendChild(item);
-  });
-  
-  row.appendChild(card);
-  container.appendChild(row);
-  scrollToBottom(container);
-}
-
-// ── Diff Viewer ───────────────────────────────────────────────────────────────
-
-function openDiffViewer(change) {
-  // Create modal overlay
-  const overlay = document.createElement('div');
-  overlay.className = 'diff-viewer-overlay';
-  
-  const modal = document.createElement('div');
-  modal.className = 'diff-viewer-modal';
-  
-  // Header
-  const header = document.createElement('div');
-  header.className = 'diff-viewer-header';
-  
-  const title = document.createElement('div');
-  title.className = 'diff-viewer-title';
-  title.textContent = change.path;
-  
-  const stats = document.createElement('div');
-  stats.className = 'diff-viewer-stats';
-  if (change.lines_added > 0 || change.lines_deleted > 0) {
-    const parts = [];
-    if (change.lines_added > 0) parts.push(`+${change.lines_added} added`);
-    if (change.lines_deleted > 0) parts.push(`-${change.lines_deleted} deleted`);
-    stats.textContent = parts.join(' • ');
-  } else {
-    stats.textContent = change.action;
-  }
-  
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'diff-viewer-close';
-  closeBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
-  closeBtn.onclick = () => overlay.remove();
-  
-  header.appendChild(title);
-  header.appendChild(stats);
-  header.appendChild(closeBtn);
-  
-  // Content area
-  const content = document.createElement('div');
-  content.className = 'diff-viewer-content';
-  
-  if (change.content) {
-    // Show actual code with line numbers
-    const lines = change.content.split('\n');
-    const codeBlock = document.createElement('pre');
-    codeBlock.className = 'diff-viewer-code';
-    
-    lines.forEach((line, idx) => {
-      const lineDiv = document.createElement('div');
-      lineDiv.className = 'code-line';
-      
-      const lineNum = document.createElement('span');
-      lineNum.className = 'line-number';
-      lineNum.textContent = idx + 1;
-      
-      const lineContent = document.createElement('span');
-      lineContent.className = 'line-content';
-      lineContent.textContent = line || ' '; // Empty lines need space
-      
-      lineDiv.appendChild(lineNum);
-      lineDiv.appendChild(lineContent);
-      codeBlock.appendChild(lineDiv);
-    });
-    
-    content.appendChild(codeBlock);
-  } else {
-    // No content available
-    const placeholder = document.createElement('div');
-    placeholder.className = 'diff-viewer-placeholder';
-    placeholder.textContent = change.action === 'deleted' 
-      ? 'File was deleted' 
-      : 'Content not available';
-    content.appendChild(placeholder);
-  }
-  
-  modal.appendChild(header);
-  modal.appendChild(content);
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
-  
-  // Close on overlay click
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) overlay.remove();
-  });
-  
-  // Close on Escape key
-  const escHandler = (e) => {
-    if (e.key === 'Escape') {
-      overlay.remove();
-      document.removeEventListener('keydown', escHandler);
-    }
-  };
-  document.addEventListener('keydown', escHandler);
-}
-
-// ── Diff Panel (right sidebar) ────────────────────────────────────────────────
-
-function normalizeNewlines(text) {
-  if (text == null) return '';
-  let t = String(text);
-  // Handle accidentally escaped newlines coming from some sources
-  if (t.includes('\\n') && !t.includes('\n')) t = t.replace(/\\n/g, '\n');
-  return t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-}
-
-function diffLines(beforeText, afterText) {
-  const a = normalizeNewlines(beforeText).split('\n');
-  const b = normalizeNewlines(afterText).split('\n');
-
-  // Myers diff (line-based), good enough for UI.
-  const N = a.length;
-  const M = b.length;
-  const max = N + M;
-  const v = new Map();
-  v.set(1, 0);
-  const trace = [];
-
-  for (let d = 0; d <= max; d++) {
-    const vNext = new Map(v);
-    for (let k = -d; k <= d; k += 2) {
-      let x;
-      if (k === -d || (k !== d && (v.get(k - 1) ?? 0) < (v.get(k + 1) ?? 0))) {
-        x = v.get(k + 1) ?? 0; // down
-      } else {
-        x = (v.get(k - 1) ?? 0) + 1; // right
-      }
-      let y = x - k;
-      while (x < N && y < M && a[x] === b[y]) {
-        x++;
-        y++;
-      }
-      vNext.set(k, x);
-      if (x >= N && y >= M) {
-        trace.push(vNext);
-        return backtrack(trace, a, b);
-      }
-    }
-    trace.push(vNext);
-    v.clear();
-    for (const [k, x] of vNext) v.set(k, x);
-  }
-
-  return b.map(line => ({ type: 'ctx', text: line }));
-}
-
-function backtrack(trace, a, b) {
-  let x = a.length;
-  let y = b.length;
-  const edits = [];
-
-  for (let d = trace.length - 1; d >= 0; d--) {
-    const v = trace[d];
-    const k = x - y;
-    let prevK;
-    if (k === -d || (k !== d && (v.get(k - 1) ?? 0) < (v.get(k + 1) ?? 0))) {
-      prevK = k + 1;
-    } else {
-      prevK = k - 1;
-    }
-    const prevX = v.get(prevK) ?? 0;
-    const prevY = prevX - prevK;
-
-    while (x > prevX && y > prevY) {
-      edits.push({ type: 'ctx', text: a[x - 1] });
-      x--;
-      y--;
-    }
-
-    if (d === 0) break;
-
-    if (x === prevX) {
-      // insertion
-      edits.push({ type: 'add', text: b[y - 1] });
-      y--;
-    } else {
-      // deletion
-      edits.push({ type: 'del', text: a[x - 1] });
-      x--;
-    }
-  }
-
-  edits.reverse();
-  return edits;
-}
-
-function latestFlattenedChanges() {
-  const flat = [];
-  for (const batch of State.fileChanges) {
-    for (const c of batch.changes) flat.push(c);
-  }
-  // dedupe by path keeping newest first
-  const seen = new Set();
-  const out = [];
-  for (const c of flat) {
-    if (seen.has(c.path)) continue;
-    seen.add(c.path);
-    out.push(c);
-  }
-  return out;
-}
-
-function buildChangeTree(changes) {
-  const root = { name: '', path: '', kind: 'dir', children: new Map() };
-  for (const c of changes) {
-    const parts = String(c.path || '').split('/').filter(Boolean);
-    let cur = root;
-    let curPath = '';
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      curPath = curPath ? `${curPath}/${part}` : part;
-      const isLeaf = i === parts.length - 1;
-      if (isLeaf) {
-        cur.children.set(curPath, { name: part, path: curPath, kind: 'file', change: c });
-      } else {
-        if (!cur.children.has(curPath)) {
-          cur.children.set(curPath, { name: part, path: curPath, kind: 'dir', children: new Map() });
-        }
-        cur = cur.children.get(curPath);
-      }
-    }
-  }
-  return root;
-}
-
-function treeToRows(node, depth, rows, opts) {
-  const { query, actions, expanded } = opts;
-  const kids = [...(node.children?.values() || [])];
-  kids.sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-
-  for (const child of kids) {
-    if (child.kind === 'file') {
-      const c = child.change;
-      const okAction = actions.has(String(c.action));
-      const okQuery = !query || child.path.toLowerCase().includes(query);
-      if (!okAction || !okQuery) continue;
-      rows.push({ kind: 'file', depth, path: c.path, name: child.name, action: c.action });
-      continue;
-    }
-
-    const isOpen = expanded.has(child.path);
-    const tmp = [];
-    treeToRows(child, depth + 1, tmp, opts);
-    if (tmp.length === 0) continue;
-
-    rows.push({ kind: 'dir', depth, path: child.path, name: child.name, open: isOpen, count: tmp.filter(r => r.kind === 'file').length });
-    if (isOpen) rows.push(...tmp);
-  }
-}
-
-function renderDiffPanel() {
-  const panel = $('task-panel');
-  if (!panel) return;
-
-  // Replace task inspector chrome
-  const title = panel.querySelector('.task-panel-title');
-  if (title) title.textContent = 'Diff';
-  const subtitle = $('task-panel-subtitle');
-  if (subtitle) subtitle.textContent = 'Select a file to inspect changes';
-
-  const body = $('task-panel-body');
-  const detail = $('task-detail');
-  if (!body || !detail) return;
-
-  const changes = latestFlattenedChanges();
-  const tree = buildChangeTree(changes);
-  const q = (State.diffTree?.query || '').trim().toLowerCase();
-  const actions = State.diffTree?.actions || new Set(['created', 'modified', 'deleted', 'moved', 'read']);
-  const expanded = State.diffTree?.expanded || new Set();
-  const rows = [];
-  treeToRows(tree, 0, rows, { query: q, actions, expanded });
-
-  const actionBtn = (id, label) => {
-    const on = actions.has(id);
-    return `<button class="diff-filter ${on ? 'on' : ''}" data-action="${escHtml(id)}">${escHtml(label)}</button>`;
-  };
-
-  const controls = `
-    <div class="diff-tree-controls">
-      <input class="diff-tree-search" id="diff-tree-search" placeholder="Search files…" value="${escHtml(State.diffTree?.query || '')}" />
-      <div class="diff-filter-row">
-        ${actionBtn('created','Created')}
-        ${actionBtn('modified','Modified')}
-        ${actionBtn('deleted','Deleted')}
-        ${actionBtn('moved','Moved')}
-        ${actionBtn('read','Read')}
-        <button class="diff-filter ghost" id="diff-filter-all">All</button>
-        <button class="diff-filter ghost" id="diff-filter-none">None</button>
-        <button class="diff-filter ghost" id="diff-collapse-all">Collapse</button>
-      </div>
-    </div>
-  `;
-
-  const rowsHtml = changes.length === 0
-    ? `<div class="task-row"><div class="task-desc">No file changes yet</div></div>`
-    : rows.map(r => {
-        const pad = `style="padding-left:${12 + r.depth * 14}px"`;
-        if (r.kind === 'dir') {
-          return `
-            <div class="diff-tree-row dir" data-dir="${escHtml(r.path)}" ${pad}>
-              <span class="chev">${r.open ? '▾' : '▸'}</span>
-              <span class="name">${escHtml(r.name)}</span>
-              <span class="meta">${r.count}</span>
-            </div>
-          `;
-        }
-        const selected = State.selectedChangePath === r.path ? 'selected' : '';
-        return `
-          <div class="diff-tree-row file ${selected}" data-path="${escHtml(r.path)}" ${pad}>
-            <span class="task-dot ${r.action}"></span>
-            <span class="name">${escHtml(r.name)}</span>
-            <span class="meta">${escHtml(r.action)}</span>
-          </div>
-        `;
-      }).join('');
-
-  body.innerHTML = controls + `<div class="diff-tree-rows">${rowsHtml}</div>`;
-
-  $('diff-tree-search')?.addEventListener('input', (e) => {
-    State.diffTree.query = e.target.value || '';
-    renderDiffPanel();
-  });
-  body.querySelectorAll('.diff-filter[data-action]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const a = btn.dataset.action;
-      if (!a) return;
-      if (State.diffTree.actions.has(a)) State.diffTree.actions.delete(a);
-      else State.diffTree.actions.add(a);
-      renderDiffPanel();
-    });
-  });
-  $('diff-filter-all')?.addEventListener('click', () => {
-    State.diffTree.actions = new Set(['created', 'modified', 'deleted', 'moved', 'read']);
-    renderDiffPanel();
-  });
-  $('diff-filter-none')?.addEventListener('click', () => {
-    State.diffTree.actions = new Set();
-    renderDiffPanel();
-  });
-  $('diff-collapse-all')?.addEventListener('click', () => {
-    State.diffTree.expanded = new Set();
-    renderDiffPanel();
-  });
-
-  body.querySelectorAll('.diff-tree-row.dir').forEach(row => {
-    row.addEventListener('click', () => {
-      const d = row.dataset.dir;
-      if (!d) return;
-      if (State.diffTree.expanded.has(d)) State.diffTree.expanded.delete(d);
-      else State.diffTree.expanded.add(d);
-      renderDiffPanel();
-    });
-  });
-  body.querySelectorAll('.diff-tree-row.file').forEach(row => {
-    row.addEventListener('click', () => {
-      const p = row.dataset.path;
-      if (!p) return;
-      State.selectedChangePath = p;
-      renderDiffPanel();
-    });
-  });
-
-  const selected = changes.find(c => c.path === State.selectedChangePath) || changes[0] || null;
-  if (!State.selectedChangePath && selected) State.selectedChangePath = selected.path;
-
-  if (!selected) {
-    detail.innerHTML = `<div class="task-detail-empty">No diff to show yet.</div>`;
-    return;
-  }
-
-  // Diff view
-  const before = selected.before_content ?? '';
-  const after = selected.content ?? '';
-
-  let hunks = [];
-  if (selected.action === 'created') {
-    hunks = normalizeNewlines(after).split('\n').map(t => ({ type: 'add', text: t }));
-  } else if (selected.action === 'deleted') {
-    hunks = normalizeNewlines(before).split('\n').map(t => ({ type: 'del', text: t }));
-  } else if (selected.action === 'modified') {
-    hunks = diffLines(before, after);
-  } else {
-    // read/moved fallback
-    hunks = normalizeNewlines(after || before).split('\n').map(t => ({ type: 'ctx', text: t }));
-  }
-
-  const header = `
-    <div class="diff-panel-head">
-      <div class="diff-panel-path">${escHtml(selected.path)}</div>
-      <div class="diff-panel-meta">${escHtml(selected.action)}</div>
-    </div>
-  `;
-
-  let addCount = 0, delCount = 0;
-  for (const h of hunks) { if (h.type === 'add') addCount++; if (h.type === 'del') delCount++; }
-  if (subtitle) subtitle.textContent = `${addCount} added · ${delCount} removed`;
-
-  const linesHtml = hunks.map((h, i) => {
-    const sign = h.type === 'add' ? '+' : h.type === 'del' ? '-' : ' ';
-    return `
-      <div class="diff-line ${h.type}">
-        <span class="diff-gutter">${sign}</span>
-        <span class="diff-lno">${i + 1}</span>
-        <span class="diff-text">${escHtml(h.text || ' ')}</span>
-      </div>
-    `;
-  }).join('');
-
-  detail.innerHTML = `${header}<div class="diff-panel-body">${linesHtml || '<div class="task-detail-empty">Empty file</div>'}</div>`;
-}
-
-function getFileActionIcon(action) {
-  // Using SVG icons (Lucide-style)
-  const icons = {
-    created: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>`,
-    modified: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M10.4 12.6a2 2 0 1 1 3 3L8 21l-4 1 1-4Z"></path></svg>`,
-    deleted: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="9" y1="15" x2="15" y2="15"></line></svg>`,
-    read: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M16 13H8"></path><path d="M16 17H8"></path><path d="M10 9H8"></path></svg>`,
-    moved: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><polyline points="10 9 9 9 8 9"></polyline><path d="m15 14-3-3 3-3"></path></svg>`,
-  };
-  return icons[action] || icons.modified;
-}
-
-function createMessageRow(type, content) {
-  const row = document.createElement('div');
-  row.className = `msg-row ${type}`;
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble';
-  bubble.innerHTML = type === 'agent' ? mdLite(content) : escHtml(content);
-  row.appendChild(bubble);
-  return row;
-}
-
-function createPlanCard(msg) {
-  const row = document.createElement('div');
-  row.className = 'msg-row plan';
-  row.style.padding = '0 40px';
-
-  const card = document.createElement('div');
-  card.className = 'plan-card';
-  card.innerHTML = `
-    <div class="plan-card-title">▶ Orchestration Plan</div>
-    <div class="plan-card-row">
-      <div class="plan-stat">
-        <div class="plan-stat-val">${msg.task_count}</div>
-        <div class="plan-stat-lbl">Tasks</div>
-      </div>
-      <div class="plan-stat">
-        <div class="plan-stat-val">${msg.agent_count}</div>
-        <div class="plan-stat-lbl">Agents</div>
-      </div>
-      <div class="plan-stat">
-        <div class="plan-stat-val">${(msg.mode || 'auto').toUpperCase()}</div>
-        <div class="plan-stat-lbl">Mode</div>
-      </div>
-    </div>
-    <div class="plan-sandboxes">
-      ${(msg.sandboxes || []).map(s => `<span class="plan-sb${s === 'zero' ? ' plan-sb-zero' : ''}">${s === 'zero' ? '✦ ' : ''}${s}</span>`).join('')}
-    </div>
-  `;
-  card.addEventListener('click', () => setTaskPanelOpen(true));
-  row.appendChild(card);
-  return row;
-}
-
-function createErrorCard(content) {
-  const row = document.createElement('div');
-  row.className = 'msg-row system';
-  row.style.padding = '4px 40px';
-  const card = document.createElement('div');
-  card.className = 'error-card';
-  card.textContent = content;
-  row.appendChild(card);
-  return row;
-}
-
-function scrollToBottom(el) {
-  requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
 }
 
 // ── Task panel ────────────────────────────────────────────────────────────────
@@ -1687,7 +622,6 @@ function updateTaskPanelVisibility() {
 }
 
 function renderTaskPanel() {
-  // If we have file changes, the right panel becomes a Diff panel.
   if (State.fileChanges && State.fileChanges.length > 0) {
     renderDiffPanel();
     updateTaskPanelVisibility();
@@ -1733,7 +667,6 @@ function renderTaskPanel() {
 }
 
 function renderTaskDetail() {
-  // Diff panel owns the detail area when changes exist.
   if (State.fileChanges && State.fileChanges.length > 0) {
     renderDiffPanel();
     return;
@@ -1778,749 +711,13 @@ function setTaskPanelOpen(open) {
   if (State.taskPanelOpen) renderTaskPanel();
 }
 
-// ── Status bar (removed) ────────────────────────────────────────────────────
+// ── Status bar ───────────────────────────────────────────────────────────────
 
 function updateStatusBar() {
   // Status bar removed — no-op
 }
 
-// ── Sessions page ─────────────────────────────────────────────────────────────
-
-const SessionsState = {
-  all: [],
-  search: '',
-  filter: 'all',
-  sort: 'newest',
-};
-
-function relativeTime(ts) {
-  if (!ts) return '';
-  const now = Date.now();
-  const diff = now - ts * 1000;
-  const secs = Math.floor(diff / 1000);
-  if (secs < 60) return 'just now';
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days === 1) return 'yesterday';
-  if (days < 30) return `${days}d ago`;
-  const months = Math.floor(days / 30);
-  return `${months}mo ago`;
-}
-
-function formatDuration(secs) {
-  if (!secs || secs <= 0) return null;
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  const s = secs % 60;
-  if (mins < 60) return s > 0 ? `${mins}m ${s}s` : `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  const m = mins % 60;
-  return m > 0 ? `${hrs}h ${m}m` : `${hrs}h`;
-}
-
-function sessionsMatchFilter(s, filter) {
-  if (filter === 'all') return true;
-  return s.status === filter;
-}
-
-function sessionsMatchSearch(s, query) {
-  if (!query) return true;
-  const q = query.toLowerCase();
-  return (s.prompt || '').toLowerCase().includes(q)
-    || (s.id || '').toLowerCase().includes(q)
-    || relativeTime(s.started_at).toLowerCase().includes(q);
-}
-
-function sessionsSort(a, b, sort) {
-  switch (sort) {
-    case 'oldest': return a.started_at - b.started_at;
-    case 'tokens': return (b.tokens_total || 0) - (a.tokens_total || 0);
-    case 'duration': return (b.duration_secs || 0) - (a.duration_secs || 0);
-    case 'newest':
-    default: return b.started_at - a.started_at;
-  }
-}
-
-function renderSessionCard(s) {
-  const progressPct = s.task_count > 0 ? Math.round((s.tasks_done / s.task_count) * 100) : 0;
-  const progressClass = s.status === 'error' ? 'error' : s.status === 'done' ? 'complete' : '';
-  const duration = formatDuration(s.duration_secs);
-  const relative = relativeTime(s.started_at);
-  const statusLabel = s.status === 'done' ? 'COMPLETED' : s.status.toUpperCase();
-
-  return `
-    <div class="session-card" data-id="${s.id}">
-      <button class="sc-delete" data-id="${s.id}" title="Delete session" aria-label="Delete session">&times;</button>
-      <div class="sc-top">
-        <div class="sc-prompt">${escHtml(s.prompt || '—')}</div>
-        <div class="sc-badges">
-          <span class="sc-status ${s.status}">${statusLabel}</span>
-          ${s.mode ? `<span class="sc-mode">${escHtml(s.mode)}</span>` : ''}
-        </div>
-      </div>
-      ${s.task_count > 0 ? `
-        <div class="sc-progress-wrap">
-          <div class="sc-progress-bar"><div class="sc-progress-fill ${progressClass}" style="width:${progressPct}%"></div></div>
-          <div class="sc-progress-text">${s.tasks_done}/${s.task_count}</div>
-        </div>
-      ` : ''}
-      <div class="sc-meta">
-        ${(s.tokens_total || 0) > 0 ? `
-          <span class="sc-meta-item">
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/><path d="M5 8h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-            ${fmtNumber(s.tokens_total)} tokens
-          </span>
-          <span class="sc-meta-sep"></span>
-        ` : ''}
-        ${duration ? `
-          <span class="sc-meta-item">
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v3.5l2.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            ${duration}
-          </span>
-          <span class="sc-meta-sep"></span>
-        ` : ''}
-        <span class="sc-meta-item">
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h12" stroke="currentColor" stroke-width="1.3"/></svg>
-          ${relative}
-        </span>
-      </div>
-    </div>`;
-}
-
-async function renderSessionsPage() {
-  try {
-    const hist = await invoke('get_session_history');
-    SessionsState.all = hist || [];
-
-    const list = $('sessions-list');
-    const empty = $('sessions-empty');
-    const toolbar = $('sessions-toolbar');
-    const active = $('sessions-active');
-    const noResults = $('sessions-no-results');
-
-    setText('sb-badge-sessions', hist.length ? String(hist.length) : '');
-
-    if (!hist.length) {
-      if (empty) empty.style.display = '';
-      if (list) list.style.display = 'none';
-      if (toolbar) toolbar.style.display = 'none';
-      if (active) active.style.display = 'none';
-      if (noResults) noResults.style.display = 'none';
-      return;
-    }
-
-    if (empty) empty.style.display = 'none';
-    if (toolbar) toolbar.style.display = '';
-    setText('sessions-count', `${hist.length} session${hist.length !== 1 ? 's' : ''}`);
-
-    renderSessionsActive(active);
-    renderSessionsList();
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-function renderSessionsActive(activeEl) {
-  if (!activeEl) return;
-  const running = SessionsState.all.find(s => s.status === 'running');
-  if (!running) {
-    activeEl.style.display = 'none';
-    return;
-  }
-  activeEl.style.display = '';
-  const progressPct = running.task_count > 0 ? Math.round((running.tasks_done / running.task_count) * 100) : 0;
-  const relative = relativeTime(running.started_at);
-  activeEl.innerHTML = `
-    <div class="sessions-active-card" data-id="${running.id}">
-      <div class="sessions-active-label">Currently running</div>
-      <div class="sc-prompt">${escHtml(running.prompt || '—')}</div>
-      <div class="sc-meta" style="margin-top:8px">
-        ${running.task_count > 0 ? `
-          <span class="sc-meta-item">${running.tasks_done}/${running.task_count} tasks</span>
-          <span class="sc-meta-sep"></span>
-        ` : ''}
-        <span class="sc-meta-item">${relative}</span>
-      </div>
-    </div>`;
-  activeEl.querySelector('.sessions-active-card').addEventListener('click', () => openSession(running.id));
-}
-
-function renderSessionsList() {
-  const list = $('sessions-list');
-  const noResults = $('sessions-no-results');
-  if (!list) return;
-
-  const filtered = SessionsState.all
-    .filter(s => {
-      if (s.status === 'running') return false;
-      return sessionsMatchFilter(s, SessionsState.filter) && sessionsMatchSearch(s, SessionsState.search);
-    })
-    .sort((a, b) => sessionsSort(a, b, SessionsState.sort));
-
-  if (!filtered.length) {
-    list.style.display = 'none';
-    if (noResults) noResults.style.display = '';
-    return;
-  }
-
-  if (noResults) noResults.style.display = 'none';
-  list.style.display = '';
-  list.innerHTML = filtered.map(s => renderSessionCard(s)).join('');
-
-  list.querySelectorAll('.session-card').forEach(card => {
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('.sc-delete')) return;
-      openSession(card.dataset.id);
-    });
-  });
-
-  list.querySelectorAll('.sc-delete').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.id;
-      if (!id) return;
-      try {
-        await invoke('agent_delete_session', { sessionId: id });
-        SessionsState.all = SessionsState.all.filter(s => s.id !== id);
-        renderSessionsPage();
-        toast('Session deleted', 'success');
-      } catch (err) {
-        toast('Failed to delete: ' + err, 'error');
-      }
-    });
-  });
-}
-
-function setupSessionsHandlers() {
-  // Search
-  const searchInput = $('sessions-search');
-  const searchClear = $('sessions-search-clear');
-  if (searchInput) {
-    searchInput.addEventListener('input', () => {
-      SessionsState.search = searchInput.value.trim();
-      if (searchClear) searchClear.classList.toggle('hidden', !SessionsState.search);
-      renderSessionsList();
-    });
-  }
-  if (searchClear) {
-    searchClear.addEventListener('click', () => {
-      SessionsState.search = '';
-      if (searchInput) searchInput.value = '';
-      searchClear.classList.add('hidden');
-      renderSessionsList();
-      if (searchInput) searchInput.focus();
-    });
-  }
-
-  // Filter tabs
-  document.querySelectorAll('.sessions-filter').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.sessions-filter').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      SessionsState.filter = btn.dataset.filter;
-      renderSessionsList();
-    });
-  });
-
-  // Sort
-  const sortSelect = $('sessions-sort');
-  if (sortSelect) {
-    sortSelect.addEventListener('change', () => {
-      SessionsState.sort = sortSelect.value;
-      renderSessionsList();
-    });
-  }
-
-  // Empty state button
-  $('btn-empty-new')?.addEventListener('click', () => navigate('home'));
-}
-
-// ── Usage page ────────────────────────────────────────────────────────────────
-
-function fmtTokens(n) {
-  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1) + 'B';
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-  return String(n);
-}
-
-function fmtDurationSecs(s) {
-  if (!s || s <= 0) return '0m';
-  if (s < 60) return s + 's';
-  if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60 > 0 ? (s % 60) + 's' : '');
-  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
-}
-
-function smoothPath(points) {
-  if (points.length < 2) return points.map(p => `M${p.x},${p.y}`).join('');
-  let d = `M${points[0].x},${points[0].y}`;
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[Math.max(0, i - 1)];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = points[Math.min(points.length - 1, i + 2)];
-    const cp1x = p1.x + (p2.x - p0.x) / 6;
-    const cp1y = p1.y + (p2.y - p0.y) / 6;
-    const cp2x = p2.x - (p3.x - p1.x) / 6;
-    const cp2y = p2.y - (p3.y - p1.y) / 6;
-    d += ` C${cp1x},${cp1y} ${cp2x},${cp2y} ${p2.x},${p2.y}`;
-  }
-  return d;
-}
-
-async function renderUsagePage() {
-  try {
-    const [stats, hist, usage] = await Promise.all([
-      invoke('get_stats'),
-      invoke('get_session_history'),
-      invoke('get_usage_history'),
-    ]);
-
-    setText('us-sessions', hist.length);
-    setText('us-tasks', fmtNumber(stats.lifetime_tasks ?? (stats.tasks_done + stats.tasks_total)));
-    setText('us-tokens', fmtTokens(stats.lifetime_tokens ?? stats.tokens_total));
-    setText('us-tools', fmtNumber(stats.lifetime_tool_calls ?? stats.tool_calls));
-
-    const totalDuration = (usage || []).reduce((s, u) => s + (u.duration_secs || 0), 0);
-    setText('us-duration', fmtDurationSecs(totalDuration));
-
-    renderUsageChart(usage, stats);
-    renderDonutChart(stats);
-    renderSuccessRate(hist);
-    renderTimeline(hist);
-    renderUsageTable(hist);
-  } catch (e) {
-    console.error('Usage page error:', e);
-  }
-}
-
-function renderUsageChart(usage, stats) {
-  const el = $('usage-chart');
-  if (!el) return;
-  const rows = [...(usage || [])];
-  const totalTokens = stats?.lifetime_tokens ?? rows.reduce((sum, u) => sum + (u.tokens || 0), 0);
-  setText('usage-total-label', `${fmtTokens(totalTokens)} tokens`);
-
-  if (!rows.length) {
-    el.innerHTML = `<svg viewBox="0 0 640 200" role="img"><text x="280" y="105" fill="rgba(255,255,255,0.2)" font-size="12" font-family="var(--sans)">No usage recorded yet</text></svg>`;
-    return;
-  }
-
-  const W = 640, H = 200, pad = 40, padR = 20;
-  const maxVal = Math.max(...rows.map(r => r.tokens || 0), 1);
-  const xStep = rows.length === 1 ? 0 : (W - pad - padR) / (rows.length - 1);
-  const pts = rows.map((r, i) => ({
-    x: rows.length === 1 ? W / 2 : pad + i * xStep,
-    y: H - pad - ((r.tokens || 0) / maxVal) * (H - pad - 20),
-    item: r,
-  }));
-  const lineD = smoothPath(pts);
-  const areaD = lineD + ` L${pts[pts.length - 1].x},${H - pad} L${pts[0].x},${H - pad} Z`;
-
-  // Y-axis labels
-  const yTicks = 4;
-  let gridLines = '';
-  for (let i = 0; i <= yTicks; i++) {
-    const y = 20 + ((H - pad - 20) / yTicks) * i;
-    const val = maxVal * (1 - i / yTicks);
-    gridLines += `<line x1="${pad}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>`;
-    gridLines += `<text x="${pad - 6}" y="${y + 3}" text-anchor="end" fill="rgba(255,255,255,0.2)" font-size="9" font-family="var(--mono)">${fmtTokens(Math.round(val))}</text>`;
-  }
-
-  // X-axis labels (session numbers)
-  let xLabels = '';
-  const labelInterval = Math.max(1, Math.floor(rows.length / 8));
-  pts.forEach((p, i) => {
-    if (i % labelInterval === 0 || i === pts.length - 1) {
-      xLabels += `<text x="${p.x}" y="${H - 10}" text-anchor="middle" fill="rgba(255,255,255,0.2)" font-size="9" font-family="var(--mono)">${i + 1}</text>`;
-    }
-  });
-
-  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img">
-    <defs>
-      <linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="rgba(255,255,255,0.08)"/>
-        <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
-      </linearGradient>
-    </defs>
-    ${gridLines}
-    <path d="${areaD}" fill="url(#chart-fill)" class="chart-area"/>
-    <path d="${lineD}" fill="none" stroke="var(--tx-3)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>
-    ${pts.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--tx)" opacity="0" class="chart-dot" data-idx="${i}" style="cursor:pointer"/>`).join('')}
-    ${xLabels}
-  </svg>
-  <div class="chart-tooltip hidden" id="chart-tooltip"></div>`;
-
-  // Hover tooltip
-  const tooltip = el.querySelector('#chart-tooltip');
-  const dots = el.querySelectorAll('.chart-dot');
-  dots.forEach(dot => {
-    dot.addEventListener('mouseenter', (e) => {
-      const idx = parseInt(dot.dataset.idx);
-      const pt = pts[idx];
-      if (!pt || !tooltip) return;
-      const item = pt.item;
-      const tokens = fmtTokens(item.tokens || 0);
-      const prompt = (item.prompt_short || item.prompt || 'Session').slice(0, 40);
-      tooltip.innerHTML = `<div class="chart-tooltip-title">${escHtml(prompt)}</div><div class="chart-tooltip-value">${tokens} tokens</div>`;
-      tooltip.classList.remove('hidden');
-      const rect = el.getBoundingClientRect();
-      const dotRect = dot.getBoundingClientRect();
-      tooltip.style.left = (dotRect.left - rect.left + dotRect.width / 2) + 'px';
-      tooltip.style.top = (dotRect.top - rect.top - 8) + 'px';
-      dot.setAttribute('opacity', '1');
-    });
-    dot.addEventListener('mouseleave', () => {
-      if (tooltip) tooltip.classList.add('hidden');
-      dot.setAttribute('opacity', '0');
-    });
-  });
-
-  // Animate chart on enter
-  const area = el.querySelector('.chart-area');
-  const line = el.querySelector('.chart-line');
-  if (area) area.style.animation = 'chartFadeIn 0.8s ease forwards';
-  if (line) {
-    const length = line.getTotalLength ? line.getTotalLength() : 1000;
-    line.style.strokeDasharray = length;
-    line.style.strokeDashoffset = length;
-    line.style.animation = 'chartLineIn 1.2s ease forwards';
-  }
-}
-
-function renderDonutChart(stats) {
-  const svg = $('usage-donut');
-  const legend = $('usage-donut-legend');
-  if (!svg || !legend) return;
-
-  const total = stats?.lifetime_tokens ?? stats?.tokens_total ?? 0;
-  if (total === 0) {
-    svg.innerHTML = `<text x="100" y="105" text-anchor="middle" fill="rgba(255,255,255,0.2)" font-size="11">No data</text>`;
-    legend.innerHTML = '';
-    return;
-  }
-
-  const segments = [
-    { label: 'Code Generation', pct: 0.32, color: 'rgba(255,255,255,0.5)' },
-    { label: 'Planning', pct: 0.22, color: 'rgba(255,255,255,0.35)' },
-    { label: 'Tool Calls', pct: 0.20, color: 'rgba(255,255,255,0.25)' },
-    { label: 'Code Review', pct: 0.15, color: 'rgba(255,255,255,0.15)' },
-    { label: 'Thinking', pct: 0.11, color: 'rgba(255,255,255,0.08)' },
-  ];
-
-  const cx = 100, cy = 90, r = 65, sw = 18;
-  const circ = 2 * Math.PI * r;
-  let offset = 0;
-  let arcs = '';
-
-  segments.forEach(seg => {
-    const len = seg.pct * circ;
-    const gap = 3;
-    arcs += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${seg.color}" stroke-width="${sw}" stroke-dasharray="${Math.max(0, len - gap)} ${circ - Math.max(0, len - gap)}" stroke-dashoffset="${-offset}" stroke-linecap="round" opacity="0.85"/>`;
-    offset += len;
-  });
-
-  svg.innerHTML = arcs + `<text x="${cx}" y="${cy - 4}" text-anchor="middle" fill="var(--tx)" font-family="var(--serif)" font-size="20">${fmtTokens(total)}</text><text x="${cx}" y="${cy + 12}" text-anchor="middle" fill="var(--tx-4)" font-size="9" font-family="var(--sans)">total tokens</text>`;
-
-  legend.innerHTML = segments.map(s => `<div class="usage-donut-item"><span class="usage-donut-dot" style="background:${s.color}"></span><span class="usage-donut-label">${s.label}</span><span class="usage-donut-pct">${Math.round(s.pct * 100)}%</span></div>`).join('');
-}
-
-function renderSuccessRate(hist) {
-  const el = $('usage-success-rate');
-  if (!el) return;
-  if (!hist.length) { el.innerHTML = '<div class="usage-rate-empty">No data</div>'; return; }
-
-  const done = hist.filter(s => s.status === 'done' || s.status === 'complete').length;
-  const failed = hist.filter(s => s.status === 'error' || s.status === 'failed').length;
-  const stopped = hist.filter(s => s.status === 'stopped').length;
-  const total = hist.length;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-
-  el.innerHTML = `
-    <div class="usage-rate-ring-wrap">
-      <svg class="usage-rate-ring" viewBox="0 0 120 120">
-        <circle cx="60" cy="60" r="48" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="10"/>
-        <circle cx="60" cy="60" r="48" fill="none" stroke="var(--tx-3)" stroke-width="10" stroke-dasharray="${(pct / 100) * 301.6} ${301.6}" stroke-linecap="round" transform="rotate(-90 60 60)"/>
-        <text x="60" y="56" text-anchor="middle" fill="var(--tx)" font-family="var(--serif)" font-size="24">${pct}%</text>
-        <text x="60" y="72" text-anchor="middle" fill="var(--tx-4)" font-size="9" font-family="var(--sans)">success</text>
-      </svg>
-    </div>
-    <div class="usage-rate-bars">
-      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--tx-3)"></span><span>Completed</span><span class="usage-rate-count">${done}</span></div>
-      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--tx-4)"></span><span>Failed</span><span class="usage-rate-count">${failed}</span></div>
-      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--tx-5)"></span><span>Stopped</span><span class="usage-rate-count">${stopped}</span></div>
-    </div>`;
-}
-
-function renderTimeline(hist) {
-  const el = $('usage-timeline');
-  if (!el) return;
-  if (!hist.length) { el.innerHTML = '<div class="usage-rate-empty">No sessions</div>'; return; }
-
-  const sorted = [...hist].sort((a, b) => a.started_at - b.started_at);
-  const maxTokens = Math.max(...sorted.map(s => s.tokens || 0), 1);
-
-  el.innerHTML = `<div class="usage-timeline-track">${sorted.map((s, i) => {
-    const h = Math.max(8, ((s.tokens || 0) / maxTokens) * 60);
-    const color = s.status === 'running' ? 'var(--tx-2)' : 'var(--tx-4)';
-    return `<div class="usage-timeline-bar" style="height:${h}px;background:${color}" title="${escHtml(s.prompt?.slice(0, 40) || 'Session')} — ${fmtTokens(s.tokens || 0)} tokens"></div>`;
-  }).join('')}</div>`;
-}
-
-function renderUsageTable(hist) {
-  const wrap = $('usage-sessions-table');
-  if (!wrap) return;
-  if (!hist.length) {
-    wrap.innerHTML = '<div class="empty-state small"><div class="empty-text">No history yet</div></div>';
-    return;
-  }
-  wrap.innerHTML = `<table class="usage-table">
-    <thead><tr><th>Prompt</th><th>Status</th><th>Tasks</th><th>Tokens</th><th>Duration</th><th>Started</th></tr></thead>
-    <tbody>${[...hist].reverse().map(s => `<tr>
-      <td class="tx">${escHtml((s.prompt || '').slice(0, 50))}${(s.prompt || '').length > 50 ? '…' : ''}</td>
-      <td><span class="sc-status ${s.status}">${s.status}</span></td>
-      <td>${s.tasks_done || 0}/${s.task_count || 0}</td>
-      <td>${fmtTokens(s.tokens || 0)}</td>
-      <td>${fmtDurationSecs(s.duration_secs || 0)}</td>
-      <td>${fmtTs(s.started_at)}</td>
-    </tr>`).join('')}</tbody>
-  </table>`;
-}
-
-// ── Provider → Model mapping ─────────────────────────────────────────────────
-
-const PROVIDER_MODELS = {
-  gemini: [
-    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — frontier' },
-    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — fast' },
-    { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite — lightweight' },
-    { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
-  ],
-  vertex: [
-    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
-  ],
-  anthropic: [
-    { id: 'claude-opus-4-7', label: 'Claude Opus 4.7 — most capable' },
-    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 — smart + fast' },
-    { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 — fast' },
-  ],
-  openai: [
-    { id: 'gpt-4o', label: 'GPT-4o — flagship' },
-    { id: 'o1', label: 'o1 — reasoning' },
-    { id: 'o3-mini', label: 'o3-mini — fast reasoning' },
-    { id: 'gpt-4o-mini', label: 'GPT-4o Mini — cheap' },
-  ],
-  grok: [
-    { id: 'grok-3', label: 'Grok-3 — flagship' },
-    { id: 'grok-3-fast', label: 'Grok-3 Fast' },
-    { id: 'grok-3-mini', label: 'Grok-3 Mini' },
-  ],
-  groq: [
-    { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B — versatile' },
-    { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B — instant' },
-    { id: 'mixtral-8x7b-32768', label: 'Mixtral 8x7B' },
-  ],
-  mimo: [
-    { id: 'mimo-v2.5-pro', label: 'MiMo-V2.5 Pro — 1T flagship' },
-    { id: 'mimo-v2.5', label: 'MiMo-V2.5 — omnimodal' },
-    { id: 'mimo-v2-pro', label: 'MiMo-V2 Pro' },
-    { id: 'mimo-v2-omni-0327', label: 'MiMo-V2 Omni — see/hear/act' },
-    { id: 'mimo-v2-flash', label: 'MiMo-V2 Flash — fast' },
-    { id: 'mimo-v2.5-asr', label: 'MiMo-V2.5 ASR — speech recognition' },
-    { id: 'mimo-v2.5-tts', label: 'MiMo-V2.5 TTS — voice' },
-  ],
-};
-
-function populateModelDropdown(provider) {
-  const sel = $('set-model');
-  const custom = $('set-model-custom');
-  if (!sel) return;
-
-  const models = PROVIDER_MODELS[provider] || [];
-  sel.innerHTML = models.map(m => `<option value="${m.id}">${m.label}</option>`).join('')
-    + '<option value="__custom">Custom…</option>';
-
-  // Show/hide custom input
-  sel.onchange = () => {
-    if (sel.value === '__custom') {
-      custom?.classList.remove('hidden');
-      custom?.focus();
-    } else {
-      custom?.classList.add('hidden');
-    }
-  };
-}
-
-function loadSettings() {
-  const c = State.config || {};
-  setVal('set-provider', c.provider || 'gemini');
-  populateModelDropdown(c.provider || 'gemini');
-
-  // Set model value — try dropdown first, fall back to custom input
-  const modelSel = $('set-model');
-  const modelCustom = $('set-model-custom');
-  const models = PROVIDER_MODELS[c.provider || 'gemini'] || [];
-  const knownModel = models.some(m => m.id === c.model);
-  if (c.model && knownModel && modelSel) {
-    modelSel.value = c.model;
-    modelCustom?.classList.add('hidden');
-  } else if (c.model && modelSel) {
-    modelSel.value = '__custom';
-    if (modelCustom) { modelCustom.value = c.model; modelCustom.classList.remove('hidden'); }
-  }
-
-  setVal('set-api-key', c.api_key || '');
-  setVal('set-gcp', c.gcp_project || '');
-  setVal('set-gcp-region', c.gcp_region || 'us-central1');
-  setVal('set-sa-key', c.gcp_service_account_key_path || '');
-  setVal('set-socket', c.socket_path || '/tmp/agentd.sock');
-  setVal('set-mode', c.mode || 'auto');
-  setVal('set-max-agents', c.max_agents || 100);
-  const rowGcp = $('row-gcp');
-  const rowGcpRegion = $('row-gcp-region');
-  const rowSaKey = $('row-sa-key');
-  const showVertex = (c.provider === 'vertex');
-  if (rowGcp) rowGcp.style.display = showVertex ? '' : 'none';
-  if (rowGcpRegion) rowGcpRegion.style.display = showVertex ? '' : 'none';
-  if (rowSaKey) rowSaKey.style.display = showVertex ? '' : 'none';
-
-  // Sandbox toggle
-  const sandboxEnabled = c.sandbox_enabled !== false; // default true
-  setVal('set-sandbox-enabled', sandboxEnabled);
-  updateSandboxToggleLabel(sandboxEnabled);
-
-  // Agent mode hint in settings
-  updateSettingsAgentHint(c.mode || 'agent');
-
-  // Sandbox status
-  refreshSandboxInfo();
-}
-
-function setVal(id, val) {
-  const e = $(id);
-  if (!e) return;
-  if (e.type === 'checkbox') e.checked = !!val;
-  else e.value = val ?? '';
-  if (e.tagName === 'SELECT') syncCustomSelect(e);
-}
-function getVal(id) { const e = $(id); if (!e) return ''; if (e.type === 'checkbox') return e.checked; return e.value; }
-
-async function saveSettings() {
-  // Model: from dropdown or custom input
-  const modelSel = $('set-model');
-  const modelCustom = $('set-model-custom');
-  let modelVal = modelSel?.value || '';
-  if (modelVal === '__custom') modelVal = modelCustom?.value?.trim() || '';
-
-  const config = {
-    socket_path: getVal('set-socket'),
-    max_agents: parseInt(getVal('set-max-agents') || '100'),
-    mode: getVal('set-mode'),
-    provider: getVal('set-provider'),
-    model: modelVal,
-    api_key: getVal('set-api-key'),
-    gcp_project: getVal('set-gcp'),
-    gcp_region: getVal('set-gcp-region'),
-    gcp_service_account_key_path: getVal('set-sa-key'),
-    sandbox_enabled: getVal('set-sandbox-enabled'),
-  };
-  try {
-    await invoke('save_config', { config });
-    State.config = config;
-    setText('sb-provider', config.provider);
-    toast('Settings saved', 'success');
-  } catch (err) {
-    toast('Save failed: ' + err, 'error');
-  }
-}
-
-// ── Zero mode helpers ─────────────────────────────────────────────────────────
-
-function isAgentMode() {
-  return (State.config?.mode || '') === 'agent' || State.agentHealthy;
-}
-
-function updateZeroWorkspaceBar(path) {
-  // Deprecated — kept for backward compatibility
-  State.zeroWorkspacePath = path || null;
-}
-
-async function refreshZeroWorkspace() {
-  try {
-    const ws = await invoke('get_zero_workspace');
-    updateZeroWorkspaceBar(ws?.path || null);
-  } catch {}
-}
-
-// ── Sandbox helpers ───────────────────────────────────────────────────────────
-
-function updateSettingsAgentHint(mode) {
-  const hint = $('settings-agent-hint');
-  if (!hint) return;
-  hint.classList.toggle('hidden', mode !== 'agent');
-}
-
-function updateHomeAgentHint(mode) {
-  const hint = $('home-agent-hint');
-  if (!hint) return;
-  hint.classList.toggle('hidden', mode !== 'agent');
-}
-
-function updateSandboxToggleLabel(enabled) {
-  const label = $('sandbox-toggle-label');
-  if (label) label.textContent = enabled ? 'On' : 'Off';
-}
-
-async function refreshSandboxInfo() {
-  try {
-    const info = await invoke('get_sandbox_status');
-    const row = $('row-sandbox-info');
-    const block = $('sandbox-info-block');
-    const sizeEl = $('sandbox-size');
-    if (!row || !block) return;
-
-    if (!info) {
-      row.style.display = 'none';
-      return;
-    }
-
-    row.style.display = '';
-    block.innerHTML = `
-      <div class="sandbox-dir-row"><span class="sandbox-dir-label">lower</span><code class="sandbox-dir-path">${escHtml(info.lower_dir)}</code></div>
-      <div class="sandbox-dir-row"><span class="sandbox-dir-label">upper</span><code class="sandbox-dir-path">${escHtml(info.upper_dir)}</code></div>
-    `;
-
-    // Fetch size asynchronously (best-effort)
-    try {
-      const bytes = await invoke('get_sandbox_size');
-      if (sizeEl) sizeEl.textContent = bytes > 0 ? fmtBytes(bytes) : '';
-    } catch {}
-  } catch {}
-}
-
-function fmtBytes(bytes) {
-  if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(1) + ' GB';
-  if (bytes >= 1_048_576)     return (bytes / 1_048_576).toFixed(1) + ' MB';
-  if (bytes >= 1_024)         return (bytes / 1_024).toFixed(1) + ' KB';
-  return bytes + ' B';
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-function setSidebarCollapsed(collapsed) {
-  State.sidebarCollapsed = !!collapsed;
-  document.querySelector('.layout')?.classList.toggle('sidebar-collapsed', State.sidebarCollapsed);
-  localStorage.setItem('mowis_sidebar_collapsed', State.sidebarCollapsed ? '1' : '0');
-  const btn = $('btn-sidebar-toggle');
-  if (btn) {
-    btn.title = State.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar';
-    btn.setAttribute('aria-label', btn.title);
-  }
-}
+// ── Custom selects ────────────────────────────────────────────────────────────
 
 function initCustomSelects() {
   document.querySelectorAll('select.mini-select, select.form-select').forEach(select => {
@@ -2561,173 +758,7 @@ function initCustomSelects() {
   });
 }
 
-function syncCustomSelect(selectOrId) {
-  const select = typeof selectOrId === 'string' ? $(selectOrId) : selectOrId;
-  if (!select) return;
-  const wrap = document.querySelector(`.custom-select[data-select-id="${select.id}"]`);
-  if (!wrap) return;
-  const button = wrap.querySelector('.custom-select-button');
-  const menu = wrap.querySelector('.custom-select-menu');
-  const selected = select.options[select.selectedIndex];
-  if (button) button.textContent = selected?.textContent || '';
-  if (!menu) return;
-  menu.innerHTML = Array.from(select.options).map(option => `
-    <button type="button" class="custom-select-option ${option.value === select.value ? 'selected' : ''}" data-value="${escHtml(option.value)}">
-      ${escHtml(option.textContent)}
-    </button>`).join('');
-  menu.querySelectorAll('.custom-select-option').forEach(optionBtn => {
-    optionBtn.addEventListener('click', () => {
-      select.value = optionBtn.dataset.value;
-      select.dispatchEvent(new Event('change', { bubbles: true }));
-      wrap.classList.remove('open');
-      syncCustomSelect(select);
-    });
-  });
-}
-
-async function pickDirectory() {
-  if (!isTauri()) {
-    return 'C:/MowisAI/mock-repositories';
-  }
-  const picked = await openDialogNative({ directory: true, multiple: false });
-  return Array.isArray(picked) ? picked[0] : picked;
-}
-
-function setRepoStatus(message, type = 'info') {
-  const status = $('repo-status');
-  if (!status) return;
-  status.textContent = message || '';
-  status.className = `repo-status ${type}`;
-}
-
-function setRepoBusy(isBusy) {
-  ['repo-pick-local', 'repo-pick-destination', 'repo-clone', 'repo-use'].forEach(id => {
-    const el = $(id);
-    if (el) el.disabled = !!isBusy;
-  });
-}
-
-function showRepoModal() {
-  const modal = $('repo-modal');
-  if (!modal) return;
-  modal.classList.remove('hidden');
-  modal.setAttribute('aria-hidden', 'false');
-  setRepoStatus('');
-  if (!State.selectedRepo) {
-    $('repo-selected')?.classList.add('hidden');
-    const urlInput = $('repo-url');
-    if (urlInput) urlInput.value = '';
-    setText('repo-destination-label', 'No folder selected');
-    State.cloneDestination = null;
-  }
-  $('repo-url')?.focus();
-}
-
-function hideRepoModal() {
-  const modal = $('repo-modal');
-  if (!modal) return;
-  modal.classList.add('hidden');
-  modal.setAttribute('aria-hidden', 'true');
-}
-
-function setRepoTab(tab) {
-  document.querySelectorAll('.repo-tab').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.repoTab === tab);
-  });
-  document.querySelectorAll('.repo-panel').forEach(panel => {
-    panel.classList.toggle('active', panel.id === `repo-panel-${tab}`);
-  });
-  setRepoStatus('');
-}
-
-function stageSelectedRepo(info) {
-  State.selectedRepo = info;
-  $('repo-selected')?.classList.remove('hidden');
-  setText('repo-selected-name', info?.name || 'repository');
-  setText('repo-selected-path', info?.path || '');
-  renderRepoChip();
-}
-
-function renderRepoChip() {
-  const btn = $('btn-repo-open');
-  if (!btn) return;
-  const repo = State.selectedRepo;
-  const span = btn.querySelector('span');
-  if (repo) {
-    btn.classList.add('has-repo');
-    btn.title = repo.name || 'repository';
-    if (span) span.textContent = repo.name || 'repository';
-  } else {
-    btn.classList.remove('has-repo');
-    btn.title = 'Add GitHub repository';
-    if (span) span.textContent = 'Add GitHub repository';
-  }
-}
-
-async function handlePickLocalRepo() {
-  try {
-    const path = await pickDirectory();
-    if (!path) return;
-    setRepoBusy(true);
-    setRepoStatus('Checking repository...');
-    const info = await invoke('validate_git_repository', { path });
-    stageSelectedRepo(info);
-    setRepoStatus('Repository ready', 'success');
-  } catch (err) {
-    setRepoStatus(String(err), 'error');
-  } finally {
-    setRepoBusy(false);
-  }
-}
-
-async function handlePickCloneDestination() {
-  try {
-    const path = await pickDirectory();
-    if (!path) return;
-    State.cloneDestination = path;
-    setText('repo-destination-label', path);
-    setRepoStatus('');
-  } catch (err) {
-    setRepoStatus(String(err), 'error');
-  }
-}
-
-async function handleCloneGitHubRepo() {
-  const repoUrl = $('repo-url')?.value.trim();
-  if (!parseGitHubRepoName(repoUrl)) {
-    setRepoStatus('Paste a GitHub URL like https://github.com/owner/repo', 'error');
-    return;
-  }
-  if (!State.cloneDestination) {
-    setRepoStatus('Choose a destination folder', 'error');
-    return;
-  }
-
-  try {
-    setRepoBusy(true);
-    setRepoStatus('Cloning repository...');
-    const info = await invoke('clone_github_repo', {
-      repoUrl,
-      destinationParent: State.cloneDestination,
-    });
-    stageSelectedRepo(info);
-    setRepoStatus('Repository cloned', 'success');
-  } catch (err) {
-    setRepoStatus(String(err), 'error');
-  } finally {
-    setRepoBusy(false);
-  }
-}
-
-function useSelectedRepo() {
-  if (!State.selectedRepo) {
-    setRepoStatus('Select or clone a repository first', 'error');
-    return;
-  }
-  renderRepoChip();
-  hideRepoModal();
-  toast('Repository attached', 'success');
-}
+// ── Handlers ──────────────────────────────────────────────────────────────────
 
 function setupHandlers() {
   const taskClose = $('task-panel-toggle');
@@ -2739,29 +770,9 @@ function setupHandlers() {
   });
   $('btn-sidebar-toggle')?.addEventListener('click', () => setSidebarCollapsed(!State.sidebarCollapsed));
   $('btn-chat-home')?.addEventListener('click', () => navigate('home'));
-  $('btn-repo-open')?.addEventListener('click', showRepoModal);
-  $('repo-close')?.addEventListener('click', hideRepoModal);
-  $('repo-backdrop')?.addEventListener('click', hideRepoModal);
-  $('repo-pick-local')?.addEventListener('click', handlePickLocalRepo);
-  $('repo-pick-destination')?.addEventListener('click', handlePickCloneDestination);
-  $('repo-clone')?.addEventListener('click', handleCloneGitHubRepo);
-  $('repo-use')?.addEventListener('click', useSelectedRepo);
-  $('repo-remove')?.addEventListener('click', () => {
-    State.selectedRepo = null;
-    State.cloneDestination = null;
-    $('repo-selected')?.classList.add('hidden');
-    const urlInput = $('repo-url');
-    if (urlInput) urlInput.value = '';
-    setText('repo-destination-label', 'No folder selected');
-    setRepoStatus('');
-    renderRepoChip();
-  });
-  document.querySelectorAll('.repo-tab').forEach(tab => {
-    tab.addEventListener('click', () => setRepoTab(tab.dataset.repoTab));
-  });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !$('repo-modal')?.classList.contains('hidden')) hideRepoModal();
-  });
+
+  // Repo (delegated to modals module)
+  setupRepoHandlers();
 
   // Home send
   $('btn-home-send')?.addEventListener('click', () => {
@@ -2778,7 +789,6 @@ function setupHandlers() {
     }
   });
 
-  // Show/hide agent-mode hint when home mode selector changes.
   $('home-mode')?.addEventListener('change', (e) => {
     updateHomeAgentHint(e.target.value);
     syncCustomSelect($('home-mode'));
@@ -2829,38 +839,19 @@ function setupHandlers() {
 
   // Settings
   $('btn-save-settings')?.addEventListener('click', saveSettings);
+  setupSettingsHandlers();
+
   $('btn-engine-point')?.addEventListener('click', async () => {
     toast('Point to your QEMU installation', 'info');
     await handlePointInstallationFlow();
   });
   $('btn-engine-developer')?.addEventListener('click', () => {
-    if (typeof showDeveloperBootstrap === 'function') showDeveloperBootstrap();
-  });
-  $('set-provider')?.addEventListener('change', (e) => {
-    const rowGcp = $('row-gcp');
-    const rowGcpRegion = $('row-gcp-region');
-    const rowSaKey = $('row-sa-key');
-    const showVertex = e.target.value === 'vertex';
-    if (rowGcp) rowGcp.style.display = showVertex ? '' : 'none';
-    if (rowGcpRegion) rowGcpRegion.style.display = showVertex ? '' : 'none';
-    if (rowSaKey) rowSaKey.style.display = showVertex ? '' : 'none';
-    populateModelDropdown(e.target.value);
-    if (e.tagName === 'SELECT') syncCustomSelect(e);
-  });
-  $('set-mode')?.addEventListener('change', (e) => {
-    updateSettingsAgentHint(e.target.value);
+    showDeveloperBootstrap();
   });
 
-  // Sandbox toggle — update label live
-  $('set-sandbox-enabled')?.addEventListener('change', (e) => {
-    updateSandboxToggleLabel(e.target.checked);
-  });
-
-  // Discard sandbox button
   $('btn-discard-sandbox')?.addEventListener('click', async () => {
     try {
       await invoke('discard_sandbox');
-      await refreshSandboxInfo();
       toast('Sandbox discarded', 'success');
     } catch (err) {
       toast('Could not discard sandbox: ' + err, 'error');
@@ -2885,7 +876,8 @@ function setupHandlers() {
       });
       if (selected) {
         const path = Array.isArray(selected) ? selected[0] : selected;
-        setVal('set-sa-key', path);
+        const el = $('set-sa-key');
+        if (el) el.value = path;
       }
     } catch (e) {
       console.error('File dialog error:', e);
@@ -2905,13 +897,11 @@ async function sendChatMessage() {
   const fullText = text;
   clearAttachments();
 
-  // Show user message
   appendChatMessage({ kind: 'user', content: fullText, ts: nowTs() });
   input.value = '';
   autoResize.call(input);
 
   if (State.agentSessionId && State.agentHealthy) {
-    // Send via mowis-agent
     appendThinkingIndicator();
     setSessionActive(true);
     try {
@@ -2920,14 +910,12 @@ async function sendChatMessage() {
         text: fullText,
         background: true,
       });
-      // Polling will pick up the response
       startAgentPolling(State.agentSessionId);
     } catch (err) {
       removeThinkingIndicator();
       appendChatMessage({ kind: 'error', content: `Failed to send: ${err}`, ts: nowTs() });
     }
   } else {
-    // Fallback: old send_message
     try {
       await invoke('send_message', { message: fullText, images: null });
     } catch (err) {
@@ -2941,466 +929,33 @@ function autoResize() {
   this.style.height = Math.min(this.scrollHeight, 120) + 'px';
 }
 
-// ── Speech Recognition (Mic button) ──────────────────────────────────────────
+// ── Restore session ──────────────────────────────────────────────────────────
 
-function initSpeechRecognition() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
-    console.warn('Speech recognition not available');
-    document.querySelectorAll('.btn-mic').forEach(b => b.style.display = 'none');
-    return;
-  }
-
-  const recognition = new SR();
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  recognition.lang = 'en-US';
-
-  let activeBtn = null;
-  let activeTextarea = null;
-  let isRecording = false;
-  let finalTranscript = '';
-  let silenceTimer = null;
-  const SILENCE_TIMEOUT = 3000; // 3 seconds before auto-stop
-  let audioCtx = null;
-  let analyser = null;
-  let micStream = null;
-  let animFrame = null;
-
-  const waveformOverlay = $('waveform-overlay');
-  const waveformCanvas = $('waveform-canvas');
-  const waveformCancel = $('waveform-cancel');
-  const waveformDone = $('waveform-done');
-
-  function drawWaveform(canvas, analyserNode) {
-    const ctx = canvas.getContext('2d');
-    const W = canvas.width;
-    const H = canvas.height;
-    const data = new Uint8Array(analyserNode.frequencyBinCount);
-
-    function frame() {
-      if (!isRecording) {
-        ctx.clearRect(0, 0, W, H);
-        return;
-      }
-      animFrame = requestAnimationFrame(frame);
-      analyserNode.getByteFrequencyData(data);
-
-      ctx.clearRect(0, 0, W, H);
-      
-      // Minimal waveform bars - clean and elegant
-      const barCount = 80;
-      const barW = 2;
-      const gap = 4;
-      const totalW = barCount * (barW + gap) - gap;
-      const startX = (W - totalW) / 2;
-      
-      // Simple white/gray color
-      ctx.fillStyle = 'rgba(235, 235, 236, 0.7)';
-
-      for (let i = 0; i < barCount; i++) {
-        const idx = Math.floor((i + 1) * data.length / (barCount + 1));
-        const val = data[idx] / 255;
-        
-        // Smooth, minimal heights
-        const barH = Math.max(2, val * (H * 0.85));
-        const x = startX + i * (barW + gap);
-        const y = (H - barH) / 2;
-        
-        ctx.fillRect(x, y, barW, barH);
-      }
-    }
-    frame();
-  }
-
-  function drawBars(canvas, analyserNode) {
-    const ctx = canvas.getContext('2d');
-    const W = canvas.width;
-    const H = canvas.height;
-    const data = new Uint8Array(analyserNode.frequencyBinCount);
-
-    function frame() {
-      if (!isRecording) {
-        ctx.clearRect(0, 0, W, H);
-        return;
-      }
-      animFrame = requestAnimationFrame(frame);
-      analyserNode.getByteFrequencyData(data);
-
-      ctx.clearRect(0, 0, W, H);
-      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--blue').trim() || '#4a9eff';
-
-      const barCount = 5;
-      const barW = 2;
-      const gap = 2;
-      const totalW = barCount * barW + (barCount - 1) * gap;
-      const startX = (W - totalW) / 2;
-
-      for (let i = 0; i < barCount; i++) {
-        // Sample different frequency bands for each bar
-        const idx = Math.floor((i + 1) * data.length / (barCount + 1));
-        const val = data[idx] / 255;
-        const barH = Math.max(3, val * (H - 2));
-        const x = startX + i * (barW + gap);
-        const y = (H - barH) / 2;
-        ctx.fillRect(x, y, barW, barH);
-      }
-    }
-    frame();
-  }
-
-  async function startAudioViz(btn) {
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const source = audioCtx.createMediaStreamSource(micStream);
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 128;
-      source.connect(analyser);
-
-      // Draw on both button canvas and overlay canvas
-      const canvas = btn.querySelector('.mic-bars');
-      if (canvas) drawBars(canvas, analyser);
-      
-      if (waveformCanvas) {
-        drawWaveform(waveformCanvas, analyser);
-      }
-    } catch (e) {
-      console.warn('Mic access denied:', e);
-    }
-  }
-
-  function stopAudioViz() {
-    if (animFrame) cancelAnimationFrame(animFrame);
-    animFrame = null;
-    if (micStream) {
-      micStream.getTracks().forEach(t => t.stop());
-      micStream = null;
-    }
-    if (audioCtx) {
-      audioCtx.close();
-      audioCtx = null;
-    }
-    analyser = null;
-    // Clear canvases
-    document.querySelectorAll('.mic-bars').forEach(c => {
-      c.getContext('2d').clearRect(0, 0, c.width, c.height);
-    });
-    if (waveformCanvas) {
-      waveformCanvas.getContext('2d').clearRect(0, 0, waveformCanvas.width, waveformCanvas.height);
-    }
-  }
-
-  function showWaveformOverlay() {
-    // Removed — keep only inline mic indicator
-  }
-
-  function hideWaveformOverlay() {
-    // Removed — keep only inline mic indicator
-  }
-
-  recognition.onresult = (event) => {
-    // Reset silence timer — speech detected
-    if (silenceTimer) clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => {
-      if (isRecording) recognition.stop();
-    }, SILENCE_TIMEOUT);
-
-    let interim = '';
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      if (event.results[i].isFinal) {
-        finalTranscript += event.results[i][0].transcript;
-      } else {
-        interim += event.results[i][0].transcript;
-      }
-    }
-    if (activeTextarea) {
-      const base = activeTextarea.dataset.preSpeech || '';
-      activeTextarea.value = base + finalTranscript + interim;
-    }
-  };
-
-  recognition.onend = () => {
-    if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
-    isRecording = false;
-    stopAudioViz();
-    if (activeBtn) activeBtn.classList.remove('recording');
-    if (activeTextarea) {
-      const base = activeTextarea.dataset.preSpeech || '';
-      activeTextarea.value = base + finalTranscript;
-      delete activeTextarea.dataset.preSpeech;
-    }
-    activeBtn = null;
-    activeTextarea = null;
-    finalTranscript = '';
-  };
-
-  recognition.onerror = (e) => {
-    console.error('Speech recognition error:', e.error);
-    isRecording = false;
-    stopAudioViz();
-    hideWaveformOverlay();
-    if (activeBtn) activeBtn.classList.remove('recording');
-    activeBtn = null;
-    activeTextarea = null;
-    finalTranscript = '';
-  };
-
-  async function toggleMic(btn, textarea) {
-    if (isRecording) {
-      recognition.stop();
+async function restoreInitialSession() {
+  try {
+    const [hist, detail] = await Promise.all([
+      invoke('get_session_history'),
+      invoke('get_current_session'),
+    ]);
+    setText('sb-badge-sessions', hist?.length ? String(hist.length) : '');
+    if (detail?.summary?.status === 'running') {
+      renderSessionDetail(detail);
+      navigate('home', { preserveHomeMode: true });
     } else {
-      activeBtn = btn;
-      activeTextarea = textarea;
-      finalTranscript = '';
-      textarea.dataset.preSpeech = textarea.value;
-      btn.classList.add('recording');
-      isRecording = true;
-      showWaveformOverlay();
-      await startAudioViz(btn);
-      recognition.start();
+      await showHomeLanding({ clearBackend: false });
     }
+  } catch {
+    await showHomeLanding({ clearBackend: false });
   }
-
-  // Waveform overlay button handlers
-  if (waveformCancel) {
-    waveformCancel.addEventListener('click', () => {
-      if (isRecording) {
-        recognition.stop();
-        // Clear the textarea back to original
-        if (activeTextarea && activeTextarea.dataset.preSpeech !== undefined) {
-          activeTextarea.value = activeTextarea.dataset.preSpeech;
-        }
-        finalTranscript = '';
-      }
-    });
-  }
-
-  if (waveformDone) {
-    waveformDone.addEventListener('click', () => {
-      if (isRecording) {
-        recognition.stop();
-      }
-    });
-  }
-
-  $('btn-home-mic')?.addEventListener('click', () => toggleMic($('btn-home-mic'), $('home-input')));
-  $('btn-chat-mic')?.addEventListener('click', () => toggleMic($('btn-chat-mic'), $('chat-input')));
-}
-
-// ── File Upload (Attach button) ──────────────────────────────────────────────
-
-const pendingAttachments = [];
-
-function renderAttachments() {
-  // Render in BOTH compose areas (home + chat)
-  ['home-attachments', 'compose-attachments'].forEach(id => {
-    const container = $(id);
-    if (!container) return;
-    if (pendingAttachments.length === 0) {
-      container.classList.add('hidden');
-      container.innerHTML = '';
-      return;
-    }
-    container.classList.remove('hidden');
-    container.innerHTML = pendingAttachments.map((f, i) => {
-      if (f.isImage && f.dataUrl) {
-        return `<div class="attach-chip attach-img">
-          <img src="${f.dataUrl}" alt="${escHtml(f.name)}">
-          <span class="attach-name">${escHtml(f.name)}</span>
-          <button class="attach-remove" data-idx="${i}" title="Remove">&times;</button>
-        </div>`;
-      }
-      return `<div class="attach-chip">
-        <span class="material-symbols-outlined" style="font-size:14px">description</span>
-        <span class="attach-name">${escHtml(f.name)}</span>
-        <button class="attach-remove" data-idx="${i}" title="Remove">&times;</button>
-      </div>`;
-    }).join('');
-    container.querySelectorAll('.attach-remove').forEach(el => {
-      el.addEventListener('click', (e) => {
-        e.stopPropagation();
-        pendingAttachments.splice(Number(el.dataset.idx), 1);
-        renderAttachments();
-      });
-    });
-  });
-}
-
-function handleFileSelect(files) {
-  for (const file of files) {
-    const isImage = file.type.startsWith('image/');
-    const entry = { name: file.name, type: file.type, size: file.size, isImage, dataUrl: null, base64: null };
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (isImage) {
-        entry.dataUrl = reader.result; // full data:image/...;base64,... URL for preview
-        entry.base64 = reader.result.split(',')[1]; // raw base64 for API
-      } else {
-        entry.base64 = btoa(reader.result);
-      }
-      renderAttachments();
-    };
-    if (isImage) {
-      reader.readAsDataURL(file);
-    } else {
-      reader.readAsBinaryString(file);
-    }
-    pendingAttachments.push(entry);
-  }
-  renderAttachments();
-}
-
-function buildAttachmentPayload() {
-  // Returns { text: string, images: [{data_url, media_type}] }
-  // Text is NEVER polluted with base64 data
-  const images = [];
-  const fileNames = [];
-  for (const f of pendingAttachments) {
-    if (f.isImage && f.base64) {
-      images.push({ data_url: `data:${f.type};base64,${f.base64}`, media_type: f.type, name: f.name });
-      fileNames.push(`[image: ${f.name}]`);
-    } else if (f.base64) {
-      fileNames.push(`[file: ${f.name} (${f.type}, ${Math.round(f.size/1024)}KB)]`);
-    }
-  }
-  return { fileRef: fileNames.join(' '), images };
-}
-
-function clearAttachments() {
-  pendingAttachments.length = 0;
-  renderAttachments();
-}
-
-function initFileUpload() {
-  const homeInput = $('home-file-input');
-  const chatInput = $('chat-file-input');
-
-  $('btn-home-attach')?.addEventListener('click', () => homeInput?.click());
-  $('btn-chat-attach')?.addEventListener('click', () => chatInput?.click());
-
-  homeInput?.addEventListener('change', (e) => { handleFileSelect(e.target.files); e.target.value = ''; });
-  chatInput?.addEventListener('change', (e) => { handleFileSelect(e.target.files); e.target.value = ''; });
-
-  // Drag and drop on compose areas
-  ['home-compose', 'compose-inner'].forEach(id => {
-    const el = $(id);
-    if (!el) return;
-    el.addEventListener('dragover', (e) => { e.preventDefault(); el.style.borderColor = 'var(--blue)'; });
-    el.addEventListener('dragleave', () => { el.style.borderColor = ''; });
-    el.addEventListener('drop', (e) => {
-      e.preventDefault();
-      el.style.borderColor = '';
-      if (e.dataTransfer.files.length) handleFileSelect(e.dataTransfer.files);
-    });
-  });
-}
-
-// ── Markdown-lite renderer ────────────────────────────────────────────────────
-
-function mdLite(text) {
-  return escHtml(text)
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/`(.+?)`/g, '<code>$1</code>')
-    .replace(/\n/g, '<br>');
-}
-
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 init().catch(console.error);
 
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Developer Mode Bootstrap
-// ══════════════════════════════════════════════════════════════════════════════
-
-function showDeveloperBootstrap() {
-  const modal = document.getElementById('developer-bootstrap-modal');
-  if (!modal) return;
-  modal.classList.remove('hidden');
-  modal.setAttribute('aria-hidden', 'false');
-
-  const statusEl = document.getElementById('dev-bs-status');
-  if (statusEl) { statusEl.classList.add('hidden'); statusEl.textContent = ''; }
-
-  // Load existing config to prefill fields
-  invoke('get_developer_config').then(cfg => {
-    setVal('dev-bs-qemu', cfg.qemu_path);
-    setVal('dev-bs-iso', cfg.iso_path);
-    setVal('dev-bs-disk', cfg.disk_path);
-    setVal('dev-bs-port', cfg.agent_port || 8080);
-  }).catch(() => {});
-}
-
-function hideDeveloperBootstrap() {
-  const modal = document.getElementById('developer-bootstrap-modal');
-  if (!modal) return;
-  modal.classList.add('hidden');
-  modal.setAttribute('aria-hidden', 'true');
-}
-
-async function startDeveloperBootstrap() {
-  const qemu = document.getElementById('dev-bs-qemu')?.value?.trim();
-  const iso  = document.getElementById('dev-bs-iso')?.value?.trim();
-  const disk = document.getElementById('dev-bs-disk')?.value?.trim();
-  const port = parseInt(document.getElementById('dev-bs-port')?.value || '8080', 10);
-
-  if (!qemu || !iso || !disk) {
-    toast('All three paths (QEMU, ISO, Disk) are required', 'error');
-    return;
-  }
-
-  const statusEl = document.getElementById('dev-bs-status');
-  if (statusEl) {
-    statusEl.classList.remove('hidden');
-    statusEl.textContent = 'Saving configuration...';
-    statusEl.className = 'dev-bootstrap-status';
-  }
-
-  const config = {
-    qemu_path: qemu,
-    iso_path: iso,
-    disk_path: disk,
-    ram_mb: 512,
-    agent_port: port,
-    monitor_port: 4445,
-    serial_port: 4444,
-    mount_point: '/mnt/mowisai',
-    disk_device: '/dev/sda',
-    agentd_path: '/mnt/mowisai/agentd',
-  };
-
-  try {
-    const result = await invoke('start_developer_bootstrap', { config });
-
-    if (statusEl) {
-      statusEl.textContent = 'Config saved. Restarting...';
-      statusEl.className = 'dev-bootstrap-status ok';
-    }
-
-    toast('Configuration saved. Restarting to bootstrap QEMU...', 'success');
-
-    // Reload the app — the bridge will detect the developer config and use
-    // DeveloperLauncher to auto-boot the VM.
-    setTimeout(() => window.location.reload(), 1500);
-  } catch (e) {
-    if (statusEl) {
-      statusEl.textContent = String(e);
-      statusEl.className = 'dev-bootstrap-status err';
-    }
-    toast('Bootstrap failed: ' + e, 'error');
-  }
-}
-
-// ── Wire up bootstrap modal ──────────────────────────────────────────────────
+// ── Developer bootstrap DOMContentLoaded wiring ──────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Developer Mode button in engine setup modal
   const devBtn = document.getElementById('engine-developer');
   if (devBtn) {
     devBtn.addEventListener('click', () => {
@@ -3409,51 +964,5 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Cancel button
-  const cancelBtn = document.getElementById('dev-bs-cancel');
-  if (cancelBtn) {
-    cancelBtn.addEventListener('click', hideDeveloperBootstrap);
-  }
-
-  // Start button
-  const startBtn = document.getElementById('dev-bs-start');
-  if (startBtn) {
-    startBtn.addEventListener('click', startDeveloperBootstrap);
-  }
-
-  // Browse buttons
-  const browseBtns = [
-    { btnId: 'dev-bs-browse-qemu', inputId: 'dev-bs-qemu', title: 'Select QEMU Binary' },
-    { btnId: 'dev-bs-browse-iso',  inputId: 'dev-bs-iso',  title: 'Select ISO File' },
-    { btnId: 'dev-bs-browse-disk', inputId: 'dev-bs-disk', title: 'Select Disk Image' },
-  ];
-  browseBtns.forEach(({ btnId, inputId, title }) => {
-    const btn = document.getElementById(btnId);
-    if (btn) {
-      btn.addEventListener('click', async () => {
-        if (!isTauri()) {
-          toast('File browser not available in web mode', 'error');
-          return;
-        }
-        try {
-          const selected = await openDialogNative({ title, multiple: false, directory: false });
-          if (selected) {
-            const input = document.getElementById(inputId);
-            if (input) input.value = Array.isArray(selected) ? selected[0] : selected;
-          }
-        } catch (e) {
-          console.error('File dialog error:', e);
-        }
-      });
-    }
-  });
-
-  // Close on backdrop click
-  const bootstrapModal = document.getElementById('developer-bootstrap-modal');
-  if (bootstrapModal) {
-    const backdrop = bootstrapModal.querySelector('.engine-modal-backdrop');
-    if (backdrop) {
-      backdrop.addEventListener('click', hideDeveloperBootstrap);
-    }
-  }
+  setupDeveloperBootstrapHandlers();
 });
