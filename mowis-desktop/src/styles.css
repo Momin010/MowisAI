@@ -3368,10 +3368,50 @@ a { text-decoration: none; color: inherit; }
 }
 .usage-chart-main { flex: 2; }
 .usage-chart-donut-card { flex: 1; min-width: 220px; }
-.usage-chart { width: 100%; }
+.usage-chart { width: 100%; position: relative; }
 .usage-chart svg { width: 100%; height: auto; }
 .usage-chart-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
 .usage-chart-total { font-family: var(--serif); font-size: 20px; color: var(--tx); }
+
+/* Chart tooltip */
+.chart-tooltip {
+  position: absolute;
+  background: var(--bg-4);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  padding: 8px 12px;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+  z-index: 10;
+  box-shadow: var(--shadow-md);
+  animation: fadeIn 0.15s ease;
+}
+.chart-tooltip-title {
+  font-size: 11px;
+  color: var(--tx-3);
+  margin-bottom: 2px;
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chart-tooltip-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tx);
+}
+
+/* Chart animations */
+@keyframes chartFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes chartLineIn {
+  from { stroke-dashoffset: 1000; }
+  to { stroke-dashoffset: 0; }
+}
+.chart-area { opacity: 0; animation: chartFadeIn 0.8s ease forwards; }
 
 /* Donut chart */
 .usage-donut-wrap { display: flex; align-items: center; gap: 12px; margin-top: 8px; }

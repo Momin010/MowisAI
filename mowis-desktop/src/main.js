@@ -2142,16 +2142,53 @@ function renderUsageChart(usage, stats) {
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img">
     <defs>
       <linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="rgba(59,139,255,0.25)"/>
-        <stop offset="100%" stop-color="rgba(59,139,255,0)"/>
+        <stop offset="0%" stop-color="rgba(255,255,255,0.08)"/>
+        <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
       </linearGradient>
     </defs>
     ${gridLines}
-    <path d="${areaD}" fill="url(#chart-fill)"/>
-    <path d="${lineD}" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    ${pts.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="3" fill="var(--blue)" opacity="0.8"/>`).join('')}
+    <path d="${areaD}" fill="url(#chart-fill)" class="chart-area"/>
+    <path d="${lineD}" fill="none" stroke="var(--tx-3)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>
+    ${pts.map((p, i) => `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--tx)" opacity="0" class="chart-dot" data-idx="${i}" style="cursor:pointer"/>`).join('')}
     ${xLabels}
-  </svg>`;
+  </svg>
+  <div class="chart-tooltip hidden" id="chart-tooltip"></div>`;
+
+  // Hover tooltip
+  const tooltip = el.querySelector('#chart-tooltip');
+  const dots = el.querySelectorAll('.chart-dot');
+  dots.forEach(dot => {
+    dot.addEventListener('mouseenter', (e) => {
+      const idx = parseInt(dot.dataset.idx);
+      const pt = pts[idx];
+      if (!pt || !tooltip) return;
+      const item = pt.item;
+      const tokens = fmtTokens(item.tokens || 0);
+      const prompt = (item.prompt_short || item.prompt || 'Session').slice(0, 40);
+      tooltip.innerHTML = `<div class="chart-tooltip-title">${escHtml(prompt)}</div><div class="chart-tooltip-value">${tokens} tokens</div>`;
+      tooltip.classList.remove('hidden');
+      const rect = el.getBoundingClientRect();
+      const dotRect = dot.getBoundingClientRect();
+      tooltip.style.left = (dotRect.left - rect.left + dotRect.width / 2) + 'px';
+      tooltip.style.top = (dotRect.top - rect.top - 8) + 'px';
+      dot.setAttribute('opacity', '1');
+    });
+    dot.addEventListener('mouseleave', () => {
+      if (tooltip) tooltip.classList.add('hidden');
+      dot.setAttribute('opacity', '0');
+    });
+  });
+
+  // Animate chart on enter
+  const area = el.querySelector('.chart-area');
+  const line = el.querySelector('.chart-line');
+  if (area) area.style.animation = 'chartFadeIn 0.8s ease forwards';
+  if (line) {
+    const length = line.getTotalLength ? line.getTotalLength() : 1000;
+    line.style.strokeDasharray = length;
+    line.style.strokeDashoffset = length;
+    line.style.animation = 'chartLineIn 1.2s ease forwards';
+  }
 }
 
 function renderDonutChart(stats) {
@@ -2167,11 +2204,11 @@ function renderDonutChart(stats) {
   }
 
   const segments = [
-    { label: 'Code Generation', pct: 0.32, color: '#3b8bff' },
-    { label: 'Planning', pct: 0.22, color: '#a78bfa' },
-    { label: 'Tool Calls', pct: 0.20, color: '#3ecf72' },
-    { label: 'Code Review', pct: 0.15, color: '#e8be4a' },
-    { label: 'Thinking', pct: 0.11, color: '#f05050' },
+    { label: 'Code Generation', pct: 0.32, color: 'rgba(255,255,255,0.5)' },
+    { label: 'Planning', pct: 0.22, color: 'rgba(255,255,255,0.35)' },
+    { label: 'Tool Calls', pct: 0.20, color: 'rgba(255,255,255,0.25)' },
+    { label: 'Code Review', pct: 0.15, color: 'rgba(255,255,255,0.15)' },
+    { label: 'Thinking', pct: 0.11, color: 'rgba(255,255,255,0.08)' },
   ];
 
   const cx = 100, cy = 90, r = 65, sw = 18;
@@ -2206,15 +2243,15 @@ function renderSuccessRate(hist) {
     <div class="usage-rate-ring-wrap">
       <svg class="usage-rate-ring" viewBox="0 0 120 120">
         <circle cx="60" cy="60" r="48" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="10"/>
-        <circle cx="60" cy="60" r="48" fill="none" stroke="${pct >= 80 ? 'var(--green)' : pct >= 50 ? 'var(--yellow)' : 'var(--red)'}" stroke-width="10" stroke-dasharray="${(pct / 100) * 301.6} ${301.6}" stroke-linecap="round" transform="rotate(-90 60 60)"/>
+        <circle cx="60" cy="60" r="48" fill="none" stroke="var(--tx-3)" stroke-width="10" stroke-dasharray="${(pct / 100) * 301.6} ${301.6}" stroke-linecap="round" transform="rotate(-90 60 60)"/>
         <text x="60" y="56" text-anchor="middle" fill="var(--tx)" font-family="var(--serif)" font-size="24">${pct}%</text>
         <text x="60" y="72" text-anchor="middle" fill="var(--tx-4)" font-size="9" font-family="var(--sans)">success</text>
       </svg>
     </div>
     <div class="usage-rate-bars">
-      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--green)"></span><span>Completed</span><span class="usage-rate-count">${done}</span></div>
-      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--red)"></span><span>Failed</span><span class="usage-rate-count">${failed}</span></div>
-      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--yellow)"></span><span>Stopped</span><span class="usage-rate-count">${stopped}</span></div>
+      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--tx-3)"></span><span>Completed</span><span class="usage-rate-count">${done}</span></div>
+      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--tx-4)"></span><span>Failed</span><span class="usage-rate-count">${failed}</span></div>
+      <div class="usage-rate-bar-row"><span class="usage-rate-dot" style="background:var(--tx-5)"></span><span>Stopped</span><span class="usage-rate-count">${stopped}</span></div>
     </div>`;
 }
 
@@ -2228,7 +2265,7 @@ function renderTimeline(hist) {
 
   el.innerHTML = `<div class="usage-timeline-track">${sorted.map((s, i) => {
     const h = Math.max(8, ((s.tokens || 0) / maxTokens) * 60);
-    const color = s.status === 'done' || s.status === 'complete' ? 'var(--green)' : s.status === 'error' || s.status === 'failed' ? 'var(--red)' : s.status === 'running' ? 'var(--blue)' : 'var(--yellow)';
+    const color = s.status === 'running' ? 'var(--tx-2)' : 'var(--tx-4)';
     return `<div class="usage-timeline-bar" style="height:${h}px;background:${color}" title="${escHtml(s.prompt?.slice(0, 40) || 'Session')} — ${fmtTokens(s.tokens || 0)} tokens"></div>`;
   }).join('')}</div>`;
 }
