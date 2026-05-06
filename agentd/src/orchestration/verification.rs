@@ -39,6 +39,13 @@ pub struct VerificationFunction {
     pub assertion: Option<String>,
     /// DAG deps — other VF ids that must pass before this one runs
     pub deps: Vec<TaskId>,
+    /// Timeout in seconds for running this VF (default 60)
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_timeout_secs() -> u64 {
+    60
 }
 
 /// Verification plan — generated ONCE before the loop starts.
@@ -567,7 +574,7 @@ impl VerificationLoop {
                 let sid = sandbox_id.clone();
                 let cid = container_id.clone();
                 let cmd_input = run_input.clone();
-                async move {
+                move || {
                     super::pooled_socket_request(&socket, &serde_json::json!({
                         "request_type": "invoke_tool",
                         "sandbox": sid,
@@ -919,7 +926,7 @@ These VFs cover the main implementation."#;
     #[test]
     fn test_with_test_timeout_sets_value() {
         let vl = VerificationLoop::new(
-            super::provider_client::LlmConfig::vertex("proj"),
+            crate::orchestration::provider_client::LlmConfig::vertex("proj"),
             3,
         ).with_test_timeout(120);
         assert_eq!(vl.planner.max_test_execution_time, 120);
@@ -928,7 +935,7 @@ These VFs cover the main implementation."#;
     #[test]
     fn test_default_timeout_is_60s() {
         let vl = VerificationLoop::new(
-            super::provider_client::LlmConfig::vertex("proj"),
+            crate::orchestration::provider_client::LlmConfig::vertex("proj"),
             3,
         );
         assert_eq!(vl.planner.max_test_execution_time, 60);
@@ -939,7 +946,7 @@ These VFs cover the main implementation."#;
     #[test]
     fn test_planner_new_defaults() {
         let p = VerificationPlanner::new(
-            super::provider_client::LlmConfig::vertex("test-project"),
+            crate::orchestration::provider_client::LlmConfig::vertex("test-project"),
             5,
         );
         assert_eq!(p.max_test_execution_time, 60);
@@ -958,6 +965,7 @@ These VFs cover the main implementation."#;
             expected_schema: None,
             assertion: Some("exit code 0".to_string()),
             deps: vec![],
+            timeout_secs: 30,
         };
         assert!(!vf.command.is_empty());
     }

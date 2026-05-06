@@ -319,7 +319,7 @@ pub fn cleanup_sandbox_stores(sandbox_id: &str) {
     if let Ok(mut mem) = MEMORY_STORE.lock() {
         mem.retain(|k, _| !k.starts_with(&prefix));
     }
-    if Ok(mut sec) = SECRET_STORE.lock() {
+    if let Ok(mut sec) = SECRET_STORE.lock() {
         sec.retain(|k, _| !k.starts_with(&prefix));
     }
     if let Ok(mut ch) = CHANNELS.lock() {

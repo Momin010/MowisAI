@@ -313,7 +313,7 @@ impl AgentExecutor {
                     checkpoint_id,
                     &agent.sandbox_name,
                     &agent.container_id,
-                ).await {
+                ) {
                     Ok(p) => p.to_string_lossy().to_string(),
                     Err(e) => {
                         log::warn!("Checkpoint snapshot failed (non-fatal): {}", e);

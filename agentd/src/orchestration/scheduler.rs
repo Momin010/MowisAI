@@ -317,12 +317,33 @@ impl Scheduler {
         self.sandbox_hints.get(task_id).cloned()
     }
 
-    /// Check if all tasks are resolved (completed, failed, or skipped)
+    /// Check if all tasks are resolved (completed, failed, skipped, or in-flight).
+    /// Returns true when there are no pending tasks left to dispatch.
     pub async fn is_complete(&self) -> bool {
+        // If any ready queues still have tasks, we're not done
+        {
+            let queues = self.ready_queues.read().await;
+            let ready_count: usize = queues.values().map(|q| q.len()).sum();
+            if ready_count > 0 {
+                return false;
+            }
+        }
+
+        // If any non-terminal task still has unmet deps, we're not done
         let completed = self.completed.read().await;
         let failed = self.failed.read().await;
         let skipped = self.skipped.read().await;
-        completed.len() + failed.len() + skipped.len() >= self.total_tasks
+
+        !self.dep_counter.iter().any(|entry| {
+            let count = entry.value().load(Ordering::SeqCst);
+            if count == 0 {
+                return false;
+            }
+            let task_id = entry.key();
+            !completed.contains(task_id)
+                && !failed.contains_key(task_id)
+                && !skipped.contains(task_id)
+        })
     }
 
     /// Get completion stats

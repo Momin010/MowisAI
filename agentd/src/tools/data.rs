@@ -107,7 +107,7 @@ impl Tool for CsvReadTool {
             .next()
             .unwrap_or(',');
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
         let content = fs::read_to_string(&path)?;
 
         let mut reader = csv::ReaderBuilder::new()
@@ -147,7 +147,7 @@ impl Tool for CsvWriteTool {
             .or_else(|| input["rows"].as_array())
             .ok_or_else(|| anyhow::anyhow!("csv_write: missing data/rows"))?;
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
