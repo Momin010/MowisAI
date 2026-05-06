@@ -2574,6 +2574,153 @@ a { text-decoration: none; color: inherit; }
   background: rgba(232,190,74,0.07) !important;
 }
 
+/* ── Agent Mode Badge ──────────────────────────────────── */
+.agent-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--green);
+  background: rgba(62, 207, 114, 0.10);
+  border: 1px solid rgba(62, 207, 114, 0.28);
+  border-radius: var(--r);
+  padding: 2px 7px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.agent-badge.sm { font-size: 7.5px; padding: 1px 4px; }
+
+.agent-mode-hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--tx-4);
+  padding: 6px 0;
+  animation: fadeIn 0.18s ease;
+}
+
+.agent-mode-settings-hint {
+  margin-top: 8px;
+  background: linear-gradient(135deg, rgba(62,207,114,0.08), rgba(62,207,114,0.03));
+  border: 1px solid rgba(62,207,114,0.18);
+  border-radius: var(--r2);
+  padding: 12px 14px;
+  font-size: 11.5px;
+  color: var(--tx-3);
+  line-height: 1.6;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  animation: fadeIn 0.18s ease;
+}
+
+/* ── Thinking Indicator ─────────────────────────────────── */
+.msg-bubble.thinking {
+  opacity: 0.5;
+  padding: 8px 16px;
+}
+.thinking-dots span {
+  animation: blink 1.4s infinite both;
+  font-size: 20px;
+  line-height: 1;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes blink {
+  0%, 80%, 100% { opacity: 0; }
+  40% { opacity: 1; }
+}
+
+/* ── Tool Call Cards ────────────────────────────────────── */
+.msg-row.tool-call {
+  padding: 0 40px;
+  margin: 4px 0;
+}
+.tool-call-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  padding: 10px 14px;
+  font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+}
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tool-call-icon {
+  color: var(--tx-4);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.tool-call-name {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--tx-2);
+  letter-spacing: 0.04em;
+}
+.tool-call-status {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: var(--r);
+  margin-left: auto;
+}
+.tool-call-status.running {
+  color: var(--blue);
+  background: rgba(59, 139, 255, 0.10);
+}
+.tool-call-status.done {
+  color: var(--green);
+  background: rgba(62, 207, 114, 0.10);
+}
+.tool-call-status.error {
+  color: var(--red);
+  background: rgba(240, 80, 80, 0.10);
+}
+.tool-call-input {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--tx-3);
+}
+.tool-call-input code {
+  background: rgba(255, 255, 255, 0.04);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.tool-call-result {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: var(--r);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--tx-4);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.tool-call-result.error {
+  color: var(--red);
+  background: rgba(240, 80, 80, 0.05);
+}
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(-3px); }
   to   { opacity: 1; transform: translateY(0); }

@@ -12,7 +12,8 @@ const State = {
   page: 'home',
   homeMode: 'new',
   sessionActive: false,
-  sessionId: null,
+  sessionId: null,           // agent session ID (from mowis-agent)
+  agentSessionId: null,      // mowis-agent session ID
   taskPanelOpen: false,
   selectedTaskId: null,
   sidebarCollapsed: localStorage.getItem('mowis_sidebar_collapsed') === '1',
@@ -20,19 +21,22 @@ const State = {
   streamingContent: '',
   isStreaming: false,
   daemonConnected: false,
+  agentHealthy: false,       // mowis-agent health status
   config: null,
   selectedRepo: null,
   cloneDestination: null,
   setupError: null,
   stats: { tasks_total: 0, tasks_done: 0, tasks_running: 0, tokens_total: 0, tool_calls: 0 },
-  zeroWorkspacePath: null,  // set when a zero-mode session is active
-  fileChanges: [],          // recent FileChange[] batches
-  selectedChangePath: null, // selected file path for diff panel
-  planCardShown: false,     // only show the first plan card, skip the rest
+  zeroWorkspacePath: null,
+  fileChanges: [],
+  selectedChangePath: null,
+  planCardShown: false,
+  pollTimer: null,           // polling timer for agent messages
+  lastMessageCount: 0,       // track message count for polling
   diffTree: {
     query: '',
     actions: new Set(['created', 'modified', 'deleted', 'moved', 'read']),
-    expanded: new Set(), // folder paths
+    expanded: new Set(),
   },
 };
 
@@ -60,20 +64,20 @@ function hideEngineSetupModal() {
   modal.setAttribute('aria-hidden', 'true');
 }
 
-function setModeToZeroAndReflectUI() {
+function setModeToAgentAndReflectUI() {
   if (!State.config) State.config = {};
-  State.config.mode = 'zero';
+  State.config.mode = 'agent';
 
   const homeMode = $('home-mode');
   if (homeMode) {
-    homeMode.value = 'zero';
-    updateHomeZeroHint('zero');
+    homeMode.value = 'agent';
+    updateHomeAgentHint('agent');
     syncCustomSelect(homeMode);
   }
 
   const setMode = $('set-mode');
   if (setMode) {
-    setMode.value = 'zero';
+    setMode.value = 'agent';
     syncCustomSelect(setMode);
   }
 }
@@ -156,9 +160,9 @@ function setupEngineSetupModalHandlers() {
   if (continueBtn) {
     continueBtn.onclick = async () => {
       hideEngineSetupModal();
-      setModeToZeroAndReflectUI();
+      setModeToAgentAndReflectUI();
       try { await invoke('save_config', { config: State.config }); } catch {}
-      toast('Continuing in Zero-Protection mode', 'success');
+      toast('Continuing in Agent mode', 'success');
     };
   }
 
@@ -218,7 +222,9 @@ async function showHomeLanding({ clearBackend = false } = {}) {
   updateTaskPanelVisibility();
 
   if (clearBackend) {
+    stopAgentPolling();
     State.sessionId = null;
+    State.agentSessionId = null;
     State.tasks = {};
     State.streamingContent = '';
     State.isStreaming = false;
@@ -489,6 +495,18 @@ async function init() {
   // Check daemon — show guidance banner if offline
   await checkDaemonWithGuidance();
 
+  // Check mowis-agent health
+  try {
+    const health = await invoke('agent_health');
+    State.agentHealthy = health?.healthy === true;
+    if (State.agentHealthy) {
+      console.log('mowis-agent healthy, version:', health.version);
+    }
+  } catch {
+    State.agentHealthy = false;
+    console.log('mowis-agent not available — using fallback mode');
+  }
+
   // Setup event listeners — wrapped so a listener failure doesn't kill navigation
   try { await setupListeners(); } catch (e) { console.error('Listener setup failed:', e); }
 
@@ -733,13 +751,11 @@ async function setupListeners() {
   });
 }
 
-// ── Session start ─────────────────────────────────────────────────────────────
+// ── Session start (via mowis-agent) ─────────────────────────────────────────
 
 async function startSession(prompt, mode, repo = State.selectedRepo) {
   if (!prompt.trim() && pendingAttachments.length === 0) { toast('Enter a task description', 'error'); return; }
 
-  // Build attachment payload — images are NOT embedded in the text
-  const attach = buildAttachmentPayload();
   const fullPrompt = prompt.trim();
   clearAttachments();
 
@@ -750,6 +766,7 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
   State.isStreaming = false;
   State.streamingContent = '';
   State.planCardShown = false;
+  State.lastMessageCount = 0;
 
   const chatMessages = $('chat-messages');
   if (chatMessages) chatMessages.innerHTML = '';
@@ -758,12 +775,10 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
   if (taskPanelBody) taskPanelBody.innerHTML = '';
 
   showSessionShell();
-
   setSessionActive(true);
 
-  // Show user message immediately — file refs only, no binary data
-  const displayMsg = attach.fileRef ? `${fullPrompt}\n${attach.fileRef}` : fullPrompt;
-  appendChatMessage({ kind: 'user', content: displayMsg, ts: nowTs() });
+  // Show user message immediately
+  appendChatMessage({ kind: 'user', content: fullPrompt, ts: nowTs() });
   if (repo?.path) {
     appendChatMessage({
       kind: 'system',
@@ -772,34 +787,60 @@ async function startSession(prompt, mode, repo = State.selectedRepo) {
     });
   }
 
-  // Clear task panel
   updateTaskPanelVisibility();
 
   try {
-    const id = await invoke('start_session', {
-      prompt: fullPrompt,
-      mode: mode || 'auto',
-      projectPath: repo?.path || null,
-      repoUrl: repo?.repo_url || repo?.remote_url || null,
-      repoSource: repo?.source || null,
-      images: attach.images.length > 0 ? attach.images : null,
-    });
-    State.sessionId = id;
-    setText('compose-session-info', `session ${id.slice(0,12)}`);
-    setText('chat-session-title', prompt.slice(0, 120));
+    // Check agent health first
+    if (!State.agentHealthy) {
+      try {
+        const health = await invoke('agent_health');
+        State.agentHealthy = health?.healthy === true;
+      } catch {
+        State.agentHealthy = false;
+      }
+    }
 
-    // If zero mode, fetch and display the workspace path.
-    if ((mode || State.config?.mode) === 'zero') {
-      await refreshZeroWorkspace();
+    if (State.agentHealthy) {
+      // Create agent session
+      const title = fullPrompt.slice(0, 120);
+      const session = await invoke('agent_create_session', { title });
+      State.agentSessionId = session.id;
+      State.sessionId = session.id;
+      setText('compose-session-info', `session ${session.id.slice(0, 8)}`);
+      setText('chat-session-title', fullPrompt.slice(0, 120));
+
+      // Show thinking indicator
+      appendThinkingIndicator();
+
+      // Send message async — response comes via polling
+      await invoke('agent_send_message', {
+        sessionId: session.id,
+        text: fullPrompt,
+        background: true,
+      });
+
+      // Start polling for messages
+      startAgentPolling(session.id);
     } else {
-      updateZeroWorkspaceBar(null);
+      // Fallback: use old orchestration path
+      const id = await invoke('start_session', {
+        prompt: fullPrompt,
+        mode: mode || 'auto',
+        projectPath: repo?.path || null,
+        repoUrl: repo?.repo_url || repo?.remote_url || null,
+        repoSource: repo?.source || null,
+        images: null,
+      });
+      State.sessionId = id;
+      setText('compose-session-info', `session ${id.slice(0, 12)}`);
+      setText('chat-session-title', fullPrompt.slice(0, 120));
     }
   } catch (err) {
+    removeThinkingIndicator();
     appendChatMessage({ kind: 'error', content: String(err), ts: nowTs() });
     setSessionActive(false);
   }
 
-  // Navigate to home
   navigate('home', { preserveHomeMode: true });
 }
 
@@ -811,6 +852,193 @@ function setSessionActive(active, keepChat = false) {
   if (stopBtn) stopBtn.style.display = active ? '' : 'none';
   if (sendBtn) sendBtn.disabled = active;
   if (homeBtn) homeBtn.disabled = active;
+}
+
+// ── Agent polling ─────────────────────────────────────────────────────────
+
+function appendThinkingIndicator() {
+  const container = $('chat-messages');
+  if (!container) return;
+  const row = document.createElement('div');
+  row.className = 'msg-row agent';
+  row.id = 'thinking-indicator';
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble thinking';
+  bubble.innerHTML = '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>';
+  row.appendChild(bubble);
+  container.appendChild(row);
+  scrollToBottom(container);
+}
+
+function removeThinkingIndicator() {
+  $('thinking-indicator')?.remove();
+}
+
+function startAgentPolling(sessionId) {
+  stopAgentPolling();
+  State.lastMessageCount = 0;
+
+  async function poll() {
+    if (!State.agentSessionId || State.agentSessionId !== sessionId) return;
+    try {
+      const messages = await invoke('agent_list_messages', { sessionId });
+      if (!messages || !Array.isArray(messages)) return;
+
+      // Check if we have new messages
+      if (messages.length > State.lastMessageCount) {
+        const newMessages = messages.slice(State.lastMessageCount);
+        State.lastMessageCount = messages.length;
+
+        // Remove thinking indicator when we get new messages
+        removeThinkingIndicator();
+
+        for (const msg of newMessages) {
+          renderAgentMessage(msg);
+        }
+
+        // Check if agent is done (last message has finish part)
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg?.role === 'assistant') {
+          const hasFinish = (lastMsg.parts || []).some(p => p.type === 'finish');
+          if (hasFinish) {
+            // Agent finished — stop polling
+            finalizeStreaming();
+            setSessionActive(false, true);
+            stopAgentPolling();
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Agent poll error:', e);
+    }
+
+    // Continue polling
+    if (State.agentSessionId === sessionId) {
+      State.pollTimer = setTimeout(poll, 1000);
+    }
+  }
+
+  // Start first poll after a short delay
+  State.pollTimer = setTimeout(poll, 500);
+}
+
+function stopAgentPolling() {
+  if (State.pollTimer) {
+    clearTimeout(State.pollTimer);
+    State.pollTimer = null;
+  }
+}
+
+function renderAgentMessage(msg) {
+  if (!msg) return;
+
+  if (msg.role === 'user') {
+    // User messages are already rendered — skip duplicates
+    return;
+  }
+
+  if (msg.role === 'assistant') {
+    const parts = msg.parts || [];
+    for (const part of parts) {
+      if (part.type === 'text' && part.text) {
+        appendChatMessage({ kind: 'agent', content: part.text, streaming: false, ts: nowTs() });
+      } else if (part.type === 'tool_call') {
+        renderToolCall(part);
+      } else if (part.type === 'tool_result') {
+        renderToolResult(part);
+      }
+    }
+  }
+}
+
+function renderToolCall(part) {
+  const container = $('chat-messages');
+  if (!container) return;
+
+  // Finalize any streaming
+  if (State.isStreaming) finalizeStreaming();
+
+  const row = document.createElement('div');
+  row.className = 'msg-row tool-call';
+
+  const card = document.createElement('div');
+  card.className = 'tool-call-card';
+
+  const icon = getToolIcon(part.name);
+  const inputPreview = formatToolInput(part.name, part.input);
+
+  card.innerHTML = `
+    <div class="tool-call-header">
+      <span class="tool-call-icon">${icon}</span>
+      <span class="tool-call-name">${escHtml(part.name)}</span>
+      <span class="tool-call-status running">running</span>
+    </div>
+    ${inputPreview ? `<div class="tool-call-input">${inputPreview}</div>` : ''}
+  `;
+
+  row.appendChild(card);
+  container.appendChild(row);
+  scrollToBottom(container);
+}
+
+function renderToolResult(part) {
+  const container = $('chat-messages');
+  if (!container) return;
+
+  // Find the last tool-call card and update its status
+  const toolCards = container.querySelectorAll('.tool-call-card');
+  const lastCard = toolCards[toolCards.length - 1];
+  if (lastCard) {
+    const statusEl = lastCard.querySelector('.tool-call-status');
+    if (statusEl) {
+      statusEl.className = `tool-call-status ${part.is_error ? 'error' : 'done'}`;
+      statusEl.textContent = part.is_error ? 'error' : 'done';
+    }
+
+    // Add result preview
+    if (part.content) {
+      const resultEl = document.createElement('div');
+      resultEl.className = `tool-call-result ${part.is_error ? 'error' : ''}`;
+      const preview = part.content.length > 500 ? part.content.slice(0, 500) + '…' : part.content;
+      resultEl.textContent = preview;
+      lastCard.appendChild(resultEl);
+    }
+  }
+
+  scrollToBottom(container);
+}
+
+function getToolIcon(name) {
+  const icons = {
+    bash: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>',
+    edit: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>',
+    write: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>',
+    read: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M16 13H8"></path><path d="M16 17H8"></path></svg>',
+    glob: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+    grep: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+  };
+  return icons[name] || icons.bash;
+}
+
+function formatToolInput(name, input) {
+  if (!input) return '';
+  if (name === 'bash' && input.command) {
+    return `<code>${escHtml(input.command)}</code>`;
+  }
+  if ((name === 'edit' || name === 'write') && input.path) {
+    return `<code>${escHtml(input.path)}</code>`;
+  }
+  if (name === 'read' && input.path) {
+    return `<code>${escHtml(input.path)}</code>`;
+  }
+  if (name === 'glob' && input.pattern) {
+    return `<code>${escHtml(input.pattern)}</code>`;
+  }
+  if (name === 'grep' && input.pattern) {
+    return `<code>${escHtml(input.pattern)}</code>`;
+  }
+  return '';
 }
 
 // ── Chat rendering ────────────────────────────────────────────────────────────
@@ -2108,8 +2336,8 @@ function loadSettings() {
   setVal('set-sandbox-enabled', sandboxEnabled);
   updateSandboxToggleLabel(sandboxEnabled);
 
-  // Zero mode hint in settings
-  updateSettingsZeroHint(c.mode || 'auto');
+  // Agent mode hint in settings
+  updateSettingsAgentHint(c.mode || 'agent');
 
   // Sandbox status
   refreshSandboxInfo();
@@ -2155,21 +2383,13 @@ async function saveSettings() {
 
 // ── Zero mode helpers ─────────────────────────────────────────────────────────
 
-function isZeroMode() {
-  return (State.config?.mode || '') === 'zero';
+function isAgentMode() {
+  return (State.config?.mode || '') === 'agent' || State.agentHealthy;
 }
 
 function updateZeroWorkspaceBar(path) {
+  // Deprecated — kept for backward compatibility
   State.zeroWorkspacePath = path || null;
-  const bar = $('zero-workspace-bar');
-  const pathEl = $('zero-workspace-path');
-  if (!bar) return;
-  if (path) {
-    bar.classList.remove('hidden');
-    if (pathEl) pathEl.textContent = path;
-  } else {
-    bar.classList.add('hidden');
-  }
 }
 
 async function refreshZeroWorkspace() {
@@ -2181,25 +2401,16 @@ async function refreshZeroWorkspace() {
 
 // ── Sandbox helpers ───────────────────────────────────────────────────────────
 
-function updateSettingsZeroHint(mode) {
-  const hint = $('settings-zero-hint');
+function updateSettingsAgentHint(mode) {
+  const hint = $('settings-agent-hint');
   if (!hint) return;
-  if (mode === 'zero') {
-    hint.classList.remove('hidden');
-    // Populate base dir lazily.
-    const base = $('zero-workspace-base');
-    if (base && base.textContent === '…') {
-      invoke('get_zero_workspace_base').then(p => { if (base) base.textContent = p; }).catch(() => {});
-    }
-  } else {
-    hint.classList.add('hidden');
-  }
+  hint.classList.toggle('hidden', mode !== 'agent');
 }
 
-function updateHomeZeroHint(mode) {
-  const hint = $('home-zero-hint');
+function updateHomeAgentHint(mode) {
+  const hint = $('home-agent-hint');
   if (!hint) return;
-  hint.classList.toggle('hidden', mode !== 'zero');
+  hint.classList.toggle('hidden', mode !== 'agent');
 }
 
 function updateSandboxToggleLabel(enabled) {
@@ -2510,9 +2721,9 @@ function setupHandlers() {
     }
   });
 
-  // Show/hide zero-mode hint when home mode selector changes.
+  // Show/hide agent-mode hint when home mode selector changes.
   $('home-mode')?.addEventListener('change', (e) => {
-    updateHomeZeroHint(e.target.value);
+    updateHomeAgentHint(e.target.value);
     syncCustomSelect($('home-mode'));
   });
 
@@ -2532,9 +2743,15 @@ function setupHandlers() {
 
   // Stop
   $('btn-stop')?.addEventListener('click', async () => {
+    stopAgentPolling();
+    if (State.agentSessionId && State.agentHealthy) {
+      try { await invoke('agent_abort', { sessionId: State.agentSessionId }); } catch {}
+    }
     await invoke('stop_session');
     finalizeStreaming();
+    removeThinkingIndicator();
     setSessionActive(false, true);
+    State.agentSessionId = null;
     const sys = { kind: 'system', content: 'Session stopped.', ts: nowTs() };
     appendChatMessage(sys);
     toast('Session stopped');
@@ -2574,7 +2791,7 @@ function setupHandlers() {
     if (e.tagName === 'SELECT') syncCustomSelect(e);
   });
   $('set-mode')?.addEventListener('change', (e) => {
-    updateSettingsZeroHint(e.target.value);
+    updateSettingsAgentHint(e.target.value);
   });
 
   // Sandbox toggle — update label live
@@ -2628,22 +2845,37 @@ async function sendChatMessage() {
   const text = input.value.trim();
   if (!text && pendingAttachments.length === 0) return;
 
-  // Build attachment payload — images are NOT embedded in the text
-  const attach = buildAttachmentPayload();
   const fullText = text;
   clearAttachments();
 
-  // Show user message — file refs only, no binary data
-  const displayMsg = attach.fileRef ? `${fullText}\n${attach.fileRef}` : fullText;
-  appendChatMessage({ kind: 'user', content: displayMsg, ts: nowTs() });
+  // Show user message
+  appendChatMessage({ kind: 'user', content: fullText, ts: nowTs() });
   input.value = '';
   autoResize.call(input);
 
-  // Send to backend — images as separate payload
-  try {
-    await invoke('send_message', { message: fullText, images: attach.images.length > 0 ? attach.images : null });
-  } catch (err) {
-    appendChatMessage({ kind: 'error', content: `Failed to send message: ${err}`, ts: nowTs() });
+  if (State.agentSessionId && State.agentHealthy) {
+    // Send via mowis-agent
+    appendThinkingIndicator();
+    setSessionActive(true);
+    try {
+      await invoke('agent_send_message', {
+        sessionId: State.agentSessionId,
+        text: fullText,
+        background: true,
+      });
+      // Polling will pick up the response
+      startAgentPolling(State.agentSessionId);
+    } catch (err) {
+      removeThinkingIndicator();
+      appendChatMessage({ kind: 'error', content: `Failed to send: ${err}`, ts: nowTs() });
+    }
+  } else {
+    // Fallback: old send_message
+    try {
+      await invoke('send_message', { message: fullText, images: null });
+    } catch (err) {
+      appendChatMessage({ kind: 'error', content: `Failed to send: ${err}`, ts: nowTs() });
+    }
   }
 }
 

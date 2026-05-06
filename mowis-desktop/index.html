@@ -211,14 +211,14 @@
             <textarea id="home-input" class="home-textarea" placeholder="Describe your task… e.g. build a REST API with OAuth2, rate limiting, and OpenAPI docs" rows="3"></textarea>
             <div class="home-compose-row">
               <select id="home-mode" class="mini-select">
+                <option value="agent">Agent</option>
                 <option value="auto">Auto</option>
                 <option value="simple">Simple</option>
                 <option value="standard">Standard</option>
                 <option value="full">Full</option>
-                <option value="zero">Zero ✦</option>
               </select>
-              <div class="zero-mode-hint hidden" id="home-zero-hint">
-                <span class="zero-badge">ZERO</span> Direct LLM · writes to disk · no agentd needed
+              <div class="agent-mode-hint" id="home-agent-hint">
+                <span class="agent-badge">AGENT</span> mowis-agent · full tool access · persistent sessions
               </div>
               <button class="btn-icon" id="btn-home-attach" title="Attach files" aria-label="Attach files">
                 <span class="material-symbols-outlined">attach_file</span>
@@ -527,16 +527,15 @@
             <label class="form-label">Mode<span class="form-hint">Orchestration complexity</span></label>
             <div class="form-ctrl">
               <select id="set-mode" class="form-select">
+                <option value="agent">Agent — mowis-agent coding</option>
                 <option value="auto">Auto — classify complexity</option>
                 <option value="simple">Simple — 1 agent</option>
                 <option value="standard">Standard — ≤3 agents</option>
                 <option value="full">Full — 7-layer pipeline</option>
-                <option value="zero">Zero ✦ — direct LLM, no agentd</option>
               </select>
-              <div class="zero-mode-settings-hint hidden" id="settings-zero-hint">
-                <span class="zero-badge">ZERO</span>
-                Zero-Protection mode talks directly to your LLM provider and writes files to a folder on your real disk — no agentd, no sandbox, no simple/standard/full pipeline.
-                <br>Workspace base: <code id="zero-workspace-base">…</code>
+              <div class="agent-mode-settings-hint" id="settings-agent-hint">
+                <span class="agent-badge">AGENT</span>
+                Agent mode uses mowis-agent for single-agent coding tasks with full tool access, persistent sessions, and LSP integration.
               </div>
             </div>
           </div>
