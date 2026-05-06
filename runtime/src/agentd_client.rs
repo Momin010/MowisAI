@@ -212,6 +212,25 @@ impl AgentdClient {
         Ok(())
     }
 
+    /// List all active sandbox IDs
+    pub fn list_sandboxes(&self) -> AgentdClientResult<Vec<String>> {
+        let request = AgentdRequest {
+            method: "list_sandboxes".to_string(),
+            params: serde_json::Value::Null,
+            id: generate_request_id(),
+        };
+
+        let response = self.send_request(&request)?;
+        let result = response
+            .result
+            .ok_or_else(|| AgentdClientError::InvalidResponse(
+                response.error.unwrap_or_default(),
+            ))?;
+
+        serde_json::from_value(result)
+            .map_err(|e| AgentdClientError::InvalidResponse(e.to_string()))
+    }
+
     /// Destroy a sandbox
     pub fn destroy_sandbox(&self, sandbox_id: &str) -> AgentdClientResult<()> {
         let request = AgentdRequest {
