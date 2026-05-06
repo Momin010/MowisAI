@@ -39,12 +39,13 @@ mod tests {
         }
 
         use libagent::orchestration::planner::plan_task;
+        use libagent::orchestration::provider_client::LlmConfig;
 
         let project_root = PathBuf::from(".");
-        let project_id = "company-internal-tools-490516";
+        let llm_config = LlmConfig::vertex("company-internal-tools-490516");
         let prompt = "add a simple hello world function";
 
-        let result = plan_task(prompt, &project_root, project_id).await;
+        let result = plan_task(prompt, &project_root, &llm_config).await;
 
         if let Ok(output) = result {
             assert!(!output.task_graph.tasks.is_empty(), "Should generate at least one task");
@@ -275,7 +276,7 @@ mod tests {
             id: 0,
             tool_call: "write_file".to_string(),
             tool_args: serde_json::json!({"path": "test.txt", "content": "hello"}),
-            tool_result: "success".to_string(),
+            tool_result: serde_json::Value::String("success".to_string()),
             timestamp: 1234567890,
             layer_snapshot_path: "/tmp/snapshot-0".to_string(),
         };
@@ -312,7 +313,7 @@ mod tests {
                 id: i,
                 tool_call: format!("tool_{}", i),
                 tool_args: serde_json::json!({}),
-                tool_result: "success".to_string(),
+                tool_result: serde_json::Value::String("success".to_string()),
                 timestamp: 1234567890 + i,
                 layer_snapshot_path: format!("/tmp/snapshot-{}", i),
             };
@@ -633,9 +634,10 @@ mod tests {
     #[ignore] // Ignore by default - requires running agentd socket server
     async fn test_end_to_end_orchestration() {
         use libagent::orchestration::{NewOrchestrator, OrchestratorConfig};
+        use libagent::orchestration::provider_client::LlmConfig;
 
         let config = OrchestratorConfig {
-            project_id: "company-internal-tools-490516".to_string(),
+            llm_config: LlmConfig::vertex("company-internal-tools-490516"),
             socket_path: "/tmp/agentd.sock".to_string(),
             project_root: PathBuf::from("."),
             overlay_root: temp_dir("e2e-overlay"),
@@ -645,6 +647,7 @@ mod tests {
             max_verification_rounds: 1,
             staging_dir: None,
             event_tx: None,
+            mode_override: None,
         };
 
         let orchestrator = NewOrchestrator::new(config);

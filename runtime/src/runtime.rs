@@ -90,7 +90,7 @@ impl Runtime {
                 sandbox_id: sb_spec.sandbox_id.clone(),
                 os_image: sb_spec.os_image.clone(),
                 ram_bytes: sb_spec.ram_bytes,
-                cpu_millis: sb_spec.cpu_millis,
+                cpu_millis: sb_spec.cpu_millis as u32,
                 packages: sb_spec.init_packages.clone(),
             };
 
@@ -145,7 +145,7 @@ impl Runtime {
             // Build sandbox handles response
             let containers: Vec<ContainerHandle> = sb_map
                 .get(&sb_spec.sandbox_id)
-                .unwrap()
+                .ok_or_else(|| RuntimeError::SandboxNotFound(sb_spec.sandbox_id.clone()))?
                 .containers
                 .values()
                 .map(|c| ContainerHandle {
@@ -350,12 +350,12 @@ impl Runtime {
     }
 
     /// Get all active sandboxes
-    pub fn list_sandboxes(&self) -> Vec<String> {
+    pub fn list_sandboxes(&self) -> RuntimeResult<Vec<String>> {
         let sb_map = self
             .sandboxes
             .lock()
             .map_err(|e| RuntimeError::InvalidState(format!("Lock poisoned: {}", e)))?;
-        sb_map.keys().cloned().collect()
+        Ok(sb_map.keys().cloned().collect())
     }
 
     /// Destroy a sandbox and all its containers

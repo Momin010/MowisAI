@@ -64,7 +64,7 @@ pub struct OrchestratorConfig {
     /// Optional staging directory for save-all functionality
     pub staging_dir: Option<PathBuf>,
     /// Optional channel sender for real-time TUI progress events
-    pub event_tx: Option<tokio::sync::mpsc::Sender<OrchestratorEvent>>,
+    pub event_tx: Option<std::sync::mpsc::Sender<OrchestratorEvent>>,
     /// Explicit mode override from CLI (`--mode simple|standard|full`).
     /// When `None`, the complexity classifier decides automatically.
     pub mode_override: Option<ComplexityMode>,

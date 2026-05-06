@@ -50,7 +50,7 @@ pub fn load_plugins() -> Vec<PluginDef> {
 }
 
 fn plugin_directory() -> PathBuf {
-    dirs_next::home_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".mowisai")
         .join("plugins")

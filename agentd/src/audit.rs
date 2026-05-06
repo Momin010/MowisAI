@@ -198,6 +198,38 @@ impl SecurityAuditor {
     pub fn read_events(&self, count: usize) -> anyhow::Result<Vec<AuditEvent>> {
         self.logger.read_events(count)
     }
+
+    /// Record an audit event (alias for `log`)
+    pub fn record_event(&self, event: AuditEvent) -> anyhow::Result<()> {
+        self.logger.log(event)
+    }
+
+    /// Get aggregate statistics from the audit log
+    pub fn get_stats(&self) -> serde_json::Value {
+        let events = self.read_events(10000).unwrap_or_default();
+        let stats = AuditStats::from_events(&events);
+        serde_json::json!({
+            "total_events": stats.total_events,
+            "security_violations": stats.security_violations,
+            "failed_operations": stats.failed_operations,
+            "unique_actors": stats.unique_actors,
+        })
+    }
+
+    /// Detect anomalies in the audit log
+    pub fn detect_anomalies(&self) -> serde_json::Value {
+        let events = self.read_events(10000).unwrap_or_default();
+        let violations: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == EventType::SecurityViolation)
+            .map(|e| serde_json::json!({
+                "timestamp": e.timestamp,
+                "actor_id": e.actor_id,
+                "description": e.description,
+            }))
+            .collect();
+        serde_json::json!({ "security_violations": violations })
+    }
 }
 
 /// Compliance checker for verifying policy adherence

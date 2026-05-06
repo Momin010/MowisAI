@@ -53,7 +53,7 @@ pub struct Agent {
 
 impl Agent {
     pub fn spawn(config: AgentConfig) -> Result<Self, anyhow::Error> {
-        let sandbox = Sandbox::new(config.resources.clone())?;
+        let mut sandbox = Sandbox::new(config.resources.clone())?;
 
         // Register all configured tools with the sandbox
         let mut registered_tools = Vec::new();

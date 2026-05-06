@@ -39,7 +39,7 @@ pub struct StagedWorkspace {
 #[derive(Debug)]
 pub struct TopologyManager {
     /// Socket path for agentd communication
-    socket_path: String,
+    pub socket_path: String,
 
     /// Created sandbox IDs (sandbox_name -> sandbox_id)
     sandboxes: Arc<RwLock<HashMap<SandboxName, String>>>,

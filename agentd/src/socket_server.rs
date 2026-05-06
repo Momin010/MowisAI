@@ -1279,7 +1279,7 @@ fn create_listener(path: &str) -> Result<UnixListener> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o660);
+        let perms = std::fs::Permissions::from_mode(0o666);
         std::fs::set_permissions(path, perms).context("chmod socket")?;
     }
     Ok(listener)
@@ -1338,7 +1338,7 @@ pub fn run(socket_path: &str) -> Result<()> {
 
     // Bind listener
     let listener = UnixListener::bind(socket_path)?;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
 
     println!("Socket server listening on {}", socket_path);
 

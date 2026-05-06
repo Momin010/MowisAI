@@ -284,7 +284,8 @@ fn build_tree(
     for (i, entry) in filtered.iter().enumerate() {
         let is_last = i == filtered.len() - 1;
         let connector = if is_last { "└── " } else { "├── " };
-        let name = entry.file_name().to_string_lossy();
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
 
         output.push_str(&format!("{}{}{}\n", prefix, connector, name));
 

@@ -40,7 +40,7 @@ impl PersistenceManager {
     }
 
     /// Atomic write: write to temp file then rename
-    fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+    pub fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
         let tmp_path = path.with_extension("tmp");
         {
             let mut f = fs::File::create(&tmp_path)?;

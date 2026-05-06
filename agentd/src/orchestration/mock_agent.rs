@@ -87,7 +87,7 @@ impl MockAgentExecutor {
             id: 0,
             tool_call: "write_file".to_string(),
             tool_args: json!({ "path": format!("/workspace/file_{}.js", task_index) }),
-            tool_result: serde_json::to_string(&write_result)?,
+            tool_result: serde_json::Value::String(serde_json::to_string(&write_result)?),
             timestamp: current_timestamp(),
             layer_snapshot_path: format!("/tmp/checkpoint-{}-0", agent.agent_id),
         });
@@ -117,7 +117,7 @@ impl MockAgentExecutor {
             id: 1,
             tool_call: "run_command".to_string(),
             tool_args: json!({ "cmd": "cd /workspace && ls -la" }),
-            tool_result: serde_json::to_string(&ls_result)?,
+            tool_result: serde_json::Value::String(serde_json::to_string(&ls_result)?),
             timestamp: current_timestamp(),
             layer_snapshot_path: format!("/tmp/checkpoint-{}-1", agent.agent_id),
         });

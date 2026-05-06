@@ -219,6 +219,8 @@ impl AgentLoop {
                 let ctx = ToolContext {
                     sandbox_id: self.agent_id,
                     root_path: None,
+                    container_pid: None,
+                    container_env: std::collections::HashMap::new(),
                 };
                 return tool.invoke(&ctx, input);
             }

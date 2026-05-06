@@ -384,17 +384,19 @@ Output ONLY the repaired git patch, with no explanations or markdown formatting.
     );
 
     // Use the provider_client which handles all providers (not just Vertex AI)
-    let llm_config = super::provider_client::LlmConfig::from_config(
-        &crate::config::MowisConfig::load().unwrap_or_default()
-    ).unwrap_or_else(|_| {
-        // Fallback: try to construct a minimal config
-        super::provider_client::LlmConfig {
-            provider: crate::config::AiProvider::Gemini,
-            model: "gemini-2.5-pro".to_string(),
-            vertex_project_id: None,
-            api_key: std::env::var("GEMINI_API_KEY").ok(),
-        }
-    });
+    let llm_config = crate::config::MowisConfig::load()
+        .ok()
+        .flatten()
+        .and_then(|cfg| super::provider_client::LlmConfig::from_config(&cfg).ok())
+        .unwrap_or_else(|| {
+            // Fallback: try to construct a minimal config
+            super::provider_client::LlmConfig {
+                provider: crate::config::AiProvider::Gemini,
+                model: "gemini-2.5-pro".to_string(),
+                vertex_project_id: None,
+                api_key: std::env::var("GEMINI_API_KEY").ok(),
+            }
+        });
 
     let result = super::provider_client::generate_text_with_limit(
         &llm_config,

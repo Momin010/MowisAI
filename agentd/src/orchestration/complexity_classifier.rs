@@ -213,7 +213,7 @@ pub fn classify_complexity(prompt: &str, dir_tree: &str) -> ComplexityScore {
         // Dir tree counts only matter for modification tasks.
         // Greenfield tasks ignore repo size entirely.
         if !is_greenfield {
-            if file_count > 20 {
+            if file_count > 10 {
                 s += 1;
             }
             if file_count > 50 {

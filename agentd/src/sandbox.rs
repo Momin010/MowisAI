@@ -9,6 +9,15 @@ pub struct ResourceLimits {
     // GPU support will be added later
 }
 
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            ram_bytes: None,
+            cpu_millis: None,
+        }
+    }
+}
+
 use anyhow::{Context, Result};
 use fastrand;
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
@@ -71,6 +80,8 @@ pub fn execute_tool_unlocked(
     let ctx = crate::tools::ToolContext {
         sandbox_id: prep.sandbox_id,
         root_path: Some(prep.container_root),
+        container_pid: None,
+        container_env: std::collections::HashMap::new(),
     };
     prep.tool.invoke(&ctx, input)
 }
@@ -491,6 +502,8 @@ impl Sandbox {
         let ctx = crate::tools::ToolContext {
             sandbox_id: self.id,
             root_path: Some(self.root.path().to_path_buf()),
+            container_pid: None,
+            container_env: std::collections::HashMap::new(),
         };
         let output = tool.invoke(&ctx, input)?;
         Ok(output)
@@ -548,9 +561,26 @@ impl Sandbox {
         let ctx = crate::tools::ToolContext {
             sandbox_id: self.id,
             root_path: Some(container_root),
+            container_pid: None,
+            container_env: std::collections::HashMap::new(),
         };
         let output = tool.invoke(&ctx, input)?;
         Ok(output)
+    }
+
+    /// Invoke a named tool using the provided context. The context is used as-is,
+    /// allowing callers to specify root_path, container_pid, etc.
+    pub fn invoke_tool_by_name(
+        &self,
+        name: &str,
+        ctx: &crate::tools::ToolContext,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("tool not registered: {}", name))?;
+        tool.invoke(ctx, input)
     }
 
     pub fn set_policy(&mut self, policy: crate::security::SecurityPolicy) {

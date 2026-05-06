@@ -35,7 +35,7 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(100) as usize;
 
-        let base = resolve_path(ctx, path_str);
+        let base = resolve_path(ctx, path_str)?;
         let regex = Regex::new(pattern)?;
 
         let mut matches = Vec::new();
@@ -107,7 +107,7 @@ impl Tool for FindFilesTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(10) as usize;
 
-        let base = resolve_path(ctx, path_str);
+        let base = resolve_path(ctx, path_str)?;
         let pat = Pattern::new(pattern).unwrap_or_else(|_| Pattern::new("*").unwrap());
 
         let mut files = Vec::new();
@@ -149,7 +149,7 @@ impl Tool for SearchCodeTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(2) as usize;
 
-        let base = resolve_path(ctx, path_str);
+        let base = resolve_path(ctx, path_str)?;
         let query_lower = query.to_lowercase();
 
         let mut results = Vec::new();
@@ -213,7 +213,7 @@ impl Tool for ReadMultipleFilesTool {
 
         for path_val in paths {
             let path_str = path_val.as_str().unwrap_or("");
-            let path = resolve_path(ctx, path_str);
+            let path = resolve_path(ctx, path_str)?;
             match fs::read_to_string(&path) {
                 Ok(content) => {
                     let size = content.len();

@@ -19,7 +19,7 @@ impl Tool for DockerBuildTool {
             .and_then(|v| v.as_str())
             .unwrap_or("Dockerfile");
 
-        let path = resolve_path(ctx, path_str);
+        let path = resolve_path(ctx, path_str)?;
 
         let output = Command::new("docker")
             .arg("build")
