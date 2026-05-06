@@ -85,6 +85,7 @@ pub struct SseEvent {
 // AgentClient — HTTP client for mowis-agent
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct AgentClient {
     base_url: String,
     http: reqwest::Client,

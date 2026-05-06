@@ -136,7 +136,7 @@ pub fn start_bridge(
                             });
                         }
 
-                        BridgeCommand::StartZeroMode { session_id, prompt, .. } => {
+                        BridgeCommand::StartZeroMode { session_id, .. } => {
                             log::warn!("StartZeroMode is deprecated — use agent_send_message instead (session: {})", session_id);
                             let _ = tx.send(BridgeEvent::OrchestrationFailed(
                                 format!("Zero mode is deprecated. Use agent_send_message for session {}.", session_id)

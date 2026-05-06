@@ -265,7 +265,7 @@ pub async fn start_session(
     project_path: Option<String>,
     repo_url: Option<String>,
     repo_source: Option<String>,
-    images: Option<Vec<ImageAttachment>>,
+    _images: Option<Vec<ImageAttachment>>,
 ) -> Result<String, String> {
     let session_id = Uuid::new_v4().to_string();
     let cfg = state.config.lock().unwrap().clone();
@@ -284,7 +284,7 @@ pub async fn start_session(
     // Resolve repo context, optionally redirecting project_path to a sandbox upper_dir.
     // NOTE: zero mode does NOT use repo_context (it writes directly to a workspace on disk).
     // Clone before the if-else because the else branch moves project_path.
-    let project_path_zero = project_path.clone();
+    let _project_path_zero = project_path.clone();
     let repo_context = if resolved_mode == "zero" {
         None
     } else {
@@ -676,11 +676,16 @@ pub async fn clear_developer_config() -> Result<(), String> {
 // Agent commands — talk to mowis-agent via HTTP
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tauri::command]
-pub async fn agent_health(state: State<'_, Arc<AppState>>) -> Result<agent_client::HealthResponse, String> {
+fn get_agent_client(state: &State<'_, Arc<AppState>>) -> Result<agent_client::AgentClient, String> {
     let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
     let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
-    mgr.client().health().await.map_err(|e| e.to_string())
+    Ok(mgr.client().clone())
+}
+
+#[tauri::command]
+pub async fn agent_health(state: State<'_, Arc<AppState>>) -> Result<agent_client::HealthResponse, String> {
+    let client = get_agent_client(&state)?;
+    client.health().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -688,18 +693,16 @@ pub async fn agent_create_session(
     state: State<'_, Arc<AppState>>,
     title: String,
 ) -> Result<agent_client::Session, String> {
-    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
-    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
-    mgr.client().create_session(&title).await.map_err(|e| e.to_string())
+    let client = get_agent_client(&state)?;
+    client.create_session(&title).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn agent_list_sessions(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<agent_client::Session>, String> {
-    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
-    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
-    mgr.client().list_sessions().await.map_err(|e| e.to_string())
+    let client = get_agent_client(&state)?;
+    client.list_sessions().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -709,13 +712,12 @@ pub async fn agent_send_message(
     text: String,
     background: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
-    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
+    let client = get_agent_client(&state)?;
     if background.unwrap_or(false) {
-        mgr.client().send_message_async(&session_id, &text).await.map_err(|e| e.to_string())?;
+        client.send_message_async(&session_id, &text).await.map_err(|e| e.to_string())?;
         Ok(serde_json::json!({ "status": "accepted" }))
     } else {
-        mgr.client().send_message(&session_id, &text).await.map_err(|e| e.to_string())
+        client.send_message(&session_id, &text).await.map_err(|e| e.to_string())
     }
 }
 
@@ -724,9 +726,8 @@ pub async fn agent_abort(
     state: State<'_, Arc<AppState>>,
     session_id: String,
 ) -> Result<(), String> {
-    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
-    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
-    mgr.client().abort(&session_id).await.map_err(|e| e.to_string())
+    let client = get_agent_client(&state)?;
+    client.abort(&session_id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -735,9 +736,8 @@ pub async fn agent_approve_permission(
     session_id: String,
     permission_id: String,
 ) -> Result<(), String> {
-    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
-    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
-    mgr.client().approve_permission(&session_id, &permission_id).await.map_err(|e| e.to_string())
+    let client = get_agent_client(&state)?;
+    client.approve_permission(&session_id, &permission_id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -746,7 +746,6 @@ pub async fn agent_deny_permission(
     session_id: String,
     permission_id: String,
 ) -> Result<(), String> {
-    let mgr = state.agent_manager.lock().map_err(|e| e.to_string())?;
-    let mgr = mgr.as_ref().ok_or("Agent not initialized")?;
-    mgr.client().deny_permission(&session_id, &permission_id).await.map_err(|e| e.to_string())
+    let client = get_agent_client(&state)?;
+    client.deny_permission(&session_id, &permission_id).await.map_err(|e| e.to_string())
 }
