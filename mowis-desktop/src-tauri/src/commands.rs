@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -792,4 +792,80 @@ pub async fn agent_delete_session(
 ) -> Result<(), String> {
     let client = get_agent_client(&state)?;
     client.delete_session(&session_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn agent_list_messages(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<Vec<agent_client::AgentMessage>, String> {
+    let client = get_agent_client(&state)?;
+    client.list_messages(&session_id).await.map_err(|e| e.to_string())
+}
+
+/// Explicitly start (or connect to) the mowis-agent subprocess.
+/// Emits `agent_startup_log` events with `{ text, level }` as it progresses
+/// so the frontend can display live logs in the startup modal.
+#[tauri::command]
+pub async fn agent_start(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    // Release lock before any await — sync Mutex must not be held across await points.
+    let maybe_client = {
+        let lock = state.agent_manager.lock().map_err(|e| e.to_string())?;
+        lock.as_ref().map(|m| (m.client().clone(), m.port()))
+    };
+
+    if let Some((client, port)) = maybe_client {
+        if let Ok(health) = client.health().await {
+            if health.healthy {
+                let _ = app.emit("agent_startup_log", serde_json::json!({
+                    "text": format!("Agent already running on port {} (v{})", port, health.version),
+                    "level": "success"
+                }));
+                return Ok(serde_json::json!({ "port": port, "already_running": true }));
+            }
+        }
+    }
+
+    let resource_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
+
+    let _ = app.emit("agent_startup_log", serde_json::json!({
+        "text": format!("Searching for mowis-agent in: {}", resource_dir.display()),
+        "level": "info"
+    }));
+    let _ = app.emit("agent_startup_log", serde_json::json!({
+        "text": format!(
+            "Scanning ports {}–{} for a running instance...",
+            crate::agent_manager::DEFAULT_AGENT_PORT,
+            crate::agent_manager::DEFAULT_AGENT_PORT + 9
+        ),
+        "level": "info"
+    }));
+
+    let mut mgr = crate::agent_manager::AgentManager::new(crate::agent_manager::DEFAULT_AGENT_PORT);
+
+    match mgr.start(&resource_dir).await {
+        Ok(()) => {
+            let port = mgr.port();
+            let _ = app.emit("agent_startup_log", serde_json::json!({
+                "text": format!("mowis-agent ready on port {}", port),
+                "level": "success"
+            }));
+            *state.agent_manager.lock().map_err(|e| e.to_string())? = Some(mgr);
+            Ok(serde_json::json!({ "port": port }))
+        }
+        Err(e) => {
+            let msg = format!("{:#}", e);
+            let _ = app.emit("agent_startup_log", serde_json::json!({
+                "text": msg.clone(),
+                "level": "error"
+            }));
+            Err(msg)
+        }
+    }
 }

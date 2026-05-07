@@ -189,6 +189,71 @@
   background: rgba(59,139,255,0.18);
 }
 
+/* ── Agent Startup Modal ─────────────────────────────────────────────────── */
+.agent-startup-spinner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--tx-2);
+}
+.agent-startup-spinner .spinner-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--blue);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+.agent-startup-spinner.done .spinner-dot {
+  background: #81C784;
+  animation: none;
+}
+.agent-startup-spinner.error .spinner-dot {
+  background: #EF9A9A;
+  animation: none;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50%       { opacity: 1;   transform: scale(1.2); }
+}
+.agent-startup-log {
+  background: rgba(0,0,0,0.35);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  padding: 12px 14px;
+  margin-bottom: 0;
+  min-height: 60px;
+  max-height: 260px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.75;
+}
+.agent-log-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.agent-log-line.info    { color: var(--tx-3); }
+.agent-log-line.success { color: #81C784; }
+.agent-log-line.error   { color: #EF9A9A; }
+.agent-log-prefix {
+  flex-shrink: 0;
+  opacity: 0.6;
+  user-select: none;
+  width: 10px;
+  text-align: center;
+}
+.agent-startup-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
 /* ── Diff Viewer Modal ──────────────────────────────────────────────────────── */
 .diff-viewer-overlay {
   position: fixed;

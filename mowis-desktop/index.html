@@ -600,6 +600,35 @@
 </div><!-- /#app -->
 
 
+<!-- Agent startup modal -->
+<div id="agent-startup-modal" class="engine-modal hidden" aria-hidden="true">
+  <div class="engine-modal-backdrop"></div>
+  <div class="engine-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-startup-title">
+    <div class="engine-modal-head">
+      <div class="engine-modal-icon">&#129302;</div>
+      <div>
+        <div class="engine-modal-title" id="agent-startup-title">Starting mowis-agent</div>
+        <div class="engine-modal-subtitle" id="agent-startup-subtitle">Connecting to the agent process...</div>
+      </div>
+    </div>
+    <div class="engine-modal-body">
+      <div class="agent-startup-spinner" id="agent-startup-spinner">
+        <div class="spinner-dot"></div>
+        <span id="agent-startup-spinner-text">Starting up...</span>
+      </div>
+      <div class="agent-startup-log" id="agent-startup-log"></div>
+      <div class="engine-error hidden" id="agent-startup-error">
+        <div class="engine-error-title">Agent failed to start</div>
+        <div class="engine-error-message" id="agent-startup-error-msg"></div>
+      </div>
+      <div class="agent-startup-actions hidden" id="agent-startup-actions">
+        <button class="wizard-btn wizard-btn-secondary" id="btn-agent-startup-cancel">Cancel</button>
+        <button class="wizard-btn wizard-btn-primary" id="btn-agent-startup-retry">Retry</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Repository picker -->
 <div id="repo-modal" class="repo-modal hidden" aria-hidden="true">
   <div class="repo-backdrop" id="repo-backdrop"></div>

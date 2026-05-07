@@ -526,12 +526,101 @@ async function setupListeners() {
   });
 }
 
-// ── Session start (via mowis-agent) ─────────────────────────────────────────
+// ── Agent startup modal ───────────────────────────────────────────────────────
+
+async function startAgentWithModal() {
+  return new Promise((resolve) => {
+    const modal    = $('agent-startup-modal');
+    const logEl    = $('agent-startup-log');
+    const spinner  = $('agent-startup-spinner');
+    const spinnerText = $('agent-startup-spinner-text');
+    const subtitle = $('agent-startup-subtitle');
+    const errorEl  = $('agent-startup-error');
+    const errorMsg = $('agent-startup-error-msg');
+    const actionsEl = $('agent-startup-actions');
+    const cancelBtn = $('btn-agent-startup-cancel');
+    const retryBtn  = $('btn-agent-startup-retry');
+
+    if (!modal) { resolve(false); return; }
+
+    let unlistenLog = null;
+    const cleanups = [];
+
+    function addLogLine(text, level) {
+      if (!logEl) return;
+      const line = document.createElement('div');
+      line.className = `agent-log-line ${level || 'info'}`;
+      const pre = document.createElement('span');
+      pre.className = 'agent-log-prefix';
+      pre.textContent = level === 'success' ? '✓' : level === 'error' ? '✗' : '›';
+      const txt = document.createElement('span');
+      txt.textContent = text;
+      line.appendChild(pre);
+      line.appendChild(txt);
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function resetUI() {
+      if (logEl) logEl.innerHTML = '';
+      if (errorEl) errorEl.classList.add('hidden');
+      if (actionsEl) actionsEl.classList.add('hidden');
+      if (spinner) { spinner.classList.remove('done', 'error'); }
+      if (subtitle) subtitle.textContent = 'Connecting to the agent process...';
+      if (spinnerText) spinnerText.textContent = 'Starting up...';
+    }
+
+    function closeModal() {
+      modal.classList.add('hidden');
+      modal.setAttribute('aria-hidden', 'true');
+      cleanups.forEach(fn => fn());
+    }
+
+    // Subscribe to live log events from the backend
+    listen('agent_startup_log', (e) => {
+      addLogLine(e.payload?.text, e.payload?.level);
+    }).then(u => { unlistenLog = u; cleanups.push(u); });
+
+    function tryStart() {
+      invoke('agent_start')
+        .then(() => {
+          if (spinner) spinner.classList.add('done');
+          if (spinnerText) spinnerText.textContent = 'Agent connected';
+          if (subtitle) subtitle.textContent = 'mowis-agent is ready';
+          State.agentHealthy = true;
+          setTimeout(() => { closeModal(); resolve(true); }, 500);
+        })
+        .catch((err) => {
+          if (spinner) spinner.classList.add('error');
+          if (spinnerText) spinnerText.textContent = 'Failed to start';
+          if (subtitle) subtitle.textContent = 'Agent could not be started';
+          if (errorEl) errorEl.classList.remove('hidden');
+          if (errorMsg) errorMsg.textContent = String(err);
+          if (actionsEl) actionsEl.classList.remove('hidden');
+        });
+    }
+
+    const onCancel = () => { closeModal(); resolve(false); };
+    const onRetry  = () => { resetUI(); tryStart(); };
+    cancelBtn?.addEventListener('click', onCancel);
+    retryBtn?.addEventListener('click', onRetry);
+    cleanups.push(() => cancelBtn?.removeEventListener('click', onCancel));
+    cleanups.push(() => retryBtn?.removeEventListener('click', onRetry));
+
+    resetUI();
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+    tryStart();
+  });
+}
+
+// ── Session start ─────────────────────────────────────────────────────────────
 
 export async function startSession(prompt, mode, repo = State.selectedRepo) {
   if (!prompt.trim() && pendingAttachments.length === 0) { toast('Enter a task description', 'error'); return; }
 
   const fullPrompt = prompt.trim();
+  const agentModeRequested = mode === 'agent';
   clearAttachments();
 
   State.tasks = {};
@@ -563,6 +652,7 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
   updateTaskPanelVisibility();
 
   try {
+    // Re-check health if we think it's unhealthy
     if (!State.agentHealthy) {
       try {
         const health = await invoke('agent_health');
@@ -571,6 +661,20 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
       } catch (e) {
         console.warn('[session] Agent re-check failed:', e);
         State.agentHealthy = false;
+      }
+    }
+
+    // When agent mode is explicitly requested and agent isn't running,
+    // show the startup modal — never silently fall back to simulation.
+    if (agentModeRequested && !State.agentHealthy) {
+      console.log('[session] Agent mode requested but not healthy — showing startup modal');
+      const started = await startAgentWithModal();
+      if (!started) {
+        // User cancelled or agent failed — abort cleanly, no simulation
+        removeThinkingIndicator();
+        setSessionActive(false);
+        navigate('home', { preserveHomeMode: true });
+        return;
       }
     }
 
@@ -593,8 +697,12 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
       });
       console.log('[session] ✓ Message sent, starting polling');
       startAgentPolling(session.id);
+    } else if (agentModeRequested) {
+      // Startup modal succeeded but health is still false — shouldn't happen, but guard it
+      throw new Error('mowis-agent is not available. Check that the binary is installed alongside the app.');
     } else {
-      console.log('[session] Agent not healthy — falling back to orchestration');
+      // Non-agent mode: use orchestration (real daemon or simulation fallback)
+      console.log('[session] Using orchestration mode:', mode || 'auto');
       const id = await invoke('start_session', {
         prompt: fullPrompt,
         mode: mode || 'auto',
