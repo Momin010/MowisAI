@@ -5,11 +5,11 @@
 ═══════════════════════════════════════════════════════ */
 
 :root {
-  --bg:     #0a0a0b;
-  --bg-1:   #0f0f10;
-  --bg-2:   #141415;
-  --bg-3:   #1a1a1c;
-  --bg-4:   #202022;
+  --bg:     #0e0e0e;
+  --bg-1:   #131313;
+  --bg-2:   #1c1b1b;
+  --bg-3:   #201f1f;
+  --bg-4:   #2a2a2a;
 
   --line:   rgba(255,255,255,0.032);
   --line-2: rgba(255,255,255,0.062);
@@ -20,7 +20,7 @@
   --tx-4:   rgba(235,235,236,0.26);
   --tx-5:   rgba(235,235,236,0.14);
 
-  --blue:      #3b8bff;
+  --blue:      #2e5bff;
   --blue-dim:  rgba(59,139,255,0.12);
   --blue-glow: rgba(59,139,255,0.45);
 
@@ -43,7 +43,9 @@
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.2);
   --shadow-md: 0 4px 12px rgba(0,0,0,0.4), 0 2px 6px rgba(0,0,0,0.3);
   --shadow-lg: 0 12px 40px rgba(0,0,0,0.5), 0 4px 16px rgba(0,0,0,0.4);
-  --shadow-xl: 0 20px 60px rgba(0,0,0,0.6), 0 8px 24px rgba(0,0,0,0.5);
+  --shadow-xl: 0 20px 50px rgba(0, 0, 0, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.05);
+  --glass-blur: blur(24px);
+  --glass-border: 1px solid rgba(255, 255, 255, 0.08);
   
   /* iOS 26-inspired inner glow (3D edge effect) */
   --glow-top: inset 0 1px 0 rgba(255,255,255,0.08);

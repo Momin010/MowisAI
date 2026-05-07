@@ -203,8 +203,8 @@
         <!-- Empty home — shown when no session -->
         <div id="home-empty" class="home-empty">
           <div class="home-hero">
-            <div class="home-title">What should the agents build?</div>
-            <div class="home-sub">MowisAI orchestrates hundreds of parallel AI agents in isolated sandboxes.</div>
+            <h1 class="home-title">MowisAI</h1>
+            <div class="home-sub">High-performance AI orchestration for complex engineering tasks.</div>
           </div>
             <div class="home-compose" id="home-compose">
             <div class="compose-attachments hidden" id="home-attachments"></div>
@@ -250,7 +250,40 @@
 
         <!-- Active chat — shown during/after a session -->
         <div id="home-chat" class="chat-wrap hidden">
+          <!-- AI Agents Side Panel -->
+          <div id="agents-panel" class="agents-panel">
+            <div class="agents-panel-header">
+              <div class="agents-panel-title">AI Agents</div>
+            </div>
+            <div class="agents-list">
+              <div class="agent-item active">
+                <div class="agent-icon"><span class="material-symbols-outlined">terminal</span></div>
+                <div class="agent-info">
+                  <div class="agent-name">DevOps Pro</div>
+                  <div class="agent-status">Ready</div>
+                </div>
+              </div>
+              <div class="agent-item">
+                <div class="agent-icon"><span class="material-symbols-outlined">brush</span></div>
+                <div class="agent-info">
+                  <div class="agent-name">UI Expert</div>
+                  <div class="agent-status">Idle</div>
+                </div>
+              </div>
+              <div class="agent-item">
+                <div class="agent-icon"><span class="material-symbols-outlined">bug_report</span></div>
+                <div class="agent-info">
+                  <div class="agent-name">Bug Hunter</div>
+                  <div class="agent-status">Idle</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="chat-session-bar">
+            <button class="btn-icon" id="btn-agents-toggle" title="AI Agents">
+              <span class="material-symbols-outlined">smart_toy</span>
+            </button>
             <button class="btn-outline sm" id="btn-chat-home">Home</button>
             <div class="chat-session-title" id="chat-session-title">Session</div>
             <div class="zero-workspace-bar hidden" id="zero-workspace-bar">
