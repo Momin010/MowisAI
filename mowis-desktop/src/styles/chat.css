@@ -4,32 +4,43 @@
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
   padding: 0 40px;
-  gap: 28px;
+  gap: 40px;
   overflow-y: auto;
+  background: radial-gradient(circle at center, rgba(46, 91, 255, 0.03) 0%, transparent 70%);
 }
 .home-hero { text-align: center; }
 .home-title {
   font-family: var(--serif);
-  font-size: 30px; font-weight: 400;
-  letter-spacing: -0.01em;
+  font-size: 42px; font-weight: 400;
+  letter-spacing: -0.02em;
   color: var(--tx);
-  margin-bottom: 8px;
+  margin-bottom: 12px;
+  text-shadow: 0 10px 30px rgba(0,0,0,0.5);
 }
 .home-sub {
   font-family: var(--sans);
-  font-size: 13px;
-  color: var(--tx-4);
-  max-width: 420px;
-  line-height: 1.55;
+  font-size: 15px;
+  color: var(--tx-3);
+  max-width: 480px;
+  line-height: 1.6;
   margin: 0 auto;
 }
 .home-compose {
-  width: 100%; max-width: 580px;
-  background: var(--bg-2);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r2);
-  padding: 14px 16px;
-  display: flex; flex-direction: column; gap: 10px;
+  width: 100%; max-width: 620px;
+  background: rgba(28, 27, 27, 0.4);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
+  border-radius: var(--r3);
+  padding: 20px 24px;
+  display: flex; flex-direction: column; gap: 12px;
+  box-shadow: var(--shadow-xl);
+  position: relative;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.home-compose:focus-within {
+  transform: translateY(-2px);
+  box-shadow: 0 30px 70px rgba(0,0,0,0.6), inset 0 1px 1px rgba(255,255,255,0.1);
 }
 .home-textarea {
   background: transparent; border: none; outline: none;
@@ -60,6 +71,125 @@
 .suggestion:hover { border-color: var(--line-2); color: var(--tx-2); background: rgba(255,255,255,0.025); }
 
 /* ── Chat ────────────────────────────────────────────── */
+.chat-session-bar {
+  background: rgba(14, 14, 14, 0.6);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom: var(--glass-border);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  z-index: 100;
+}
+
+.msg-bubble {
+  background: rgba(28, 27, 27, 0.4);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
+  border-radius: var(--r2);
+  padding: 12px 18px;
+  box-shadow: var(--shadow-md);
+  transition: transform 0.2s ease;
+}
+.msg-bubble:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-lg);
+}
+.msg-row.ai .msg-bubble {
+  background: rgba(46, 91, 255, 0.08);
+  border-color: rgba(46, 91, 255, 0.2);
+}
+
+.chat-compose {
+  background: transparent;
+  padding: 20px;
+}
+.compose-inner {
+  background: rgba(28, 27, 27, 0.5);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
+  border-radius: var(--r3);
+  padding: 14px 20px;
+  box-shadow: var(--shadow-xl);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.compose-inner:focus-within {
+  transform: translateY(-2px);
+  box-shadow: 0 30px 70px rgba(0,0,0,0.6);
+}
+
+/* AI Agents Side Panel */
+.agents-panel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 260px;
+  background: rgba(14, 14, 14, 0.8);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-right: var(--glass-border);
+  z-index: 1000;
+  transform: translateX(-100%);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 20px 0 50px rgba(0,0,0,0.5);
+}
+.agents-panel.open {
+  transform: translateX(0);
+}
+.agents-panel-header {
+  padding: 24px 20px;
+  border-bottom: var(--glass-border);
+}
+.agents-panel-title {
+  font-family: var(--serif);
+  font-size: 20px;
+  color: var(--tx);
+}
+.agents-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+.agent-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--r);
+  cursor: pointer;
+  transition: background 0.2s;
+  border: 1px solid transparent;
+}
+.agent-item:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.05);
+}
+.agent-item.active {
+  background: rgba(46, 91, 255, 0.1);
+  border-color: rgba(46, 91, 255, 0.2);
+}
+.agent-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--bg-3);
+  color: var(--blue);
+  box-shadow: var(--shadow-sm);
+}
+.agent-info .agent-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--tx);
+}
+.agent-info .agent-status {
+  font-size: 10px;
+  color: var(--tx-4);
+}
 .btn-repo {
   display: inline-flex;
   align-items: center;

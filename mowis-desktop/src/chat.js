@@ -16,6 +16,23 @@ export function setChatCallbacks({ setTaskPanelOpen, renderTaskPanel, setSession
   _setTaskPanelOpen = setTaskPanelOpen;
   _renderTaskPanel = renderTaskPanel;
   _setSessionActive = setSessionActive;
+
+  // Initialize AI Agents panel toggle
+  const btnAgents = $('btn-agents-toggle');
+  const panelAgents = $('agents-panel');
+  if (btnAgents && panelAgents) {
+    btnAgents.addEventListener('click', (e) => {
+      e.stopPropagation();
+      panelAgents.classList.toggle('open');
+    });
+
+    // Close panel when clicking outside
+    document.addEventListener('click', (e) => {
+      if (panelAgents.classList.contains('open') && !panelAgents.contains(e.target)) {
+        panelAgents.classList.remove('open');
+      }
+    });
+  }
 }
 
 // ── Chat rendering ───────────────────────────────────────────────────────────
