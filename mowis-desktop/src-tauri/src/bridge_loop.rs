@@ -1,4 +1,3 @@
-use crate::agent_manager::AgentManager;
 use crate::backend::BackendBridge;
 use crate::state::*;
 use crate::types::*;
@@ -62,6 +61,7 @@ pub fn start_bridge(
     // ── 2. Start mowis-agent subprocess ────────────────────────────────────────
     {
         let state_clone = Arc::clone(&state);
+        let app_for_agent = app.clone();
         tauri::async_runtime::spawn(async move {
             let resource_dir = std::env::current_exe()
                 .ok()
@@ -70,14 +70,41 @@ pub fn start_bridge(
 
             let port = crate::agent_manager::DEFAULT_AGENT_PORT;
             log::info!("[bridge] Initializing mowis-agent manager (default port: {})", port);
-            let mut mgr = AgentManager::new(port);
-            match mgr.start(&resource_dir).await {
+
+            // Create a channel so agent startup logs appear in the boot terminal
+            let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<crate::agent_manager::LogEntry>();
+            tokio::spawn(async move {
+                while let Some((text, level)) = log_rx.recv().await {
+                    // Map agent log levels to setup_progress kinds
+                    let kind = match level.as_str() {
+                        "command" => "command",
+                        "output" => "output",
+                        "success" => "success",
+                        "error" => "error",
+                        "warning" => "warning",
+                        _ => "info",
+                    };
+                    let _ = app_for_agent.emit("setup_progress", serde_json::json!({
+                        "stage": "agent",
+                        "message": text,
+                        "pct": 60,
+                        "kind": kind,
+                        "timestamp": std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    }));
+                }
+            });
+
+            let mut mgr = crate::agent_manager::AgentManager::new(port);
+            match mgr.start(&resource_dir, Some(log_tx)).await {
                 Ok(()) => {
-                    log::info!("[bridge] ✓ mowis-agent ready on port {}", mgr.port());
+                    log::info!("[bridge] mowis-agent ready on port {}", mgr.port());
                     *state_clone.agent_manager.lock().unwrap() = Some(mgr);
                 }
                 Err(e) => {
-                    log::error!("[bridge] ✗ mowis-agent failed to start: {}", e);
+                    log::error!("[bridge] mowis-agent failed to start: {}", e);
                     log::info!("[bridge] Agent commands will not be available — falling back to simulation");
                     *state_clone.agent_manager.lock().unwrap() = Some(mgr);
                 }
@@ -355,8 +382,33 @@ pub fn socket_value_to_bridge_event(v: &serde_json::Value) -> Option<BridgeEvent
         "error"         => Some(BridgeEvent::OrchestrationFailed(
             v["message"].as_str().unwrap_or("unknown error").to_owned(),
         )),
+        "stats"         => {
+            // Stats events from the orchestrator — emit as a simulation tick
+            let completed = v["completed"].as_u64().unwrap_or(0) as usize;
+            let running = v["running"].as_u64().unwrap_or(0) as usize;
+            Some(BridgeEvent::SimulationTick {
+                tasks_done: completed,
+                active_agents: running,
+                tokens_delta: 0,
+            })
+        }
         _ => None,
     }
+}
+
+/// Try to extract a bridge event from any JSON value, including socket server
+/// error responses that use the `{"status": "error", "error": "..."}` format.
+pub fn socket_value_to_bridge_event_lenient(v: &serde_json::Value) -> Option<BridgeEvent> {
+    // First try the standard type-based mapping
+    if let Some(evt) = socket_value_to_bridge_event(v) {
+        return Some(evt);
+    }
+    // Fall back to socket server error format
+    if v.get("status").and_then(|s| s.as_str()) == Some("error") {
+        let msg = v["error"].as_str().unwrap_or("unknown agentd error").to_owned();
+        return Some(BridgeEvent::OrchestrationFailed(msg));
+    }
+    None
 }
 
 pub fn parse_task_status(v: &serde_json::Value) -> TaskStatus {
@@ -432,13 +484,22 @@ pub async fn run_orchestration(
                 loop {
                     match bridge.recv_next().await {
                         Ok(Some(v)) => {
-                            if let Some(evt) = socket_value_to_bridge_event(&v) {
+                            log::debug!("[bridge] recv: {}", v);
+                            if let Some(evt) = socket_value_to_bridge_event_lenient(&v) {
+                                let is_done = matches!(&evt, BridgeEvent::OrchestrationComplete | BridgeEvent::OrchestrationFailed(_));
                                 if event_tx.send(evt).await.is_err() { return; }
+                                if is_done { return; }
                             }
                         }
-                        Ok(None) => return, // clean EOF — daemon finished
+                        Ok(None) => {
+                            log::info!("[bridge] Connection closed by daemon (EOF)");
+                            return;
+                        }
                         Err(e) => {
                             log::warn!("Bridge recv error: {e}");
+                            let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
+                                format!("Connection lost: {e}")
+                            )).await;
                             break;
                         }
                     }

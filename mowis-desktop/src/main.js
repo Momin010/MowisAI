@@ -531,7 +531,7 @@ async function setupListeners() {
 async function startAgentWithModal() {
   return new Promise((resolve) => {
     const modal    = $('agent-startup-modal');
-    const logEl    = $('agent-startup-log');
+    const logBody  = $('agent-startup-log-body');
     const spinner  = $('agent-startup-spinner');
     const spinnerText = $('agent-startup-spinner-text');
     const subtitle = $('agent-startup-subtitle');
@@ -546,23 +546,44 @@ async function startAgentWithModal() {
     let unlistenLog = null;
     const cleanups = [];
 
+    const kindIcons = {
+      info:    '\u2022',
+      command: '\u25B6',
+      output:  ' ',
+      success: '\u2713',
+      error:   '\u2717',
+      warning: '\u26A0',
+    };
+
     function addLogLine(text, level) {
-      if (!logEl) return;
+      if (!logBody) return;
       const line = document.createElement('div');
       line.className = `agent-log-line ${level || 'info'}`;
-      const pre = document.createElement('span');
-      pre.className = 'agent-log-prefix';
-      pre.textContent = level === 'success' ? '✓' : level === 'error' ? '✗' : '›';
-      const txt = document.createElement('span');
-      txt.textContent = text;
-      line.appendChild(pre);
-      line.appendChild(txt);
-      logEl.appendChild(line);
-      logEl.scrollTop = logEl.scrollHeight;
+
+      const ts = document.createElement('span');
+      ts.className = 'agent-log-ts';
+      const d = new Date();
+      ts.textContent = d.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+      const icon = document.createElement('span');
+      icon.className = 'agent-log-icon';
+      icon.textContent = kindIcons[level] || '\u2022';
+
+      const msg = document.createElement('span');
+      msg.className = 'agent-log-text';
+      msg.textContent = text;
+
+      line.appendChild(ts);
+      line.appendChild(icon);
+      line.appendChild(msg);
+      logBody.appendChild(line);
+
+      const logEl = $('agent-startup-log');
+      if (logEl) logEl.scrollTop = logEl.scrollHeight;
     }
 
     function resetUI() {
-      if (logEl) logEl.innerHTML = '';
+      if (logBody) logBody.innerHTML = '';
       if (errorEl) errorEl.classList.add('hidden');
       if (actionsEl) actionsEl.classList.add('hidden');
       if (spinner) { spinner.classList.remove('done', 'error'); }
@@ -588,7 +609,7 @@ async function startAgentWithModal() {
           if (spinnerText) spinnerText.textContent = 'Agent connected';
           if (subtitle) subtitle.textContent = 'mowis-agent is ready';
           State.agentHealthy = true;
-          setTimeout(() => { closeModal(); resolve(true); }, 500);
+          setTimeout(() => { closeModal(); resolve(true); }, 600);
         })
         .catch((err) => {
           if (spinner) spinner.classList.add('error');

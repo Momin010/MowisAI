@@ -346,6 +346,12 @@ impl ToolRegistry {
             crate::tools::create_read_multiple_files_tool as ToolFactory,
         );
 
+        // Meta tools (1)
+        tools.insert(
+            "discover_tools",
+            crate::tools::create_discover_tools_tool as ToolFactory,
+        );
+
         ToolRegistry {
             tools: Mutex::new(tools),
         }

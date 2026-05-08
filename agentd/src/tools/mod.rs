@@ -2,6 +2,7 @@ pub mod channels;
 pub mod common;
 pub mod data;
 pub mod dev_tools;
+pub mod discover_tools;
 pub mod docker;
 pub mod filesystem;
 pub mod git;
@@ -23,6 +24,7 @@ pub use common::{CHANNELS, MEMORY_STORE, SECRET_STORE};
 pub use channels::*;
 pub use data::*;
 pub use dev_tools::*;
+pub use discover_tools::*;
 pub use docker::*;
 pub use filesystem::*;
 pub use git::*;
@@ -292,4 +294,8 @@ pub fn create_search_code_tool() -> Box<dyn Tool> {
 }
 pub fn create_read_multiple_files_tool() -> Box<dyn Tool> {
     Box::new(search::ReadMultipleFilesTool)
+}
+
+pub fn create_discover_tools_tool() -> Box<dyn Tool> {
+    Box::new(discover_tools::DiscoverToolsTool)
 }

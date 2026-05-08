@@ -238,8 +238,39 @@ pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<Config, Strin
 
 #[tauri::command]
 pub async fn save_config(state: State<'_, Arc<AppState>>, config: Config) -> Result<(), String> {
-    *state.config.lock().unwrap() = config;
-    save_state(&state)
+    *state.config.lock().unwrap() = config.clone();
+    save_state(&state)?;
+
+    // Sync provider config to agentd so orchestration uses the same credentials
+    let bridge = Arc::clone(&state.bridge);
+    if bridge.is_connected() {
+        let payload = serde_json::json!({
+            "request_type": "set_config",
+            "provider": config.provider,
+            "model": config.model,
+            "api_key": if config.api_key.is_empty() { None } else { Some(&config.api_key) },
+            "gcp_project_id": if config.gcp_project.is_empty() { None } else { Some(&config.gcp_project) },
+        });
+        match bridge.send(payload).await {
+            Ok(()) => {
+                match bridge.recv_next().await {
+                    Ok(Some(resp)) => {
+                        if resp.get("status").and_then(|s| s.as_str()) == Some("ok") {
+                            log::info!("[config] Synced provider config to agentd");
+                        } else {
+                            let err = resp["error"].as_str().unwrap_or("unknown error");
+                            log::warn!("[config] agentd rejected config sync: {}", err);
+                        }
+                    }
+                    Ok(None) => log::warn!("[config] agentd closed connection during config sync"),
+                    Err(e) => log::warn!("[config] Failed to read agentd config sync response: {}", e),
+                }
+            }
+            Err(e) => log::warn!("[config] Failed to sync config to agentd: {}", e),
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -811,7 +842,7 @@ pub async fn agent_start(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    // Release lock before any await — sync Mutex must not be held across await points.
+    // Check if already running and healthy
     let maybe_client = {
         let lock = state.agent_manager.lock().map_err(|e| e.to_string())?;
         lock.as_ref().map(|m| (m.client().clone(), m.port()))
@@ -834,38 +865,30 @@ pub async fn agent_start(
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_default();
 
-    let _ = app.emit("agent_startup_log", serde_json::json!({
-        "text": format!("Searching for mowis-agent in: {}", resource_dir.display()),
-        "level": "info"
-    }));
-    let _ = app.emit("agent_startup_log", serde_json::json!({
-        "text": format!(
-            "Scanning ports {}–{} for a running instance...",
-            crate::agent_manager::DEFAULT_AGENT_PORT,
-            crate::agent_manager::DEFAULT_AGENT_PORT + 9
-        ),
-        "level": "info"
-    }));
+    // Create a channel for live log forwarding from the agent manager
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<crate::agent_manager::LogEntry>();
+
+    // Spawn a task that forwards log entries to the Tauri frontend
+    let app_clone = app.clone();
+    tokio::spawn(async move {
+        while let Some((text, level)) = log_rx.recv().await {
+            let _ = app_clone.emit("agent_startup_log", serde_json::json!({
+                "text": text,
+                "level": level
+            }));
+        }
+    });
 
     let mut mgr = crate::agent_manager::AgentManager::new(crate::agent_manager::DEFAULT_AGENT_PORT);
 
-    match mgr.start(&resource_dir).await {
+    match mgr.start(&resource_dir, Some(log_tx)).await {
         Ok(()) => {
             let port = mgr.port();
-            let _ = app.emit("agent_startup_log", serde_json::json!({
-                "text": format!("mowis-agent ready on port {}", port),
-                "level": "success"
-            }));
             *state.agent_manager.lock().map_err(|e| e.to_string())? = Some(mgr);
             Ok(serde_json::json!({ "port": port }))
         }
         Err(e) => {
-            let msg = format!("{:#}", e);
-            let _ = app.emit("agent_startup_log", serde_json::json!({
-                "text": msg.clone(),
-                "level": "error"
-            }));
-            Err(msg)
+            Err(format!("{:#}", e))
         }
     }
 }

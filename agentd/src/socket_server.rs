@@ -19,6 +19,13 @@ use crate::tool_registry;
 use crate::vm_backend::{boot_vm, exec_in_vm, stop_vm, VmHandle};
 use crate::{ResourceLimits, Sandbox};
 
+use crate::config::MowisConfig;
+use crate::orchestration::complexity_classifier::ComplexityMode;
+use crate::orchestration::new_orchestrator::{
+    NewOrchestrator, OrchestratorConfig, OrchestratorEvent,
+};
+use crate::orchestration::provider_client::LlmConfig;
+
 const FAST_WORKERS: usize = 64;
 pub(crate) const SLOW_WORKERS: usize = 128;
 
@@ -60,6 +67,7 @@ lazy_static! {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct SocketRequest {
+    #[serde(alias = "type")]
     pub request_type: String,
     /// Sandbox ID – accepted as either a string ("123") or bare number (123)
     pub sandbox: Option<Value>,
@@ -94,6 +102,34 @@ pub struct SocketRequest {
     pub checkpoint_id: Option<u64>,
     /// Checkpoint directory path for create_checkpoint and restore_checkpoint
     pub checkpoint_dir: Option<String>,
+
+    // ── Orchestrate-specific fields ─────────────────────────────────────────
+    /// Prompt for orchestrate requests (alias for command)
+    pub prompt: Option<String>,
+    /// Project path for orchestrate requests (alias for project_root)
+    pub project: Option<String>,
+    /// Max agents override for orchestrate requests
+    pub max_agents: Option<u64>,
+    /// Mode override for orchestrate requests (simple/standard/full/auto)
+    pub mode: Option<String>,
+
+    // ── Config sync fields ──────────────────────────────────────────────────
+    /// Provider name for set_config requests (e.g., "gemini", "vertex_ai", "open_ai")
+    pub provider: Option<String>,
+    /// Model name for set_config requests
+    pub model: Option<String>,
+    /// Plaintext API key for set_config requests (agentd encrypts before saving)
+    pub api_key: Option<String>,
+    /// GCP project ID for set_config requests (Vertex AI)
+    pub gcp_project_id: Option<String>,
+
+    // ── Extra fields from desktop ───────────────────────────────────────────
+    /// Repository source (e.g., "local", "github")
+    pub repo_source: Option<String>,
+    /// Repository URL (for GitHub repos)
+    pub repo_url: Option<String>,
+    /// Git workflow policy for agents
+    pub git_policy: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -339,7 +375,8 @@ enum RequestLane {
 
 fn validate_request(req: &SocketRequest) -> Result<(), String> {
     match req.request_type.as_str() {
-        "create_sandbox" | "list" | "get_audit_stats" | "get_anomalies" | "agent_spawn" => Ok(()),
+        "create_sandbox" | "list" | "get_audit_stats" | "get_anomalies" | "agent_spawn"
+        | "orchestrate" | "set_config" | "get_config" => Ok(()),
         "create_container" => {
             if req.sandbox.is_none() {
                 Err("create_container: missing sandbox id".to_string())
@@ -1117,6 +1154,95 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             }
         }
 
+        // ── set_config ─────────────────────────────────────────────────────
+        // Sync provider settings from the desktop app to agentd's config.toml.
+        // Accepts plaintext API key and encrypts it before saving.
+        "set_config" => {
+            let mut config = match MowisConfig::load() {
+                Ok(Some(c)) => c,
+                Ok(None) => MowisConfig::default(),
+                Err(e) => return SocketResponse::err(format!("load config: {}", e)),
+            };
+
+            if let Some(ref provider_str) = req.provider {
+                match serde_json::from_str::<crate::config::AiProvider>(&format!("\"{}\"", provider_str)) {
+                    Ok(p) => config.provider = p,
+                    Err(_) => return SocketResponse::err(format!("invalid provider: {}", provider_str)),
+                }
+            }
+
+            if let Some(ref model) = req.model {
+                config.model = model.clone();
+                match config.provider {
+                    crate::config::AiProvider::Gemini => config.gemini_model = model.clone(),
+                    crate::config::AiProvider::OpenAi => config.openai_model = model.clone(),
+                    crate::config::AiProvider::Anthropic => config.anthropic_model = model.clone(),
+                    crate::config::AiProvider::Grok => config.grok_model = model.clone(),
+                    crate::config::AiProvider::Groq => config.groq_model = model.clone(),
+                    crate::config::AiProvider::Mimo => config.mimo_model = model.clone(),
+                    crate::config::AiProvider::VertexAi => {}
+                }
+            }
+
+            if let Some(ref project_id) = req.gcp_project_id {
+                config.gcp_project_id = project_id.clone();
+            }
+
+            if let Some(ref api_key) = req.api_key {
+                if !api_key.is_empty() {
+                    match crate::crypto::encrypt(api_key) {
+                        Ok(encrypted) => {
+                            match config.provider {
+                                crate::config::AiProvider::Gemini => config.gemini_api_key_enc = Some(encrypted),
+                                crate::config::AiProvider::OpenAi => config.openai_api_key_enc = Some(encrypted),
+                                crate::config::AiProvider::Anthropic => config.anthropic_api_key_enc = Some(encrypted),
+                                crate::config::AiProvider::Grok => config.grok_api_key_enc = Some(encrypted),
+                                crate::config::AiProvider::Groq => config.groq_api_key_enc = Some(encrypted),
+                                crate::config::AiProvider::Mimo => config.mimo_api_key_enc = Some(encrypted),
+                                crate::config::AiProvider::VertexAi => {}
+                            }
+                        }
+                        Err(e) => return SocketResponse::err(format!("encrypt api_key: {}", e)),
+                    }
+                }
+            }
+
+            match config.save() {
+                Ok(()) => SocketResponse::ok(Some(json!({
+                    "provider": format!("{}", config.provider),
+                    "model": config.model,
+                    "config_path": MowisConfig::config_path().display().to_string(),
+                }))),
+                Err(e) => SocketResponse::err(format!("save config: {}", e)),
+            }
+        }
+
+        // ── get_config ─────────────────────────────────────────────────────
+        "get_config" => {
+            match MowisConfig::load() {
+                Ok(Some(config)) => {
+                    SocketResponse::ok(Some(json!({
+                        "provider": format!("{}", config.provider),
+                        "model": config.model,
+                        "gcp_project_id": config.gcp_project_id,
+                        "has_api_key": match config.provider {
+                            crate::config::AiProvider::VertexAi => true,
+                            crate::config::AiProvider::Gemini => config.gemini_api_key_enc.is_some(),
+                            crate::config::AiProvider::OpenAi => config.openai_api_key_enc.is_some(),
+                            crate::config::AiProvider::Anthropic => config.anthropic_api_key_enc.is_some(),
+                            crate::config::AiProvider::Grok => config.grok_api_key_enc.is_some(),
+                            crate::config::AiProvider::Groq => config.groq_api_key_enc.is_some(),
+                            crate::config::AiProvider::Mimo => config.mimo_api_key_enc.is_some(),
+                        },
+                        "socket_path": config.socket_path,
+                        "max_agents": config.max_agents,
+                    })))
+                }
+                Ok(None) => SocketResponse::ok(Some(json!({"configured": false}))),
+                Err(e) => SocketResponse::err(format!("load config: {}", e)),
+            }
+        }
+
         other => SocketResponse::err(format!("unknown request type '{}'", other)),
     }
 }
@@ -1191,8 +1317,240 @@ fn write_socket_response(stream: &mut UnixStream, response: &SocketResponse) -> 
     Ok(())
 }
 
+// ── Orchestrate streaming handler ─────────────────────────────────────────────
+
+/// Convert an OrchestratorEvent to a JSON value that the desktop bridge understands.
+fn orchestrator_event_to_json(event: &OrchestratorEvent) -> Option<serde_json::Value> {
+    match event {
+        OrchestratorEvent::TaskStarted { task_id, description, sandbox, .. } => {
+            Some(json!({
+                "type": "task_added",
+                "id": task_id,
+                "description": description,
+                "sandbox": sandbox,
+                "status": "running"
+            }))
+        }
+        OrchestratorEvent::TaskCompleted { task_id, success, diff_size, .. } => {
+            Some(json!({
+                "type": "task_updated",
+                "id": task_id,
+                "status": if *success { "complete" } else { "failed" },
+                "diff_size": diff_size
+            }))
+        }
+        OrchestratorEvent::TaskFailed { task_id, error, .. } => {
+            Some(json!({
+                "type": "task_updated",
+                "id": task_id,
+                "status": "failed",
+                "error": error
+            }))
+        }
+        OrchestratorEvent::LayerProgress { layer, message } => {
+            Some(json!({
+                "type": "agent_message",
+                "content": format!("— **Layer {}**: {}", layer, message)
+            }))
+        }
+        OrchestratorEvent::StatsUpdate { stats } => {
+            Some(json!({
+                "type": "stats",
+                "total": stats.total_tasks,
+                "completed": stats.completed,
+                "failed": stats.failed,
+                "running": stats.running,
+                "pending": stats.pending
+            }))
+        }
+        OrchestratorEvent::ToolCall { tool_name, args_preview, .. } => {
+            Some(json!({
+                "type": "agent_chunk",
+                "content": format!("  → {}({})\n", tool_name, args_preview)
+            }))
+        }
+        OrchestratorEvent::ToolResult { tool_name, success, preview, .. } => {
+            let icon = if *success { "✓" } else { "✗" };
+            Some(json!({
+                "type": "agent_chunk",
+                "content": format!("  {} {} → {}\n", icon, tool_name, preview)
+            }))
+        }
+        OrchestratorEvent::Done => None, // Handled separately
+    }
+}
+
+/// Handle an orchestrate request with streaming responses.
+/// Unlike regular requests that return one response, this keeps the connection
+/// open and streams JSON events as the orchestrator progresses.
+fn handle_orchestrate_streaming(
+    mut stream: UnixStream,
+    req: SocketRequest,
+) -> Result<()> {
+    // Extract parameters from the request
+    let prompt = req.prompt
+        .or(req.command)
+        .unwrap_or_default();
+    let project_root = req.project
+        .or(req.project_root)
+        .unwrap_or_else(|| ".".to_string());
+    let max_agents = req.max_agents
+        .or_else(|| req.input.as_ref().and_then(|v| v.as_u64()))
+        .unwrap_or(50) as usize;
+    let mode_str = req.mode
+        .or(req.name)
+        .unwrap_or_else(|| "auto".to_string());
+
+    log::info!("[orchestrate] Starting orchestration: prompt='{}', project='{}', max_agents={}, mode='{}'",
+        prompt.chars().take(60).collect::<String>(), project_root, max_agents, mode_str);
+
+    // Load config from disk
+    let config = match MowisConfig::load() {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            let err_resp = json!({"type": "error", "message": "No mowisai config found. Run setup first."});
+            write_socket_json(&mut stream, &err_resp)?;
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return Ok(());
+        }
+        Err(e) => {
+            let err_resp = json!({"type": "error", "message": format!("Failed to load config: {}", e)});
+            write_socket_json(&mut stream, &err_resp)?;
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return Ok(());
+        }
+    };
+
+    // Build LLM config
+    let llm_config = match LlmConfig::from_config(&config) {
+        Ok(c) => c,
+        Err(e) => {
+            let err_resp = json!({"type": "error", "message": format!("LLM config error: {}", e)});
+            write_socket_json(&mut stream, &err_resp)?;
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return Ok(());
+        }
+    };
+
+    // Parse mode override
+    let mode_override = match mode_str.as_str() {
+        "simple" => Some(ComplexityMode::Simple),
+        "standard" => Some(ComplexityMode::Standard),
+        "full" => Some(ComplexityMode::Full),
+        _ => None, // "auto" or anything else → let classifier decide
+    };
+
+    // Create orchestrator config
+    let project = std::path::PathBuf::from(&project_root);
+    let orchestrator_config = OrchestratorConfig {
+        llm_config,
+        socket_path: config.socket_path.clone(),
+        project_root: project.clone(),
+        overlay_root: std::path::PathBuf::from(&config.overlay_root),
+        checkpoint_root: std::path::PathBuf::from(&config.checkpoint_root),
+        merge_work_dir: std::path::PathBuf::from(&config.merge_work_dir),
+        max_agents,
+        max_verification_rounds: 3,
+        staging_dir: None,
+        event_tx: None, // Will be set below
+        mode_override,
+    };
+
+    // Create tokio runtime for the async orchestrator
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            let err_resp = json!({"type": "error", "message": format!("Failed to create runtime: {}", e)});
+            write_socket_json(&mut stream, &err_resp)?;
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return Ok(());
+        }
+    };
+
+    // Create event channel (std::sync for cross-thread, bridged to tokio below)
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<OrchestratorEvent>();
+
+    // Set the event sender on the config
+    let mut orchestrator_config = orchestrator_config;
+    orchestrator_config.event_tx = Some(event_tx);
+
+    // Run orchestrator in a separate thread, stream events back on this thread
+    let orchestrator_thread = {
+        let prompt = prompt.clone();
+        std::thread::Builder::new()
+            .name("orchestrator-worker".into())
+            .spawn(move || {
+                rt.block_on(async move {
+                    let orchestrator = NewOrchestrator::new(orchestrator_config);
+                    match orchestrator.run(&prompt).await {
+                        Ok(output) => {
+                            log::info!("[orchestrate] Completed: {} agents, {}s",
+                                output.total_agents_used, output.total_duration_secs);
+                        }
+                        Err(e) => {
+                            log::error!("[orchestrate] Failed: {:#}", e);
+                        }
+                    }
+                });
+            })
+    };
+
+    // Stream events from the orchestrator to the socket client
+    loop {
+        match event_rx.recv() {
+            Ok(event) => {
+                let is_done = matches!(event, OrchestratorEvent::Done);
+
+                if let Some(json_val) = orchestrator_event_to_json(&event) {
+                    if let Err(e) = write_socket_json(&mut stream, &json_val) {
+                        log::warn!("[orchestrate] Failed to write event: {}", e);
+                        break;
+                    }
+                }
+
+                if is_done {
+                    break;
+                }
+            }
+            Err(_) => {
+                // Channel closed — orchestrator finished (or crashed)
+                log::info!("[orchestrate] Event channel closed");
+                break;
+            }
+        }
+    }
+
+    // Wait for orchestrator thread to finish
+    if let Ok(thread) = orchestrator_thread {
+        let _ = thread.join();
+    }
+
+    // Send completion event
+    let complete = json!({"type": "complete"});
+    let _ = write_socket_json(&mut stream, &complete);
+
+    // Close connection
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    Ok(())
+}
+
+/// Write a JSON value followed by newline to the socket stream.
+fn write_socket_json(stream: &mut UnixStream, value: &serde_json::Value) -> Result<()> {
+    let text = serde_json::to_string(value).context("serialize JSON")?;
+    stream.write_all(text.as_bytes()).context("write JSON")?;
+    stream.write_all(b"\n").context("write newline")?;
+    stream.flush().context("flush")?;
+    Ok(())
+}
+
 fn process_job(job: WorkerJob) -> Result<()> {
     let WorkerJob { mut connection } = job;
+
+    // Orchestrate requests use streaming: keep connection open, send multiple JSON events
+    if connection.request.request_type == "orchestrate" {
+        return handle_orchestrate_streaming(connection.stream, connection.request);
+    }
+
     let response = handle_request(connection.request);
     let result = write_socket_response(&mut connection.stream, &response);
     let _ = connection.stream.shutdown(std::net::Shutdown::Both);

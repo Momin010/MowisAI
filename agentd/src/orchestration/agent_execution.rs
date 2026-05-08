@@ -196,6 +196,29 @@ impl AgentExecutor {
             ));
         }
 
+        // ── Mandatory discover_tools call at session start ──────────────────
+        // This gives the LLM a complete catalog of available tools before it
+        // starts working. We call it once and inject the result into context.
+        let discover_result = self.execute_tool_with_retry(
+            &agent.sandbox_name,
+            &agent.container_id,
+            "discover_tools",
+            &json!({}),
+        ).await;
+        match discover_result {
+            Ok(catalog) => {
+                conversation.push_user(format!(
+                    "Here is your complete tool catalog (from discover_tools):\n{}\n\n\
+                     Use this reference to select the right tool for each step.",
+                    serde_json::to_string_pretty(&catalog).unwrap_or_default()
+                ));
+            }
+            Err(e) => {
+                log::warn!("discover_tools call failed (non-fatal): {}", e);
+                // Non-fatal: continue without the catalog
+            }
+        }
+
         let enhanced_system_prompt = format!(
             "{}\n\n\
             CRITICAL REQUIREMENTS:\n\

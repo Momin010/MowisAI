@@ -62,8 +62,7 @@ impl ToolDefinition {
 
 /// Validate that a URL is safe to access (no SSRF to internal services)
 fn is_safe_url(url: &str) -> anyhow::Result<()> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+    let parsed = url::Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
 
     match parsed.scheme() {
         "http" | "https" => {}
@@ -84,9 +83,9 @@ fn is_safe_url(url: &str) -> anyhow::Result<()> {
     if let Some(host) = parsed.host_str() {
         // Block RFC 1918 private ranges, loopback, link-local, metadata
         let blocked_hosts = [
-            "169.254.169.254",  // AWS/GCP/Azure metadata
+            "169.254.169.254", // AWS/GCP/Azure metadata
             "metadata.google.internal",
-            "100.100.100.200",  // Alibaba metadata
+            "100.100.100.200", // Alibaba metadata
         ];
 
         if blocked_hosts.contains(&host) {
@@ -108,7 +107,12 @@ fn is_safe_url(url: &str) -> anyhow::Result<()> {
         if let Ok(ip) = host.parse::<std::net::IpAddr>() {
             match ip {
                 std::net::IpAddr::V4(v4) => {
-                    if v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified() {
+                    if v4.is_private()
+                        || v4.is_loopback()
+                        || v4.is_link_local()
+                        || v4.is_broadcast()
+                        || v4.is_unspecified()
+                    {
                         return Err(anyhow::anyhow!(
                             "Access to private/internal IP '{}' is blocked",
                             v4
@@ -128,8 +132,10 @@ fn is_safe_url(url: &str) -> anyhow::Result<()> {
 
         // Block common internal hostnames
         let lower_host = host.to_lowercase();
-        if lower_host.ends_with(".internal") || lower_host.ends_with(".local")
-            || lower_host.ends_with(".corp") || lower_host.ends_with(".home")
+        if lower_host.ends_with(".internal")
+            || lower_host.ends_with(".local")
+            || lower_host.ends_with(".corp")
+            || lower_host.ends_with(".home")
         {
             return Err(anyhow::anyhow!(
                 "Access to internal hostname '{}' is blocked",
@@ -173,9 +179,14 @@ pub fn validate_command(cmd: &str) -> anyhow::Result<()> {
 
 /// Validate a directory path for use in shell context (cwd)
 pub fn validate_cwd(cwd: &str) -> anyhow::Result<()> {
-    if cwd.contains('\0') || cwd.contains(';') || cwd.contains('&')
-        || cwd.contains('|') || cwd.contains('$') || cwd.contains('`')
-        || cwd.contains('\n') || cwd.contains('\r')
+    if cwd.contains('\0')
+        || cwd.contains(';')
+        || cwd.contains('&')
+        || cwd.contains('|')
+        || cwd.contains('$')
+        || cwd.contains('`')
+        || cwd.contains('\n')
+        || cwd.contains('\r')
     {
         return Err(anyhow::anyhow!(
             "Working directory path contains unsafe characters"
@@ -209,7 +220,11 @@ pub fn resolve_path(ctx: &ToolContext, path: &str) -> anyhow::Result<PathBuf> {
     // If the path doesn't exist yet, canonicalize the parent and check containment
     let resolved = if candidate.exists() {
         candidate.canonicalize().map_err(|e| {
-            anyhow::anyhow!("Failed to canonicalize path '{}': {}", candidate.display(), e)
+            anyhow::anyhow!(
+                "Failed to canonicalize path '{}': {}",
+                candidate.display(),
+                e
+            )
         })?
     } else {
         // For new files, canonicalize the deepest existing ancestor
@@ -225,7 +240,11 @@ pub fn resolve_path(ctx: &ToolContext, path: &str) -> anyhow::Result<PathBuf> {
             };
         }
         let canonical_ancestor = ancestor.canonicalize().map_err(|e| {
-            anyhow::anyhow!("Failed to canonicalize ancestor '{}': {}", ancestor.display(), e)
+            anyhow::anyhow!(
+                "Failed to canonicalize ancestor '{}': {}",
+                ancestor.display(),
+                e
+            )
         })?;
         let mut result = canonical_ancestor;
         for comp in components.into_iter().rev() {
@@ -235,7 +254,9 @@ pub fn resolve_path(ctx: &ToolContext, path: &str) -> anyhow::Result<PathBuf> {
     };
 
     // CRITICAL: Verify the resolved path is within the base directory
-    let canonical_base = base_path.canonicalize().unwrap_or_else(|_| base_path.to_path_buf());
+    let canonical_base = base_path
+        .canonicalize()
+        .unwrap_or_else(|_| base_path.to_path_buf());
     if !resolved.starts_with(&canonical_base) {
         return Err(anyhow::anyhow!(
             "Path '{}' escapes the container root '{}'. Access denied.",
@@ -255,7 +276,11 @@ pub fn validate_url_for_http(url: &str) -> anyhow::Result<()> {
 /// Execute a curl command with safety controls
 pub fn execute_http_command(cmd: Vec<&str>) -> anyhow::Result<Value> {
     // Find the URL in the command (last non-flag argument)
-    let url = cmd.iter().rev().find(|arg| !arg.starts_with('-') && !arg.starts_with('\n')).cloned();
+    let url = cmd
+        .iter()
+        .rev()
+        .find(|arg| !arg.starts_with('-') && !arg.starts_with('\n'))
+        .cloned();
     if let Some(url) = url {
         is_safe_url(&url)?;
     }
@@ -263,11 +288,11 @@ pub fn execute_http_command(cmd: Vec<&str>) -> anyhow::Result<Value> {
     let mut full_cmd = cmd;
     // Inject timeout if not present
     if !full_cmd.contains(&"--connect-timeout") {
-        full_cmd.insert(0, "10");  // 10s connect timeout
+        full_cmd.insert(0, "10"); // 10s connect timeout
         full_cmd.insert(0, "--connect-timeout");
     }
     if !full_cmd.contains(&"--max-time") {
-        full_cmd.insert(0, "60");  // 60s total timeout
+        full_cmd.insert(0, "60"); // 60s total timeout
         full_cmd.insert(0, "--max-time");
     }
     // Disable redirects to internal networks
@@ -276,9 +301,7 @@ pub fn execute_http_command(cmd: Vec<&str>) -> anyhow::Result<Value> {
         full_cmd.insert(0, "--max-redirs");
     }
 
-    let output = Command::new("curl")
-        .args(&full_cmd)
-        .output()?;
+    let output = Command::new("curl").args(&full_cmd).output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = stdout.lines().collect();

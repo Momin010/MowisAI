@@ -63,7 +63,11 @@ impl Tool for GrepTool {
             for (i, line) in lines.iter().enumerate() {
                 if regex.is_match(line) {
                     let context_before = if i > 0 { lines[i - 1] } else { "" };
-                    let context_after = if i + 1 < lines.len() { lines[i + 1] } else { "" };
+                    let context_after = if i + 1 < lines.len() {
+                        lines[i + 1]
+                    } else {
+                        ""
+                    };
                     matches.push(json!({
                         "file": entry.path().to_string_lossy().to_string(),
                         "line": i + 1,

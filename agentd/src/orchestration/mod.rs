@@ -1179,6 +1179,15 @@ pub(crate) fn gemini_tool_declarations() -> serde_json::Value {
                 },
                 "required": ["paths"]
             }
+        },
+        {
+            "name": "discover_tools",
+            "description": "MUST be called at the start of every session. Returns the complete catalog of all available tools with their parameters, categories, and usage rules. Call this before using any other tool to understand your full capabilities.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
         }
     ])
 }

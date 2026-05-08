@@ -5,10 +5,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum AiProvider {
+    #[serde(alias = "vertex")]
     VertexAi,
     Grok,
     Groq,
     Anthropic,
+    #[serde(alias = "openai")]
     OpenAi,
     Gemini,
     Mimo,

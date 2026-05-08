@@ -33,7 +33,9 @@
   <div class="engine-modal-backdrop"></div>
   <div class="engine-modal-dialog" role="dialog" aria-modal="true">
     <div class="engine-modal-head">
-      <div class="engine-modal-icon">⚙</div>
+      <div class="engine-modal-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </div>
       <div>
         <div class="engine-modal-title">Engine Setup Required</div>
         <div class="engine-modal-subtitle">MowisAI needs a Linux environment to run the full orchestration engine</div>
@@ -638,7 +640,9 @@
   <div class="engine-modal-backdrop"></div>
   <div class="engine-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-startup-title">
     <div class="engine-modal-head">
-      <div class="engine-modal-icon">&#129302;</div>
+      <div class="engine-modal-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      </div>
       <div>
         <div class="engine-modal-title" id="agent-startup-title">Starting mowis-agent</div>
         <div class="engine-modal-subtitle" id="agent-startup-subtitle">Connecting to the agent process...</div>
@@ -649,7 +653,15 @@
         <div class="spinner-dot"></div>
         <span id="agent-startup-spinner-text">Starting up...</span>
       </div>
-      <div class="agent-startup-log" id="agent-startup-log"></div>
+      <div class="agent-startup-log" id="agent-startup-log">
+        <div class="agent-startup-terminal-header">
+          <span class="dot red"></span>
+          <span class="dot yellow"></span>
+          <span class="dot green"></span>
+          <span class="title">agent startup</span>
+        </div>
+        <div class="agent-startup-log-body" id="agent-startup-log-body"></div>
+      </div>
       <div class="engine-error hidden" id="agent-startup-error">
         <div class="engine-error-title">Agent failed to start</div>
         <div class="engine-error-message" id="agent-startup-error-msg"></div>
@@ -731,7 +743,9 @@
   <div class="engine-modal-backdrop"></div>
   <div class="engine-modal-dialog developer-wizard-dialog" role="dialog" aria-modal="true">
     <div class="engine-modal-head">
-      <div class="engine-modal-icon">&#9881;</div>
+      <div class="engine-modal-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      </div>
       <div>
         <div class="engine-modal-title">Developer Mode Bootstrap</div>
         <div class="engine-modal-subtitle">One-click QEMU setup: boot Alpine, install agentd, bridge to TCP</div>
