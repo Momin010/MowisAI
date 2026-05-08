@@ -57,6 +57,9 @@ func initApp(flags commonFlags) (*app.App, string, context.CancelFunc, error) {
 		cwd = c
 	}
 
+	if flags.OutputFormat == "" {
+		flags.OutputFormat = format.Text.String()
+	}
 	if !format.IsValid(flags.OutputFormat) {
 		return nil, "", nil, fmt.Errorf("invalid format option: %s\n%s", flags.OutputFormat, format.GetHelpText())
 	}
