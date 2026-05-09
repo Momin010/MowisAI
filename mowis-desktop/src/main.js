@@ -699,13 +699,13 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
       }
     }
 
-    if (State.agentHealthy) {
+    if (agentModeRequested && State.agentHealthy) {
       const title = fullPrompt.slice(0, 120);
       console.log('[session] Creating agent session:', title);
       const session = await invoke('agent_create_session', { title });
       State.agentSessionId = session.id;
       State.sessionId = session.id;
-      console.log('[session] ✓ Session created:', session.id);
+      console.log('[session] Session created:', session.id);
       setText('compose-session-info', `session ${session.id.slice(0, 8)}`);
       setText('chat-session-title', fullPrompt.slice(0, 120));
 
@@ -716,10 +716,10 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
         text: fullPrompt,
         background: true,
       });
-      console.log('[session] ✓ Message sent, starting polling');
+      console.log('[session] Message sent, starting polling');
       startAgentPolling(session.id);
     } else if (agentModeRequested) {
-      // Startup modal succeeded but health is still false — shouldn't happen, but guard it
+      // Startup modal succeeded but health is still false
       throw new Error('mowis-agent is not available. Check that the binary is installed alongside the app.');
     } else {
       // Non-agent mode: use orchestration (real daemon or simulation fallback)

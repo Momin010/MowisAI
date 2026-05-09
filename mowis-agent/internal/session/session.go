@@ -10,16 +10,16 @@ import (
 )
 
 type Session struct {
-	ID               string
-	ParentSessionID  string
-	Title            string
-	MessageCount     int64
-	PromptTokens     int64
-	CompletionTokens int64
-	SummaryMessageID string
-	Cost             float64
-	CreatedAt        int64
-	UpdatedAt        int64
+	ID               string  `json:"id"`
+	ParentSessionID  string  `json:"parent_session_id"`
+	Title            string  `json:"title"`
+	MessageCount     int64   `json:"message_count"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	SummaryMessageID string  `json:"summary_message_id,omitempty"`
+	Cost             float64 `json:"cost"`
+	CreatedAt        int64   `json:"created_at"`
+	UpdatedAt        int64   `json:"updated_at"`
 }
 
 type Service interface {

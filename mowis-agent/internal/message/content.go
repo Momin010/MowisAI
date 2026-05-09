@@ -2,6 +2,7 @@ package message
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"slices"
 	"time"
 
@@ -109,13 +110,28 @@ type Finish struct {
 func (Finish) isPart() {}
 
 type Message struct {
-	ID        string
-	Role      MessageRole
-	SessionID string
-	Parts     []ContentPart
-	Model     models.ModelID
-	CreatedAt int64
-	UpdatedAt int64
+	ID        string        `json:"id"`
+	Role      MessageRole   `json:"role"`
+	SessionID string        `json:"session_id"`
+	Parts     []ContentPart `json:"-"`
+	Model     models.ModelID `json:"model,omitempty"`
+	CreatedAt int64         `json:"created_at"`
+	UpdatedAt int64         `json:"updated_at"`
+}
+
+func (m Message) MarshalJSON() ([]byte, error) {
+	partsJSON, err := marshallParts(m.Parts)
+	if err != nil {
+		return nil, err
+	}
+	type Alias Message
+	return json.Marshal(struct {
+		Alias
+		Parts json.RawMessage `json:"parts"`
+	}{
+		Alias: Alias(m),
+		Parts: partsJSON,
+	})
 }
 
 func (m *Message) Content() TextContent {
