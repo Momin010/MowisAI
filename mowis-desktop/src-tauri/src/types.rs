@@ -253,6 +253,7 @@ pub enum BridgeCommand {
         max_agents: u32,
         mode: String,
         repo_context: Option<RepositoryContext>,
+        config: Config,
     },
     /// Zero-Protection mode — deprecated, use agent_send_message instead.
     StartZeroMode {

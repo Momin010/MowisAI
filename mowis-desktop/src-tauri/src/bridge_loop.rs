@@ -157,9 +157,9 @@ pub fn start_bridge(
                             }
                         }
 
-                        BridgeCommand::StartOrchestration { session_id, prompt, max_agents, mode, repo_context } => {
+                        BridgeCommand::StartOrchestration { session_id, prompt, max_agents, mode, repo_context, config } => {
                             tokio::spawn(async move {
-                                run_orchestration(session_id, prompt, max_agents, mode, repo_context, b, tx).await;
+                                run_orchestration(session_id, prompt, max_agents, mode, repo_context, config, b, tx).await;
                             });
                         }
 
@@ -446,6 +446,7 @@ pub async fn run_orchestration(
     max_agents: u32,
     mode: String,
     repo_context: Option<RepositoryContext>,
+    config: Config,
     bridge: Arc<BackendBridge>,
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
@@ -462,6 +463,33 @@ pub async fn run_orchestration(
 
     // 2. Try real bridge connection (WSL2 / QEMU / native socket)
     if bridge.is_connected() {
+        // 2a. Sync provider config to agentd before orchestrating
+        if !config.api_key.is_empty() || !config.gcp_project.is_empty() || config.provider == "vertex" {
+            let set_cfg = serde_json::json!({
+                "request_type": "set_config",
+                "provider":    config.provider,
+                "model":       config.model,
+                "api_key":     if config.api_key.is_empty() { None } else { Some(&config.api_key) },
+                "gcp_project_id": if config.gcp_project.is_empty() { None } else { Some(&config.gcp_project) },
+            });
+            match bridge.send(set_cfg).await {
+                Ok(()) => match bridge.recv_next().await {
+                    Ok(Some(resp)) => {
+                        if resp.get("status").and_then(|s| s.as_str()) == Some("ok") {
+                            log::info!("[bridge] Synced provider config to agentd before orchestration");
+                        } else {
+                            let err = resp["error"].as_str().unwrap_or("unknown");
+                            log::warn!("[bridge] agentd rejected config sync: {}", err);
+                        }
+                    }
+                    Ok(None) => log::warn!("[bridge] agentd closed during config sync"),
+                    Err(e) => log::warn!("[bridge] Config sync recv error: {}", e),
+                },
+                Err(e) => log::warn!("[bridge] Config sync send failed: {}", e),
+            }
+        }
+
+        // 2b. Send orchestrate command
         let project = repo_context
             .as_ref()
             .map(|ctx| ctx.project_path.clone())
@@ -492,7 +520,10 @@ pub async fn run_orchestration(
                             }
                         }
                         Ok(None) => {
-                            log::info!("[bridge] Connection closed by daemon (EOF)");
+                            log::warn!("[bridge] Connection closed by daemon (EOF) — agentd may have crashed or returned an error");
+                            let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
+                                "Agentd closed the connection. Check that your provider is configured and the API key is valid.".to_string()
+                            )).await;
                             return;
                         }
                         Err(e) => {
@@ -500,11 +531,10 @@ pub async fn run_orchestration(
                             let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
                                 format!("Connection lost: {e}")
                             )).await;
-                            break;
+                            return;
                         }
                     }
                 }
-                return;
             }
             Err(e) => {
                 log::warn!("Bridge send failed ({e}), running simulation");

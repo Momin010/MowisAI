@@ -398,7 +398,6 @@ pub async fn start_session(
     let tx_opt = state.cmd_tx.lock().unwrap().clone();
     if let Some(tx) = tx_opt {
         if resolved_mode == "zero" {
-            // Zero mode is deprecated — use agent_send_message instead.
             log::warn!("Zero mode is deprecated for session {}", session_id);
             let _ = tx.send(BridgeCommand::StartOrchestration {
                 session_id: session_id.clone(),
@@ -406,6 +405,7 @@ pub async fn start_session(
                 max_agents: cfg.max_agents,
                 mode: "auto".to_string(),
                 repo_context,
+                config: cfg.clone(),
             }).await;
         } else {
             let _ = tx.send(BridgeCommand::StartOrchestration {
@@ -414,6 +414,7 @@ pub async fn start_session(
                 max_agents: cfg.max_agents,
                 mode: resolved_mode,
                 repo_context,
+                config: cfg.clone(),
             }).await;
         }
     }
