@@ -29,6 +29,11 @@ use crate::orchestration::provider_client::LlmConfig;
 const FAST_WORKERS: usize = 64;
 pub(crate) const SLOW_WORKERS: usize = 128;
 
+/// The actual socket path this server is bound to, set at startup.
+/// Used by `handle_orchestrate_streaming` to pass the correct path to the
+/// orchestrator (instead of relying on the config file which may have a stale default).
+static ACTUAL_SOCKET_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 lazy_static! {
     // shared state across threads; wrap map in Arc for cheap cloning
     static ref SANDBOXES: DashMap<u64, Sandbox> = DashMap::new();
@@ -1387,6 +1392,11 @@ fn handle_orchestrate_streaming(
     mut stream: UnixStream,
     req: SocketRequest,
 ) -> Result<()> {
+    // Clear the short timeouts set by configure_stream() — orchestration is
+    // long-lived and the planner LLM call alone can take 30+ seconds.
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_write_timeout(None);
+
     // Extract parameters from the request
     let prompt = req.prompt
         .or(req.command)
@@ -1440,11 +1450,16 @@ fn handle_orchestrate_streaming(
         _ => None, // "auto" or anything else → let classifier decide
     };
 
-    // Create orchestrator config
+    // Create orchestrator config — use the actual socket path this server is
+    // bound to, not the config file value (which may have a stale default).
+    let actual_socket = ACTUAL_SOCKET_PATH
+        .get()
+        .cloned()
+        .unwrap_or_else(|| config.socket_path.clone());
     let project = std::path::PathBuf::from(&project_root);
     let orchestrator_config = OrchestratorConfig {
         llm_config,
-        socket_path: config.socket_path.clone(),
+        socket_path: actual_socket,
         project_root: project.clone(),
         overlay_root: std::path::PathBuf::from(&config.overlay_root),
         checkpoint_root: std::path::PathBuf::from(&config.checkpoint_root),
@@ -1474,6 +1489,10 @@ fn handle_orchestrate_streaming(
     let mut orchestrator_config = orchestrator_config;
     orchestrator_config.event_tx = Some(event_tx);
 
+    // Separate channel for reporting orchestrator errors back to the streaming loop,
+    // so the error message can be sent to the desktop before the connection closes.
+    let (err_report_tx, err_report_rx) = std::sync::mpsc::channel::<String>();
+
     // Run orchestrator in a separate thread, stream events back on this thread
     let orchestrator_thread = {
         let prompt = prompt.clone();
@@ -1488,7 +1507,9 @@ fn handle_orchestrate_streaming(
                                 output.total_agents_used, output.total_duration_secs);
                         }
                         Err(e) => {
-                            log::error!("[orchestrate] Failed: {:#}", e);
+                            let msg = format!("{:#}", e);
+                            log::error!("[orchestrate] Failed: {}", msg);
+                            let _ = err_report_tx.send(msg);
                         }
                     }
                 });
@@ -1513,7 +1534,12 @@ fn handle_orchestrate_streaming(
                 }
             }
             Err(_) => {
-                // Channel closed — orchestrator finished (or crashed)
+                // Channel closed — orchestrator finished (or crashed).
+                // Check if there was an error message.
+                if let Ok(err_msg) = err_report_rx.try_recv() {
+                    let err_json = json!({"type": "error", "message": err_msg});
+                    let _ = write_socket_json(&mut stream, &err_json);
+                }
                 log::info!("[orchestrate] Event channel closed");
                 break;
             }
@@ -1646,6 +1672,7 @@ fn create_listener(path: &str) -> Result<UnixListener> {
 pub fn run_server(path: &str) -> Result<()> {
     std::fs::create_dir_all("/var/log/agentd").ok();
     let _ = PERSISTENCE.init();
+    let _ = ACTUAL_SOCKET_PATH.set(path.to_string());
     let listener = create_listener(path)?;
 
     let fast_queue = Arc::new(WorkQueue::new());
@@ -1688,11 +1715,9 @@ pub fn run(socket_path: &str) -> Result<()> {
     let log_path = std::path::PathBuf::from("/tmp/agentd.log");
     let _ = crate::logging::init(&log_path);
 
-    // Check gcloud - temporarily disabled for testing
-    // if !Command::new("gcloud").arg("--version").output().is_ok() {
-    //     eprintln!("gcloud CLI not found. Install it and try again.");
-    //     std::process::exit(1);
-    // }
+    // Store the actual socket path so handle_orchestrate_streaming can use it
+    // instead of relying on the config file's socket_path field.
+    let _ = ACTUAL_SOCKET_PATH.set(socket_path.to_string());
 
     // Bind listener
     let listener = UnixListener::bind(socket_path)?;

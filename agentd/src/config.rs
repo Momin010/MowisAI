@@ -115,7 +115,7 @@ impl Default for MowisConfig {
             gemini_model: String::new(),
             mimo_api_key_enc: None,
             mimo_model: String::new(),
-            socket_path: "/tmp/mowisai.sock".into(),
+            socket_path: "/tmp/agentd.sock".into(),
             model: "gemini-2.5-pro".into(),
             max_agents: 1000,
             overlay_root: "/tmp/mowis-overlay".into(),

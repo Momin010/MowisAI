@@ -520,24 +520,19 @@ pub async fn run_orchestration(
                             }
                         }
                         Ok(None) => {
-                            log::warn!("[bridge] Connection closed by daemon (EOF) — agentd may have crashed or returned an error");
-                            let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
-                                "Agentd closed the connection. Check that your provider is configured and the API key is valid.".to_string()
-                            )).await;
-                            return;
+                            log::warn!("[bridge] agentd closed the connection (EOF) — falling back to simulation");
+                            break;
                         }
                         Err(e) => {
-                            log::warn!("Bridge recv error: {e}");
-                            let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
-                                format!("Connection lost: {e}")
-                            )).await;
-                            return;
+                            log::warn!("[bridge] recv error ({e}) — falling back to simulation");
+                            break;
                         }
                     }
                 }
+                // Fall through to simulation below
             }
             Err(e) => {
-                log::warn!("Bridge send failed ({e}), running simulation");
+                log::warn!("Bridge send failed ({e}), falling back to simulation");
             }
         }
     } else {
