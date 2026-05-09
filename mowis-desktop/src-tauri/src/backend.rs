@@ -1,6 +1,9 @@
 // backend.rs — BackendBridge
 //
-// Owns the platform launcher and one live ConnectionStream.
+// Owns the platform launcher and connection info for reaching agentd.
+// Opens a fresh TCP/socket connection per request, matching agentd's
+// one-request-per-connection protocol.
+//
 // Responsibilities:
 //   • Start the VM/daemon on first use
 //   • Retry connection up to 5 times with exponential backoff
@@ -59,7 +62,9 @@ pub struct ConnectionState {
 pub struct BackendBridge {
     launcher: Box<dyn VmLauncher>,
     conn_info: Mutex<Option<ConnectionInfo>>,
-    stream: Mutex<Option<ConnectionStream>>,
+    /// Per-request stream for long-lived operations (orchestrate streaming).
+    /// Not used for the initial connection — each send/recv opens a fresh stream.
+    active_stream: Mutex<Option<ConnectionStream>>,
 
     // Broadcast channel for connection state changes.
     pub state_tx: watch::Sender<ConnectionState>,
@@ -83,7 +88,7 @@ impl BackendBridge {
         Arc::new(Self {
             launcher,
             conn_info: Mutex::new(None),
-            stream: Mutex::new(None),
+            active_stream: Mutex::new(None),
             state_tx,
             state_rx,
             progress_tx,
@@ -152,14 +157,16 @@ impl BackendBridge {
                 Ok(info) => {
                     self.emit_detail(
                         "booting",
-                        "Launcher started, opening connection…",
+                        "Launcher started, verifying connection…",
                         85,
                         "info",
                         None,
                     ).await;
+                    // Verify connectivity by opening (and immediately dropping) a test stream.
+                    // We don't keep a persistent connection because agentd uses a
+                    // one-request-per-connection protocol — each send() opens a fresh stream.
                     match self.open_stream(&info).await {
-                        Ok(stream) => {
-                            *self.stream.lock().await = Some(stream);
+                        Ok(_test_stream) => {
                             return Ok(info);
                         }
                         Err(e) => {
@@ -249,17 +256,27 @@ impl BackendBridge {
 
     // ── Send / receive ────────────────────────────────────────────────────────
 
-    /// Send a JSON command to agentd.
-    pub async fn send(&self, payload: Value) -> Result<()> {
-        let mut guard = self.stream.lock().await;
-        let stream = guard.as_mut().context("not connected to daemon")?;
-        stream.send_json(&payload).await
+    /// Open a fresh connection to agentd.
+    async fn fresh_stream(&self) -> Result<ConnectionStream> {
+        let info = self.conn_info.lock().await;
+        let info = info.as_ref().context("not connected to daemon")?;
+        open_connection(info).await.context("open fresh connection to agentd")
     }
 
-    /// Read the next JSON event from agentd (non-blocking poll).
+    /// Send a JSON command to agentd on a fresh connection.
+    /// The connection is stored as the active stream so subsequent
+    /// `recv_next` calls read from the same session.
+    pub async fn send(&self, payload: Value) -> Result<()> {
+        let mut stream = self.fresh_stream().await?;
+        stream.send_json(&payload).await?;
+        *self.active_stream.lock().await = Some(stream);
+        Ok(())
+    }
+
+    /// Read the next JSON event from the active agentd session.
     pub async fn recv_next(&self) -> Result<Option<Value>> {
-        let mut guard = self.stream.lock().await;
-        let stream = guard.as_mut().context("not connected to daemon")?;
+        let mut guard = self.active_stream.lock().await;
+        let stream = guard.as_mut().context("no active agentd session")?;
         stream.recv_json().await
     }
 
@@ -269,8 +286,8 @@ impl BackendBridge {
     where
         F: FnMut(Value) -> bool + Send,
     {
-        let mut guard = self.stream.lock().await;
-        let stream = guard.as_mut().context("not connected to daemon")?;
+        let mut guard = self.active_stream.lock().await;
+        let stream = guard.as_mut().context("no active agentd session")?;
         loop {
             match stream.recv_json().await? {
                 None => break,
