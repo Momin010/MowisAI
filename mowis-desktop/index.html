@@ -674,6 +674,63 @@
   </div>
 </div>
 
+<!-- Provider quick-setup modal -->
+<div id="provider-modal" class="engine-modal hidden" aria-hidden="true">
+  <div class="engine-modal-backdrop"></div>
+  <div class="engine-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title">
+    <div class="engine-modal-head">
+      <div class="engine-modal-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <div>
+        <div class="engine-modal-title" id="provider-modal-title">Connect an AI Provider</div>
+        <div class="engine-modal-subtitle">Choose a provider and enter your API key to start using MowisAI</div>
+      </div>
+    </div>
+    <div class="engine-modal-body">
+      <div class="provider-form">
+        <div class="form-row">
+          <label class="form-label">Provider</label>
+          <div class="form-ctrl">
+            <select id="pm-provider" class="form-select">
+              <option value="gemini">Google Gemini</option>
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="openai">OpenAI (GPT)</option>
+              <option value="grok">xAI (Grok)</option>
+              <option value="groq">Groq</option>
+              <option value="vertex">Vertex AI (Google Cloud)</option>
+              <option value="mimo">Xiaomi MiMo</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row" id="pm-row-key">
+          <label class="form-label">API Key</label>
+          <div class="form-ctrl">
+            <input type="password" id="pm-api-key" class="form-input" placeholder="Paste your API key here" autocomplete="off" />
+          </div>
+        </div>
+        <div class="form-row hidden" id="pm-row-gcp">
+          <label class="form-label">GCP Project ID</label>
+          <div class="form-ctrl">
+            <input type="text" id="pm-gcp-project" class="form-input" placeholder="my-gcp-project" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label class="form-label">Model</label>
+          <div class="form-ctrl">
+            <select id="pm-model" class="form-select"></select>
+          </div>
+        </div>
+      </div>
+      <div class="provider-hint" id="pm-hint"></div>
+      <div class="agent-startup-actions">
+        <button class="wizard-btn wizard-btn-secondary" id="btn-pm-cancel">Cancel</button>
+        <button class="wizard-btn wizard-btn-primary" id="btn-pm-save">Save and Continue</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Repository picker -->
 <div id="repo-modal" class="repo-modal hidden" aria-hidden="true">
   <div class="repo-backdrop" id="repo-backdrop"></div>

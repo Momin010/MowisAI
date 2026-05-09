@@ -18,7 +18,7 @@ import {
 } from './chat.js';
 import { renderSessionsPage, setupSessionsHandlers } from './sessions.js';
 import { renderUsagePage } from './usage.js';
-import { loadSettings, saveSettings, isAgentMode, setupSettingsHandlers } from './settings.js';
+import { loadSettings, saveSettings, isAgentMode, setupSettingsHandlers, PROVIDER_MODELS, populateModelDropdown } from './settings.js';
 import { initSpeechRecognition } from './speech.js';
 import { initFileUpload, pendingAttachments, clearAttachments } from './file-upload.js';
 import {
@@ -526,6 +526,115 @@ async function setupListeners() {
   });
 }
 
+// ── Provider quick-setup modal ────────────────────────────────────────────────
+
+function isProviderConfigured() {
+  const c = State.config;
+  if (!c) return false;
+  if (c.provider === 'vertex') return !!c.gcp_project;
+  return !!c.api_key;
+}
+
+const PM_HINTS = {
+  gemini:    'Get a free key at aistudio.google.com/apikey',
+  anthropic: 'Get a key at console.anthropic.com',
+  openai:    'Get a key at platform.openai.com/api-keys',
+  grok:      'Get a key at console.x.ai',
+  groq:      'Get a key at console.groq.com',
+  vertex:    'Requires gcloud CLI or a service account key',
+  mimo:      'Get a key from Xiaomi MiMo platform',
+};
+
+async function ensureProvider() {
+  if (isProviderConfigured()) return true;
+
+  return new Promise((resolve) => {
+    const modal    = $('provider-modal');
+    const provSel  = $('pm-provider');
+    const modelSel = $('pm-model');
+    const keyInput = $('pm-api-key');
+    const gcpInput = $('pm-gcp-project');
+    const rowKey   = $('pm-row-key');
+    const rowGcp   = $('pm-row-gcp');
+    const hintEl   = $('pm-hint');
+    const cancelBtn = $('btn-pm-cancel');
+    const saveBtn   = $('btn-pm-save');
+
+    if (!modal) { resolve(false); return; }
+
+    const cleanups = [];
+
+    function updateUI() {
+      const prov = provSel.value;
+      const isVertex = prov === 'vertex';
+      if (rowKey) rowKey.classList.toggle('hidden', isVertex);
+      if (rowGcp) rowGcp.classList.toggle('hidden', !isVertex);
+      if (hintEl) hintEl.textContent = PM_HINTS[prov] || '';
+      populateModelDropdown(prov);
+    }
+
+    provSel.value = State.config?.provider || 'gemini';
+    keyInput.value = '';
+    gcpInput.value = '';
+    updateUI();
+
+    const onProvChange = () => updateUI();
+    provSel.addEventListener('change', onProvChange);
+    cleanups.push(() => provSel.removeEventListener('change', onProvChange));
+
+    function closeModal() {
+      modal.classList.add('hidden');
+      modal.setAttribute('aria-hidden', 'true');
+      cleanups.forEach(fn => fn());
+    }
+
+    const onCancel = () => { closeModal(); resolve(false); };
+    const onSave = async () => {
+      const provider = provSel.value;
+      const apiKey = keyInput.value.trim();
+      const gcpProject = gcpInput.value.trim();
+      const model = modelSel.value || (PROVIDER_MODELS[provider]?.[0]?.id || '');
+
+      if (provider !== 'vertex' && !apiKey) {
+        toast('Enter an API key', 'error');
+        return;
+      }
+      if (provider === 'vertex' && !gcpProject) {
+        toast('Enter a GCP Project ID', 'error');
+        return;
+      }
+
+      const config = {
+        ...(State.config || {}),
+        provider,
+        model,
+        api_key: apiKey,
+        gcp_project: gcpProject,
+      };
+
+      try {
+        await invoke('save_config', { config });
+        State.config = config;
+        setText('sb-provider', provider);
+        toast('Provider configured', 'success');
+        closeModal();
+        resolve(true);
+      } catch (e) {
+        toast('Failed to save: ' + e, 'error');
+      }
+    };
+
+    cancelBtn?.addEventListener('click', onCancel);
+    saveBtn?.addEventListener('click', onSave);
+    cleanups.push(() => cancelBtn?.removeEventListener('click', onCancel));
+    cleanups.push(() => saveBtn?.removeEventListener('click', onSave));
+
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+    keyInput?.focus();
+  });
+}
+
 // ── Agent startup modal ───────────────────────────────────────────────────────
 
 async function startAgentWithModal() {
@@ -671,6 +780,14 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
   }
 
   updateTaskPanelVisibility();
+
+  // Ensure an AI provider is configured before proceeding
+  const providerReady = await ensureProvider();
+  if (!providerReady) {
+    setSessionActive(false);
+    navigate('home', { preserveHomeMode: true });
+    return;
+  }
 
   try {
     // Re-check health if we think it's unhealthy
