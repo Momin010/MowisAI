@@ -139,7 +139,7 @@ function showPermissionDialog(data) {
   denyBtn.onclick = async () => {
     overlay.remove();
     try {
-      await invoke('agent_deny_permission', { session_id: State.sessionId, permission_id: data.id || data.permission_id });
+      await invoke('agent_deny_permission', { sessionId: State.sessionId, permissionId: data.id || data.permission_id });
     } catch (e) { console.warn('deny failed:', e); }
   };
 
@@ -149,7 +149,7 @@ function showPermissionDialog(data) {
   approveBtn.onclick = async () => {
     overlay.remove();
     try {
-      await invoke('agent_approve_permission', { session_id: State.sessionId, permission_id: data.id || data.permission_id });
+      await invoke('agent_approve_permission', { sessionId: State.sessionId, permissionId: data.id || data.permission_id });
     } catch (e) { console.warn('approve failed:', e); }
   };
 
@@ -238,7 +238,7 @@ async function startSession(prompt, mode) {
     setText('compose-session-info', `session ${session.id.slice(0, 8)}`);
     setText('chat-session-title', title);
 
-    await invoke('agent_send_message', { session_id: session.id, text: fullPrompt });
+    await invoke('agent_send_message', { sessionId: session.id, text: fullPrompt });
 
     startPolling(session.id);
   } catch (err) {
@@ -272,7 +272,7 @@ function stopPolling() {
 
 async function pollMessages(sessionId) {
   try {
-    const messages = await invoke('agent_list_messages', { session_id: sessionId });
+    const messages = await invoke('agent_list_messages', { sessionId: sessionId });
     if (!messages || !Array.isArray(messages)) return;
 
     if (messages.length > State.lastMessageCount) {
@@ -317,7 +317,7 @@ export async function loadSessionMessages(sessionId) {
   showChatView();
 
   try {
-    const messages = await invoke('agent_list_messages', { session_id: sessionId });
+    const messages = await invoke('agent_list_messages', { sessionId: sessionId });
     if (!messages) return;
 
     State.lastMessageCount = messages.length;
@@ -358,7 +358,7 @@ async function sendChatMessage() {
   setSessionActive(true);
 
   try {
-    await invoke('agent_send_message', { session_id: State.sessionId, text });
+    await invoke('agent_send_message', { sessionId: State.sessionId, text });
     startPolling(State.sessionId);
   } catch (err) {
     removeThinkingIndicator();
@@ -442,7 +442,7 @@ function setupHandlers() {
   $('btn-stop')?.addEventListener('click', async () => {
     stopPolling();
     if (State.sessionId && State.agentHealthy) {
-      try { await invoke('agent_abort', { session_id: State.sessionId }); } catch {}
+      try { await invoke('agent_abort', { sessionId: State.sessionId }); } catch {}
     }
     removeThinkingIndicator();
     setSessionActive(false);

@@ -109,7 +109,7 @@ export function renderSessionsList() {
       const id = btn.dataset.id;
       if (!id) return;
       try {
-        await invoke('agent_delete_session', { session_id: id });
+        await invoke('agent_delete_session', { sessionId: id });
       } catch {}
       SessionsState.all = SessionsState.all.filter(s => s.id !== id);
       renderSessionsPage();
