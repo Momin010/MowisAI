@@ -1,6 +1,6 @@
 {
   "$schema": "https://tauri.app",
-  "productName": "MowisAI",
+  "productName": "MowisAI Agent",
   "version": "0.1.0",
   "identifier": "ai.mowis.app",
   "build": {
@@ -10,6 +10,7 @@
     "beforeDevCommand": "npm run dev"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",

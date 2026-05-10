@@ -149,7 +149,7 @@ impl AgentManager {
             emit(
                 &tx,
                 &format!(
-                    "  Command: {} serve --port {} --hostname 127.0.0.1",
+                    "  Command: {} serve --port {}",
                     agent_path.display(),
                     port
                 ),
@@ -160,8 +160,6 @@ impl AgentManager {
                 .arg("serve")
                 .arg("--port")
                 .arg(port.to_string())
-                .arg("--hostname")
-                .arg("127.0.0.1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -346,10 +344,11 @@ impl AgentManager {
     }
 
     async fn port_is_occupied(&self, port: u16) -> bool {
-        match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-            Ok(_listener) => false,
-            Err(_) => true,
-        }
+        // Check both IPv4 and IPv6 — agent may bind to either
+        let ipv4_free = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.is_ok();
+        let ipv6_free = tokio::net::TcpListener::bind(("::1", port)).await.is_ok();
+        // Port is occupied if NEITHER can bind
+        !ipv4_free && !ipv6_free
     }
 
     async fn kill_port_process(&self, port: u16) -> Result<()> {

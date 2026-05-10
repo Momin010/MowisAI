@@ -94,7 +94,7 @@ pub struct AgentClient {
 impl AgentClient {
     pub fn new(port: u16) -> Self {
         Self {
-            base_url: format!("http://127.0.0.1:{}", port),
+            base_url: format!("http://localhost:{}", port),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
                 .build()

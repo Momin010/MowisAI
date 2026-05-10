@@ -1,4 +1,4 @@
-import { invoke, listen } from './bridge.js';
+import { invoke, listen, windowClose, windowMinimize, windowToggleMaximize } from './bridge.js';
 import { State, $, setText, toast, escHtml, setSidebarCollapsed, nowTs } from './state.js';
 import {
   appendChatMessage, renderAgentMessageParts, renderToolCall, renderToolResult,
@@ -376,12 +376,12 @@ function autoResize() {
 
 async function runWindowAction(action) {
   try {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window');
-    const win = getCurrentWindow();
-    if (action === 'close') await win.close();
-    if (action === 'minimize') await win.minimize();
-    if (action === 'toggle_maximize') await win.toggleMaximize();
-  } catch {}
+    if (action === 'close') await windowClose();
+    if (action === 'minimize') await windowMinimize();
+    if (action === 'toggle_maximize') await windowToggleMaximize();
+  } catch (e) {
+    console.warn('[window]', action, 'failed:', e);
+  }
 }
 
 function bindWindowControls(root = document) {

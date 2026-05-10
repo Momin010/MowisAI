@@ -8,6 +8,7 @@ use commands::*;
 use process::AgentManager;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+use tauri::Manager;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -92,6 +93,36 @@ fn main() {
             save_agent_config,
             get_agent_config,
         ])
+        .setup(|app| {
+            // Auto-start agent on launch
+            let resource_dir = app
+                .path()
+                .resource_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let state = app.state::<AppState>();
+            let port = *state.agent_port.lock().unwrap();
+
+            // Spawn auto-start in background so the window appears immediately
+            let resource_dir_clone = resource_dir.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut mgr = AgentManager::new(port);
+                match mgr.start(&resource_dir_clone, None).await {
+                    Ok(()) => {
+                        log::info!("[setup] mowis-agent auto-started on port {}", mgr.port());
+                    }
+                    Err(e) => {
+                        log::warn!("[setup] mowis-agent auto-start failed: {:#}", e);
+                    }
+                }
+                // We can't easily store the manager back in state from here,
+                // but the frontend will detect the agent via health check
+                // and the agent_start command will find the existing process.
+                // Keep the manager alive so it doesn't kill_on_drop
+                std::mem::forget(mgr);
+            });
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error running mowis-app");
 }
