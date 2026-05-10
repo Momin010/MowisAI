@@ -207,13 +207,16 @@ async function mockStartSession({ prompt, mode }) {
   MockState.session_history.push(MockState.sessions[id].summary);
   saveMockState();
 
-  const resolvedMode = mode || MockState.config.mode;
-  // Run async simulation
-  if (resolvedMode === 'zero') {
-    runZeroBrowserSimulation(id, prompt, MockState.zeroWorkspace);
-  } else {
-    runBrowserSimulation(id, prompt, resolvedMode);
-  }
+  // NOTE: Mock simulation has been PERMANENTLY REMOVED.
+  // If you see this message, the Tauri API failed to load and the app is
+  // running in browser-fallback mode. This should NEVER happen in a built app.
+  console.error('[MowisAI] FATAL: start_session called in MOCK mode. Tauri API not loaded!');
+  dispatchMockEvent('chat_message', {
+    kind: 'agent',
+    content: '**ERROR: Running in mock mode.** The Tauri backend is not connected. This build is broken — please rebuild with `cargo tauri build`.',
+    ts: nowTs(),
+  });
+  mockSyncSession('error');
   return id;
 }
 
