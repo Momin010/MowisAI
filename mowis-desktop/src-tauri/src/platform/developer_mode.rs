@@ -816,8 +816,49 @@ impl VmLauncher for DeveloperLauncher {
         let pw = &progress;
         let token = auth::load_or_create().context("load/create auth token")?;
 
+        // ── CTO fast-path: if the agent port is already reachable, skip everything.
+        // This preserves a manually-started VM (no kill, no spawn, no bootstrap).
+        // Just connect directly to whatever is already listening.
+        let agent_addr = format!("127.0.0.1:{}", self.config.agent_port);
+        if is_tcp_reachable(&agent_addr).await {
+            emit(pw, "detecting", &format!("Existing VM detected on port {} — connecting directly", self.config.agent_port), 5, "info", None).await;
+
+            // Quick protocol check: send a get_config to verify it's actually agentd
+            let probe_ok = match timeout(Duration::from_secs(3), TcpStream::connect(&agent_addr)).await {
+                Ok(Ok(stream)) => {
+                    let (reader, mut writer) = tokio::io::split(stream);
+                    let _ = writer.write_all(b"{\"request_type\":\"get_config\"}\n").await;
+                    let _ = writer.flush().await;
+                    let mut buf_reader = BufReader::new(reader);
+                    let mut line = String::new();
+                    match timeout(Duration::from_secs(5), buf_reader.read_line(&mut line)).await {
+                        Ok(Ok(n)) if n > 0 && line.contains("status") => true,
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+
+            if probe_ok {
+                emit(pw, "ready", "Connected to existing VM (manual setup preserved)", 100, "success",
+                    Some(format!("agentd responding on {}", agent_addr))).await;
+                log::info!("Fast-path: existing agentd on {} is alive, skipping full bootstrap", agent_addr);
+                self.running.store(true, Ordering::SeqCst);
+                return Ok(ConnectionInfo {
+                    kind: ConnectionKind::TcpWithToken,
+                    socket_path: None,
+                    tcp_addr: Some(agent_addr),
+                    pipe_name: None,
+                    auth_token: Some(token),
+                });
+            } else {
+                emit(pw, "detecting", "Port is open but agentd not responding — will restart", 8, "warning", None).await;
+                log::warn!("Port {} reachable but no valid agentd response — proceeding with full setup", self.config.agent_port);
+            }
+        }
+
         // ── Kill any zombie QEMU processes from previous attempts ───────────
-        emit(pw, "detecting", "Cleaning up any previous QEMU instances…", 2, "info", None).await;
+        emit(pw, "detecting", "Cleaning up any previous QEMU instances…", 10, "info", None).await;
         #[cfg(windows)]
         {
             let _ = std::process::Command::new("taskkill")
