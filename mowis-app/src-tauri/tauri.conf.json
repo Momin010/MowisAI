@@ -39,8 +39,7 @@
       "icons/512x512.png"
     ],
     "resources": {
-      "resources/mowis-agent.exe": "mowis-agent.exe",
-      "resources/mowis-agent": "mowis-agent"
+      "resources/mowis-agent.exe": "mowis-agent.exe"
     }
   }
 }
