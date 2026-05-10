@@ -520,27 +520,37 @@ pub async fn run_orchestration(
                             }
                         }
                         Ok(None) => {
-                            log::warn!("[bridge] agentd closed the connection (EOF) — falling back to simulation");
-                            break;
+                            log::error!("[bridge] agentd closed the connection unexpectedly (EOF)");
+                            let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
+                                "agentd closed the connection. Check /tmp/agentd.log inside WSL for details.".into()
+                            )).await;
+                            return;
                         }
                         Err(e) => {
-                            log::warn!("[bridge] recv error ({e}) — falling back to simulation");
-                            break;
+                            log::error!("[bridge] recv error: {e}");
+                            let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
+                                format!("Connection to agentd failed: {e}")
+                            )).await;
+                            return;
                         }
                     }
                 }
-                // Fall through to simulation below
             }
             Err(e) => {
-                log::warn!("Bridge send failed ({e}), falling back to simulation");
+                log::error!("[bridge] send orchestrate failed: {e}");
+                let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
+                    format!("Failed to send orchestrate command: {e}")
+                )).await;
+                return;
             }
         }
     } else {
-        log::info!("Daemon not yet connected — running simulation");
+        log::error!("Daemon not connected — cannot start orchestration");
+        let _ = event_tx.send(BridgeEvent::OrchestrationFailed(
+            "Daemon is not connected. Check the setup terminal for errors.".into()
+        )).await;
+        return;
     }
-
-    // 3. Fallback: simulation keeps the UI fully functional without a daemon
-    simulate_session(session_id, prompt, task_count, agent_count, sb_names, event_tx).await;
 }
 
 /// Simulation — keeps UI fully functional without a running daemon
