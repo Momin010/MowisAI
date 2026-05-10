@@ -81,4 +81,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mowis-app-windows-installer
-          path: mowis-app/target/release/bundle/nsis/*.exe
+          path: target/release/bundle/nsis/*.exe
