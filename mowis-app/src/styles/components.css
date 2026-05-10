@@ -1,0 +1,76 @@
+/* ── Toggle switch ───────────────────────────────────────── */
+.form-ctrl-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 6px;
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.toggle-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  transition: background 0.18s, border-color 0.18s;
+}
+.toggle-switch input:checked ~ .toggle-track {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: var(--tx-3);
+  border-radius: 50%;
+  transition: transform 0.18s, background 0.18s;
+}
+.toggle-switch input:checked ~ .toggle-track .toggle-thumb {
+  transform: translateX(16px);
+  background: #fff;
+}
+.toggle-switch:focus-within .toggle-track {
+  box-shadow: 0 0 0 2px rgba(59,139,255,0.28);
+}
+
+.toggle-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--tx-3);
+  min-width: 22px;
+}
+
+/* ── Agent Mode Badge ──────────────────────────────────── */
+.agent-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--tx-2);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  padding: 2px 7px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}

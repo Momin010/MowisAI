@@ -1,0 +1,15 @@
+{
+  "name": "mowis-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "@tauri-apps/cli": "^2"
+  }
+}
