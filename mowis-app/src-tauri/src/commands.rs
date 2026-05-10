@@ -1,10 +1,11 @@
 use crate::agent::{AgentMessage, AgentClient, HealthResponse, Session};
-use crate::process::{AgentManager, DEFAULT_AGENT_PORT, LogSender};
+use crate::process::{AgentManager, LogSender};
 use crate::AppState;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tauri::{AppHandle, Manager, State};
 use std::path::PathBuf;
-use tauri::State;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider info
