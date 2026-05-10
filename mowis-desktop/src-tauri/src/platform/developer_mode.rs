@@ -733,9 +733,10 @@ impl DeveloperLauncher {
         let _ = serial.exec_command("pkill -f agentd 2>/dev/null; rm -f /tmp/mowisai.sock", None, 3).await;
         sleep(Duration::from_millis(500)).await;
 
-        // Start agentd in background
+        // Start agentd in background — use nohup + setsid so it survives when the
+        // serial console session ends (otherwise SIGHUP kills backgrounded processes).
         serial.exec_background(
-            &format!("{} socket --path /tmp/mowisai.sock &", self.config.agentd_path)
+            &format!("nohup setsid {} socket --path /tmp/mowisai.sock </dev/null >/var/log/agentd.log 2>&1 &", self.config.agentd_path)
         ).await.context("Failed to send agentd start command")?;
         sleep(Duration::from_secs(2)).await;
 
@@ -760,8 +761,9 @@ impl DeveloperLauncher {
         let _ = serial.exec_command("pkill -f 'socat TCP-LISTEN' 2>/dev/null", None, 3).await;
         sleep(Duration::from_millis(500)).await;
 
+        // Same as agentd — nohup + setsid to survive serial disconnect.
         serial.exec_background(
-            "socat TCP-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &"
+            "nohup setsid socat TCP-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock </dev/null >/var/log/socat.log 2>&1 &"
         ).await.context("Failed to send socat start command")?;
         sleep(Duration::from_secs(1)).await;
 
