@@ -243,7 +243,9 @@ func (h *handler) sendMessageAsync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	done, err := h.app.CoderAgent.Run(r.Context(), sessionID, req.Text)
+	// Use background context — r.Context() is cancelled when the handler returns,
+	// which would immediately cancel the agent's work.
+	done, err := h.app.CoderAgent.Run(context.Background(), sessionID, req.Text)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

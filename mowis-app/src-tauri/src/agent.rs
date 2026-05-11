@@ -197,7 +197,7 @@ impl AgentClient {
     }
 
     pub async fn send_message_async(&self, session_id: &str, text: &str) -> Result<()> {
-        self.http
+        let resp = self.http
             .post(format!(
                 "{}/session/{}/message/async",
                 self.base_url, session_id
@@ -206,6 +206,11 @@ impl AgentClient {
             .send()
             .await
             .context("send message async request failed")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("agent returned {}: {}", status.as_u16(), body);
+        }
         Ok(())
     }
 
