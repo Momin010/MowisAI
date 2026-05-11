@@ -186,23 +186,26 @@ impl OpenCodeManager {
             .spawn()
             .context("failed to spawn opencode")?;
 
-        // Read stderr in background for progress/errors
+        // Read stderr in a task that collects all lines
         let stderr_tx = event_tx.clone();
         let sid = session_id.to_string();
-        if let Some(stderr) = child.stderr.take() {
+        let stderr_handle = child.stderr.take().map(|stderr| {
             tokio::spawn(async move {
+                let mut collected = Vec::new();
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     log::info!("[opencode:stderr] {}", line);
                     if let Some(ref tx) = stderr_tx {
                         let _ = tx.send(AgentEvent::Progress {
                             session_id: sid.clone(),
-                            text: line,
+                            text: line.clone(),
                         });
                     }
+                    collected.push(line);
                 }
-            });
-        }
+                collected
+            })
+        });
 
         // Read stdout — this is where the JSON response comes
         let mut stdout_buf = String::new();
@@ -215,6 +218,14 @@ impl OpenCodeManager {
             }
         }
 
+        // Wait for stderr collection to finish
+        let stderr_lines = if let Some(handle) = stderr_handle {
+            handle.await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let stderr_buf = stderr_lines.join("\n");
+
         // Wait for process to exit
         let status = child.wait().await.context("opencode process failed")?;
 
@@ -224,22 +235,21 @@ impl OpenCodeManager {
             if trimmed.starts_with('{') {
                 match serde_json::from_str::<OpenCodeResponse>(trimmed) {
                     Ok(resp) => resp.response,
-                    Err(_) => {
-                        // Not valid JSON, return raw output
-                        trimmed.to_string()
-                    }
+                    Err(_) => trimmed.to_string(),
                 }
             } else {
-                // Plain text output
                 trimmed.to_string()
             }
         } else {
-            let err_msg = format!("opencode exited with status: {}", status);
-            if !stdout_buf.trim().is_empty() {
-                format!("{}\n\nOutput:\n{}", err_msg, stdout_buf.trim())
-            } else {
-                err_msg
+            // Include stderr in error message so user can see what went wrong
+            let mut msg = format!("opencode exited with code {}", status);
+            if !stderr_buf.is_empty() {
+                msg.push_str(&format!("\n\n{}", stderr_buf));
             }
+            if !stdout_buf.trim().is_empty() {
+                msg.push_str(&format!("\n\nstdout:\n{}", stdout_buf.trim()));
+            }
+            msg
         };
 
         // Add assistant message to session
