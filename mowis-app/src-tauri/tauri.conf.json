@@ -40,7 +40,7 @@
       "icons/512x512.png"
     ],
     "resources": {
-      "resources/mowis-agent.exe": "mowis-agent.exe"
+      "resources/opencode.exe": "opencode.exe"
     }
   }
 }

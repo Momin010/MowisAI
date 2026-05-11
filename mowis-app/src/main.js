@@ -11,10 +11,9 @@ async function init() {
   try {
     State.config = await invoke('agent_get_config');
   } catch {
-    State.config = { agent_port: 4096, provider: 'gemini', model: '', api_key: '', gcp_project: '', cwd: '' };
+    State.config = { provider: 'anthropic', model: '', api_key: '', gcp_project: '', cwd: '' };
   }
 
-  setText('status-port', `port ${State.config.agent_port || 4096}`);
   setText('status-provider', State.config.provider || '--');
   setText('sb-provider', State.config.provider || '--');
 
@@ -23,22 +22,28 @@ async function init() {
     if (health?.healthy) {
       State.agentHealthy = true;
       State.agentRunning = true;
-      setAgentStatus('connected', `connected (v${health.version || '?'})`);
+      setAgentStatus('connected', `ready (${health.version})`);
       setText('status-cwd', health.cwd || '');
     }
   } catch {
-    setAgentStatus('disconnected', 'not running');
+    setAgentStatus('disconnected', 'opencode not found');
   }
 
   if (!State.agentHealthy) {
     try {
       await invoke('agent_start');
-      await waitForHealth(8, 1000);
+      const health = await invoke('agent_health');
+      if (health?.healthy) {
+        State.agentHealthy = true;
+        State.agentRunning = true;
+        setAgentStatus('connected', `ready (${health.version})`);
+      }
     } catch (e) {
       console.warn('[init] agent_start failed:', e);
     }
   }
 
+  // Listen for agent events (progress, completion)
   try {
     await listen('agent_event', handleAgentEvent);
   } catch (e) {
@@ -51,24 +56,6 @@ async function init() {
   setSidebarCollapsed(State.sidebarCollapsed);
   setText('sb-provider', State.config.provider || '--');
   navigate('home');
-}
-
-async function waitForHealth(maxRetries, delayMs) {
-  for (let i = 1; i <= maxRetries; i++) {
-    try {
-      const health = await invoke('agent_health');
-      if (health?.healthy) {
-        State.agentHealthy = true;
-        State.agentRunning = true;
-        setAgentStatus('connected', `connected (v${health.version || '?'})`);
-        setText('status-cwd', health.cwd || '');
-        return true;
-      }
-    } catch {}
-    if (i < maxRetries) await delay(delayMs);
-  }
-  setAgentStatus('disconnected', 'not running');
-  return false;
 }
 
 function setAgentStatus(status, text) {
@@ -85,81 +72,37 @@ function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function handleAgentEvent(payload) {
   if (!payload) return;
-  const { event, data } = payload;
+  const type = payload.type;
 
-  switch (event) {
-    case 'session.created':
-      console.log('[sse] session.created:', data);
-      break;
-    case 'session.deleted':
-      console.log('[sse] session.deleted:', data);
-      break;
-    case 'message.created':
-    case 'message.updated':
-      if (data?.session_id === State.sessionId) {
-        pollMessages(State.sessionId);
+  switch (type) {
+    case 'status':
+      if (payload.session_id === State.sessionId) {
+        console.log('[event] status:', payload.status);
       }
       break;
-    case 'permission.created':
-      showPermissionDialog(data);
+
+    case 'progress':
+      if (payload.session_id === State.sessionId) {
+        console.log('[event] progress:', payload.text);
+      }
       break;
-    case 'agent.completed':
-      console.log('[sse] agent.completed');
+
+    case 'completed':
+      if (payload.session_id === State.sessionId) {
+        removeThinkingIndicator();
+        if (payload.success && payload.response) {
+          appendChatMessage({ kind: 'assistant', content: payload.response, ts: nowTs() });
+        } else if (payload.response) {
+          appendChatMessage({ kind: 'error', content: payload.response, ts: nowTs() });
+        }
+        setSessionActive(false);
+        setText('compose-session-info', `session ${State.sessionId.slice(0, 8)}`);
+      }
       break;
-    case 'agent.error':
-      removeThinkingIndicator();
-      appendChatMessage({ kind: 'error', content: String(data?.error || 'Agent error'), ts: nowTs() });
-      setSessionActive(false);
-      break;
+
+    default:
+      console.log('[event] unknown:', payload);
   }
-}
-
-function showPermissionDialog(data) {
-  if (!data) return;
-  const overlay = document.createElement('div');
-  overlay.className = 'permission-overlay';
-
-  const card = document.createElement('div');
-  card.className = 'permission-card';
-
-  const title = document.createElement('div');
-  title.className = 'permission-title';
-  title.textContent = 'Permission Required';
-
-  const desc = document.createElement('div');
-  desc.className = 'permission-desc';
-  desc.textContent = data.description || data.message || JSON.stringify(data, null, 2);
-
-  const actions = document.createElement('div');
-  actions.className = 'permission-actions';
-
-  const denyBtn = document.createElement('button');
-  denyBtn.className = 'btn-outline';
-  denyBtn.textContent = 'Deny';
-  denyBtn.onclick = async () => {
-    overlay.remove();
-    try {
-      await invoke('agent_deny_permission', { sessionId: State.sessionId, permissionId: data.id || data.permission_id });
-    } catch (e) { console.warn('deny failed:', e); }
-  };
-
-  const approveBtn = document.createElement('button');
-  approveBtn.className = 'btn-send';
-  approveBtn.textContent = 'Approve';
-  approveBtn.onclick = async () => {
-    overlay.remove();
-    try {
-      await invoke('agent_approve_permission', { sessionId: State.sessionId, permissionId: data.id || data.permission_id });
-    } catch (e) { console.warn('approve failed:', e); }
-  };
-
-  actions.appendChild(denyBtn);
-  actions.appendChild(approveBtn);
-  card.appendChild(title);
-  card.appendChild(desc);
-  card.appendChild(actions);
-  overlay.appendChild(card);
-  document.body.appendChild(overlay);
 }
 
 // ── Navigation ────────────────────────────────────────────
@@ -178,9 +121,7 @@ export function navigate(page) {
 }
 
 function showHome() {
-  if (State.sessionId && State.sessionActive) {
-    showChatView();
-  } else if (State.sessionId) {
+  if (State.sessionId) {
     showChatView();
   } else {
     showHomeLanding();
@@ -213,12 +154,9 @@ function setSessionActive(active) {
 async function startSession(prompt, mode) {
   if (!prompt.trim()) { toast('Enter a task description', 'error'); return; }
   if (!State.agentHealthy) {
-    toast('mowis-agent is not running. Check Settings.', 'error');
+    toast('opencode not found. Check Settings.', 'error');
     return;
   }
-
-  const modePrefix = mode === 'plan_only' ? '[Plan Only] ' : mode === 'quick_fix' ? '[Quick Fix] ' : '';
-  const fullPrompt = modePrefix + prompt.trim();
 
   const chatMessages = $('chat-messages');
   if (chatMessages) chatMessages.innerHTML = '';
@@ -234,108 +172,15 @@ async function startSession(prompt, mode) {
     const title = prompt.trim().slice(0, 120);
     const session = await invoke('agent_create_session', { title });
     State.sessionId = session.id;
-    State.lastMessageCount = 0;
     setText('compose-session-info', `session ${session.id.slice(0, 8)}`);
     setText('chat-session-title', title);
 
-    await invoke('agent_send_message', { sessionId: session.id, text: fullPrompt });
-
-    startPolling(session.id);
+    // Fire and forget — events come back via agent_event listener
+    await invoke('agent_send_message', { sessionId: session.id, text: prompt.trim() });
   } catch (err) {
     removeThinkingIndicator();
     appendChatMessage({ kind: 'error', content: String(err), ts: nowTs() });
     setSessionActive(false);
-  }
-}
-
-function startPolling(sessionId) {
-  stopPolling();
-  State.lastMessageCount = 0;
-
-  async function poll() {
-    if (State.sessionId !== sessionId) return;
-    await pollMessages(sessionId);
-    if (State.sessionId === sessionId && State.sessionActive) {
-      State.pollTimer = setTimeout(poll, 1000);
-    }
-  }
-
-  State.pollTimer = setTimeout(poll, 500);
-}
-
-function stopPolling() {
-  if (State.pollTimer) {
-    clearTimeout(State.pollTimer);
-    State.pollTimer = null;
-  }
-}
-
-async function pollMessages(sessionId) {
-  try {
-    const messages = await invoke('agent_list_messages', { sessionId: sessionId });
-    if (!messages || !Array.isArray(messages)) return;
-
-    if (messages.length > State.lastMessageCount) {
-      const newMessages = messages.slice(State.lastMessageCount);
-      State.lastMessageCount = messages.length;
-
-      removeThinkingIndicator();
-
-      for (const msg of newMessages) {
-        if (msg.role === 'user') continue;
-        const parts = msg.parts || [];
-        renderAgentMessageParts(parts);
-
-        const hasFinish = parts.some(p => p.type === 'finish');
-        if (hasFinish) {
-          stopPolling();
-          setSessionActive(false);
-          return;
-        }
-      }
-
-      const lastMsg = messages[messages.length - 1];
-      if (lastMsg?.role === 'assistant') {
-        const hasFinish = (lastMsg.parts || []).some(p => p.type === 'finish');
-        if (!hasFinish && State.sessionActive) {
-          appendThinkingIndicator();
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('[poll] error:', e);
-  }
-}
-
-export async function loadSessionMessages(sessionId) {
-  const chatMessages = $('chat-messages');
-  if (chatMessages) chatMessages.innerHTML = '';
-
-  State.sessionId = sessionId;
-  State.lastMessageCount = 0;
-  setSessionActive(false);
-  showChatView();
-
-  try {
-    const messages = await invoke('agent_list_messages', { sessionId: sessionId });
-    if (!messages) return;
-
-    State.lastMessageCount = messages.length;
-
-    for (const msg of messages) {
-      if (msg.role === 'user') {
-        const textPart = (msg.parts || []).find(p => p.type === 'text');
-        appendChatMessage({ kind: 'user', content: textPart?.text || '', ts: nowTs() });
-      } else if (msg.role === 'assistant') {
-        renderAgentMessageParts(msg.parts || []);
-      }
-    }
-
-    setText('compose-session-info', `session ${sessionId.slice(0, 8)}`);
-    setText('chat-session-title', sessionId.slice(0, 12));
-    setText('tl-page', 'Home');
-  } catch (e) {
-    appendChatMessage({ kind: 'error', content: 'Failed to load session: ' + e, ts: nowTs() });
   }
 }
 
@@ -359,11 +204,37 @@ async function sendChatMessage() {
 
   try {
     await invoke('agent_send_message', { sessionId: State.sessionId, text });
-    startPolling(State.sessionId);
   } catch (err) {
     removeThinkingIndicator();
     appendChatMessage({ kind: 'error', content: `Failed to send: ${err}`, ts: nowTs() });
     setSessionActive(false);
+  }
+}
+
+export async function loadSessionMessages(sessionId) {
+  const chatMessages = $('chat-messages');
+  if (chatMessages) chatMessages.innerHTML = '';
+
+  State.sessionId = sessionId;
+  setSessionActive(false);
+  showChatView();
+
+  try {
+    const messages = await invoke('agent_list_messages', { sessionId });
+    if (!messages) return;
+
+    for (const msg of messages) {
+      appendChatMessage({
+        kind: msg.role === 'user' ? 'user' : 'assistant',
+        content: msg.content,
+        ts: msg.timestamp * 1000,
+      });
+    }
+
+    setText('compose-session-info', `session ${sessionId.slice(0, 8)}`);
+    setText('tl-page', 'Home');
+  } catch (e) {
+    appendChatMessage({ kind: 'error', content: 'Failed to load session: ' + e, ts: nowTs() });
   }
 }
 
@@ -440,7 +311,6 @@ function setupHandlers() {
   });
 
   $('btn-stop')?.addEventListener('click', async () => {
-    stopPolling();
     if (State.sessionId && State.agentHealthy) {
       try { await invoke('agent_abort', { sessionId: State.sessionId }); } catch {}
     }
@@ -452,25 +322,21 @@ function setupHandlers() {
 
   $('btn-chat-home')?.addEventListener('click', () => {
     State.sessionId = null;
-    State.lastMessageCount = 0;
     const chatMessages = $('chat-messages');
     if (chatMessages) chatMessages.innerHTML = '';
     setText('compose-session-info', '');
     setText('chat-session-title', 'Session');
     setSessionActive(false);
-    stopPolling();
     navigate('home');
   });
 
   $('btn-new-session')?.addEventListener('click', () => {
     State.sessionId = null;
-    State.lastMessageCount = 0;
     const chatMessages = $('chat-messages');
     if (chatMessages) chatMessages.innerHTML = '';
     setText('compose-session-info', '');
     setText('chat-session-title', 'Session');
     setSessionActive(false);
-    stopPolling();
     navigate('home');
   });
 
@@ -479,17 +345,20 @@ function setupHandlers() {
   $('chat-input')?.addEventListener('input', autoResize);
 
   $('btn-agent-start')?.addEventListener('click', async () => {
-    toast('Starting mowis-agent...', 'info');
+    toast('Looking for opencode...', 'info');
     try {
       await invoke('agent_start');
-      const ok = await waitForHealth(10, 1000);
-      if (ok) {
-        toast('Agent started successfully', 'success');
+      const health = await invoke('agent_health');
+      if (health?.healthy) {
+        State.agentHealthy = true;
+        State.agentRunning = true;
+        setAgentStatus('connected', `ready (${health.version})`);
+        toast('opencode found', 'success');
       } else {
-        toast('Agent failed to start', 'error');
+        toast('opencode binary not found', 'error');
       }
     } catch (e) {
-      toast('Failed to start: ' + e, 'error');
+      toast('Failed: ' + e, 'error');
     }
   });
 

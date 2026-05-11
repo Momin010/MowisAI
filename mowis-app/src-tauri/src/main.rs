@@ -1,18 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod agent;
 mod commands;
-mod process;
+mod opencode;
 
 use commands::*;
-use process::AgentManager;
+use opencode::OpenCodeManager;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::Manager;
+use tokio::sync::Mutex as TokioMutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub agent_port: Option<u16>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
@@ -23,7 +22,6 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            agent_port: None,
             provider: None,
             model: None,
             api_key: None,
@@ -34,18 +32,15 @@ impl Default for AppConfig {
 }
 
 pub struct AppState {
-    pub agent_manager: Mutex<Option<AgentManager>>,
-    pub agent_port: Mutex<u16>,
+    pub opencode: TokioMutex<OpenCodeManager>,
     pub config: Mutex<AppConfig>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         let config = Self::load_config_from_disk().unwrap_or_default();
-        let port = config.agent_port.unwrap_or(process::DEFAULT_AGENT_PORT);
         Self {
-            agent_manager: Mutex::new(None),
-            agent_port: Mutex::new(port),
+            opencode: TokioMutex::new(OpenCodeManager::new()),
             config: Mutex::new(config),
         }
     }
@@ -94,31 +89,35 @@ fn main() {
             get_agent_config,
         ])
         .setup(|app| {
-            // Auto-start agent on launch
+            // Find opencode binary on startup
             let resource_dir = app
                 .path()
                 .resource_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             let state = app.state::<AppState>();
-            let port = *state.agent_port.lock().unwrap();
 
-            // Spawn auto-start in background so the window appears immediately
-            let resource_dir_clone = resource_dir.clone();
             tauri::async_runtime::spawn(async move {
-                let mut mgr = AgentManager::new(port);
-                match mgr.start(&resource_dir_clone, None).await {
-                    Ok(()) => {
-                        log::info!("[setup] mowis-agent auto-started on port {}", mgr.port());
+                let mut mgr = state.opencode.lock().await;
+                match mgr.find_binary(&resource_dir) {
+                    Ok(path) => {
+                        log::info!("[setup] opencode binary found: {}", path.display());
                     }
                     Err(e) => {
-                        log::warn!("[setup] mowis-agent auto-start failed: {:#}", e);
+                        log::warn!("[setup] opencode binary not found: {:#}", e);
                     }
                 }
-                // We can't easily store the manager back in state from here,
-                // but the frontend will detect the agent via health check
-                // and the agent_start command will find the existing process.
-                // Keep the manager alive so it doesn't kill_on_drop
-                std::mem::forget(mgr);
+
+                // Write opencode config from saved settings
+                let config = state.config.lock().ok();
+                if let Some(config) = config {
+                    let provider = config.provider.as_deref().unwrap_or("anthropic");
+                    let model = config.model.as_deref().unwrap_or("");
+                    let api_key = config.api_key.as_deref().unwrap_or("");
+                    let gcp_project = config.gcp_project.as_deref().unwrap_or("");
+                    if let Err(e) = opencode::write_opencode_config(provider, model, api_key, gcp_project) {
+                        log::warn!("[setup] failed to write opencode config: {:#}", e);
+                    }
+                }
             });
 
             Ok(())

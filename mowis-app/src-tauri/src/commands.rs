@@ -1,11 +1,8 @@
-use crate::agent::{AgentMessage, AgentClient, HealthResponse, Session};
-use crate::process::{AgentManager, LogSender};
+use crate::opencode::{AgentEvent, OpenCodeManager, write_opencode_config};
 use crate::AppState;
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
 use std::path::PathBuf;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider info
@@ -23,13 +20,6 @@ pub struct ProviderInfo {
 fn supported_providers() -> Vec<ProviderInfo> {
     vec![
         ProviderInfo {
-            id: "openai".into(),
-            name: "OpenAI".into(),
-            requires_api_key: true,
-            requires_gcp_project: false,
-            default_model: "gpt-4o".into(),
-        },
-        ProviderInfo {
             id: "anthropic".into(),
             name: "Anthropic".into(),
             requires_api_key: true,
@@ -37,11 +27,25 @@ fn supported_providers() -> Vec<ProviderInfo> {
             default_model: "claude-sonnet-4-20250514".into(),
         },
         ProviderInfo {
-            id: "google".into(),
-            name: "Google (Vertex AI)".into(),
-            requires_api_key: false,
-            requires_gcp_project: true,
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            requires_api_key: true,
+            requires_gcp_project: false,
+            default_model: "gpt-4o".into(),
+        },
+        ProviderInfo {
+            id: "gemini".into(),
+            name: "Google Gemini".into(),
+            requires_api_key: true,
+            requires_gcp_project: false,
             default_model: "gemini-2.5-pro".into(),
+        },
+        ProviderInfo {
+            id: "groq".into(),
+            name: "Groq".into(),
+            requires_api_key: true,
+            requires_gcp_project: false,
+            default_model: "llama-3.3-70b-versatile".into(),
         },
         ProviderInfo {
             id: "openrouter".into(),
@@ -50,6 +54,27 @@ fn supported_providers() -> Vec<ProviderInfo> {
             requires_gcp_project: false,
             default_model: "anthropic/claude-sonnet-4".into(),
         },
+        ProviderInfo {
+            id: "vertexai".into(),
+            name: "Google Vertex AI".into(),
+            requires_api_key: false,
+            requires_gcp_project: true,
+            default_model: "gemini-2.5-pro".into(),
+        },
+        ProviderInfo {
+            id: "xai".into(),
+            name: "xAI".into(),
+            requires_api_key: true,
+            requires_gcp_project: false,
+            default_model: "grok-3".into(),
+        },
+        ProviderInfo {
+            id: "copilot".into(),
+            name: "GitHub Copilot".into(),
+            requires_api_key: false,
+            requires_gcp_project: false,
+            default_model: "gpt-4o".into(),
+        },
     ]
 }
 
@@ -57,24 +82,7 @@ fn supported_providers() -> Vec<ProviderInfo> {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn get_client(state: &AppState) -> Result<AgentClient> {
-    let mgr_guard = state
-        .agent_manager
-        .lock()
-        .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
-    if let Some(ref mgr) = *mgr_guard {
-        return Ok(mgr.client().clone());
-    }
-    drop(mgr_guard);
-
-    let port = *state
-        .agent_port
-        .lock()
-        .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
-    Ok(AgentClient::new(port))
-}
-
-fn config_path() -> Result<PathBuf> {
+fn config_path() -> anyhow::Result<PathBuf> {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string());
@@ -84,31 +92,82 @@ fn config_path() -> Result<PathBuf> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tauri commands
+// Health — just checks if the opencode binary is found
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub healthy: bool,
+    pub version: String,
+    pub cwd: String,
+}
+
 #[tauri::command]
-pub async fn agent_health(state: State<'_, AppState>) -> Result<HealthResponse, String> {
-    let client = get_client(&state).map_err(|e| e.to_string())?;
-    client.health().await.map_err(|e| e.to_string())
+pub async fn agent_health(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<HealthResponse, String> {
+    let mut mgr = state.opencode.lock().await;
+
+    let resource_dir = app_handle
+        .path()
+        .resource_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+
+    let binary_found = mgr.find_binary(&resource_dir).is_ok();
+    let config = state.config.lock().map_err(|e| e.to_string())?;
+    let cwd = config.cwd.clone().unwrap_or_default();
+
+    Ok(HealthResponse {
+        healthy: binary_found,
+        version: "opencode".into(),
+        cwd,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sessions — in-memory, managed by OpenCodeManager
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub title: String,
+    pub created_at: i64,
+    pub status: String,
+    pub message_count: usize,
 }
 
 #[tauri::command]
 pub async fn agent_create_session(
     state: State<'_, AppState>,
     title: String,
-) -> Result<Session, String> {
-    let client = get_client(&state).map_err(|e| e.to_string())?;
-    client
-        .create_session(&title)
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<SessionInfo, String> {
+    let mgr = state.opencode.lock().await;
+    let sess = mgr.create_session(&title).await;
+    Ok(SessionInfo {
+        id: sess.id,
+        title: sess.title,
+        created_at: sess.created_at,
+        status: sess.status,
+        message_count: 0,
+    })
 }
 
 #[tauri::command]
-pub async fn agent_list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String> {
-    let client = get_client(&state).map_err(|e| e.to_string())?;
-    client.list_sessions().await.map_err(|e| e.to_string())
+pub async fn agent_list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, String> {
+    let mgr = state.opencode.lock().await;
+    let sessions = mgr.list_sessions().await;
+    Ok(sessions
+        .into_iter()
+        .map(|s| SessionInfo {
+            id: s.id,
+            title: s.title,
+            created_at: s.created_at,
+            status: s.status,
+            message_count: s.messages.len(),
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -116,130 +175,190 @@ pub async fn agent_delete_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<(), String> {
-    let client = get_client(&state).map_err(|e| e.to_string())?;
-    client
-        .delete_session(&session_id)
+    let mgr = state.opencode.lock().await;
+    mgr.delete_session(&session_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Messages — send a prompt, get streaming events, final response
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageInfo {
+    pub role: String,
+    pub content: String,
+    pub timestamp: i64,
 }
 
 #[tauri::command]
 pub async fn agent_send_message(
     state: State<'_, AppState>,
+    app_handle: AppHandle,
     session_id: String,
     text: String,
 ) -> Result<(), String> {
-    let client = get_client(&state).map_err(|e| e.to_string())?;
-    client
-        .send_message_async(&session_id, &text)
-        .await
-        .map_err(|e| e.to_string())
+    // Get config for cwd and provider settings
+    let config = {
+        let c = state.config.lock().map_err(|e| e.to_string())?;
+        c.clone()
+    };
+
+    let cwd = config.cwd.clone().unwrap_or_else(|| {
+        std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".into())
+    });
+
+    // Write opencode config with current provider settings
+    let provider = config.provider.as_deref().unwrap_or("anthropic");
+    let model = config.model.as_deref().unwrap_or("");
+    let api_key = config.api_key.as_deref().unwrap_or("");
+    let gcp_project = config.gcp_project.as_deref().unwrap_or("");
+    write_opencode_config(provider, model, api_key, gcp_project)
+        .map_err(|e| e.to_string())?;
+
+    // Create event channel
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+    // Forward events to the Tauri frontend
+    let app = app_handle.clone();
+    tokio::spawn(async move {
+        while let Some(evt) = event_rx.recv().await {
+            let _ = app.emit("agent_event", &evt);
+        }
+    });
+
+    // Extract binary path and sessions Arc under a single lock, then drop it
+    let (binary, sessions) = {
+        let mut mgr = state.opencode.lock().await;
+
+        // Make sure binary is found
+        if mgr.binary_path().is_none() {
+            let resource_dir = app_handle
+                .path()
+                .resource_dir()
+                .unwrap_or_else(|_| PathBuf::from("."));
+            mgr.find_binary(&resource_dir).map_err(|e| e.to_string())?;
+        }
+
+        let binary = mgr
+            .binary_path()
+            .ok_or("opencode binary not found")?
+            .to_path_buf();
+        let sessions = mgr.sessions();
+        (binary, sessions)
+    }; // lock dropped here
+
+    let sid = session_id.clone();
+    let prompt = text.clone();
+
+    // Run in background — the frontend gets events via agent_event
+    tokio::spawn(async move {
+        let mgr_for_run = OpenCodeManager::with_binary_and_sessions(binary, sessions);
+        match mgr_for_run.run_prompt(&sid, &prompt, &cwd, Some(event_tx)).await {
+            Ok(_) => {
+                log::info!("[cmd] opencode completed for session {}", sid);
+            }
+            Err(e) => {
+                log::error!("[cmd] opencode failed for session {}: {:#}", sid, e);
+            }
+        }
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn agent_list_messages(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<Vec<AgentMessage>, String> {
-    let client = get_client(&state).map_err(|e| e.to_string())?;
-    client
-        .list_messages(&session_id)
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<Vec<MessageInfo>, String> {
+    let mgr = state.opencode.lock().await;
+    let sessions = mgr.list_sessions().await;
+    let sess = sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .ok_or("session not found")?;
+
+    Ok(sess
+        .messages
+        .iter()
+        .map(|m| MessageInfo {
+            role: m.role.clone(),
+            content: m.content.clone(),
+            timestamp: m.timestamp,
+        })
+        .collect())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent control — abort not supported in process mode (kill process)
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[tauri::command]
-pub async fn agent_abort(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), String> {
-    let client = get_client(&state).map_err(|e| e.to_string())?;
-    client.abort(&session_id).await.map_err(|e| e.to_string())
+pub async fn agent_abort(session_id: String) -> Result<(), String> {
+    log::warn!("[cmd] abort requested for session {} — not yet implemented for process mode", session_id);
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn agent_approve_permission(
-    state: State<'_, AppState>,
     session_id: String,
     permission_id: String,
 ) -> Result<(), String> {
-    let client = get_client(&state).map_err(|e| e.to_string())?;
-    client
-        .approve_permission(&session_id, &permission_id)
-        .await
-        .map_err(|e| e.to_string())
+    log::warn!(
+        "[cmd] approve permission {} for session {} — not applicable in process mode",
+        permission_id,
+        session_id
+    );
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn agent_deny_permission(
-    state: State<'_, AppState>,
     session_id: String,
     permission_id: String,
 ) -> Result<(), String> {
-    let client = get_client(&state).map_err(|e| e.to_string())?;
-    client
-        .deny_permission(&session_id, &permission_id)
-        .await
-        .map_err(|e| e.to_string())
+    log::warn!(
+        "[cmd] deny permission {} for session {} — not applicable in process mode",
+        permission_id,
+        session_id
+    );
+    Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent start/stop — no longer needed (no separate server), kept as no-ops
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn agent_start(
     state: State<'_, AppState>,
-    app_handle: tauri::AppHandle,
-) -> Result<u16, String> {
+    app_handle: AppHandle,
+) -> Result<(), String> {
     let resource_dir = app_handle
         .path()
         .resource_dir()
-        .map_err(|e| e.to_string())?;
+        .unwrap_or_else(|_| PathBuf::from("."));
 
-    let port = *state
-        .agent_port
-        .lock()
-        .map_err(|e| format!("lock poisoned: {}", e))?;
+    let mut mgr = state.opencode.lock().await;
+    mgr.find_binary(&resource_dir).map_err(|e| e.to_string())?;
 
-    let mut mgr = AgentManager::new(port);
-
-    // We use an unbounded channel to collect logs but don't stream them to the frontend
-    // in this simplified version. The logs go to the logger via emit().
-    let (log_tx, _log_rx): (LogSender, _) = tokio::sync::mpsc::unbounded_channel();
-
-    mgr.start(&resource_dir, Some(log_tx))
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let actual_port = mgr.port();
-
-    let mut port_guard = state
-        .agent_port
-        .lock()
-        .map_err(|e| format!("lock poisoned: {}", e))?;
-    *port_guard = actual_port;
-
-    let mut mgr_guard = state
-        .agent_manager
-        .lock()
-        .map_err(|e| format!("lock poisoned: {}", e))?;
-    *mgr_guard = Some(mgr);
-
-    Ok(actual_port)
+    log::info!("[cmd] opencode binary found: {:?}", mgr.binary_path());
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn agent_stop(state: State<'_, AppState>) -> Result<(), String> {
-    let mut mgr_guard = state
-        .agent_manager
-        .lock()
-        .map_err(|e| format!("lock poisoned: {}", e))?;
-    if let Some(ref mut mgr) = *mgr_guard {
-        // We need to call async stop, but we're in a sync Mutex context.
-        // Use tokio::runtime::Handle to block_on within the async command.
-        let handle = tokio::runtime::Handle::current();
-        handle.block_on(mgr.stop());
-    }
-    *mgr_guard = None;
+pub async fn agent_stop() -> Result<(), String> {
+    // No persistent server to stop
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider / config commands
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn agent_get_providers() -> Result<Vec<ProviderInfo>, String> {
@@ -247,30 +366,21 @@ pub async fn agent_get_providers() -> Result<Vec<ProviderInfo>, String> {
 }
 
 #[tauri::command]
-pub async fn get_agent_port(state: State<'_, AppState>) -> Result<u16, String> {
-    let port = *state
-        .agent_port
-        .lock()
-        .map_err(|e| format!("lock poisoned: {}", e))?;
-    Ok(port)
-}
-
-#[tauri::command]
 pub async fn agent_get_config(state: State<'_, AppState>) -> Result<crate::AppConfig, String> {
-    let config = state
-        .config
-        .lock()
-        .map_err(|e| format!("lock poisoned: {}", e))?;
+    let config = state.config.lock().map_err(|e| e.to_string())?;
     Ok(config.clone())
 }
 
 #[tauri::command]
 pub async fn get_agent_config(state: State<'_, AppState>) -> Result<crate::AppConfig, String> {
-    let config = state
-        .config
-        .lock()
-        .map_err(|e| format!("lock poisoned: {}", e))?;
+    let config = state.config.lock().map_err(|e| e.to_string())?;
     Ok(config.clone())
+}
+
+#[tauri::command]
+pub async fn get_agent_port(state: State<'_, AppState>) -> Result<u16, String> {
+    // Keep for backwards compat — return a dummy port since we no longer use HTTP
+    Ok(0)
 }
 
 #[tauri::command]
@@ -283,19 +393,16 @@ pub async fn save_agent_config(
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
 
-    // Update in-memory state
-    let mut port_guard = state
-        .agent_port
-        .lock()
-        .map_err(|e| format!("lock poisoned: {}", e))?;
-    if let Some(p) = config.agent_port {
-        *port_guard = p;
-    }
+    // Write opencode config
+    let provider = config.provider.as_deref().unwrap_or("anthropic");
+    let model = config.model.as_deref().unwrap_or("");
+    let api_key = config.api_key.as_deref().unwrap_or("");
+    let gcp_project = config.gcp_project.as_deref().unwrap_or("");
+    write_opencode_config(provider, model, api_key, gcp_project)
+        .map_err(|e| e.to_string())?;
 
-    let mut config_guard = state
-        .config
-        .lock()
-        .map_err(|e| format!("lock poisoned: {}", e))?;
+    // Update in-memory state
+    let mut config_guard = state.config.lock().map_err(|e| e.to_string())?;
     *config_guard = config;
 
     Ok(())

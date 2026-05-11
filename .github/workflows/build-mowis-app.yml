@@ -6,11 +6,11 @@ on:
     tags: ['app-v*']
     paths:
       - 'mowis-app/**'
-      - 'mowis-agent/**'
+      - 'opencode-main/**'
 
 jobs:
-  # ── Job 1: compile mowis-agent for Windows (Go binary) ─────────────────────
-  build-mowis-agent:
+  # ── Job 1: compile opencode for Windows (Go binary) ─────────────────────
+  build-opencode:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,25 +20,25 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Build mowis-agent (Windows amd64)
-        working-directory: mowis-agent
+      - name: Build opencode (Windows amd64)
+        working-directory: opencode-main
         env:
           GOOS: windows
           GOARCH: amd64
           CGO_ENABLED: '0'
-        run: go build -tags headless -o mowis-agent.exe .
+        run: go build -o opencode.exe .
 
-      - name: Upload mowis-agent binary
+      - name: Upload opencode binary
         uses: actions/upload-artifact@v4
         with:
-          name: mowis-agent-windows
-          path: mowis-agent/mowis-agent.exe
+          name: opencode-windows
+          path: opencode-main/opencode.exe
           retention-days: 1
 
   # ── Job 2: build the Tauri Windows installer ──────────────────────────────
   build-windows:
     runs-on: windows-latest
-    needs: [build-mowis-agent]
+    needs: [build-opencode]
     defaults:
       run:
         working-directory: mowis-app
@@ -57,22 +57,22 @@ jobs:
       - name: Install Node deps
         run: npm install
 
-      # Download the mowis-agent Windows binary
-      - name: Download mowis-agent binary
+      # Download the opencode Windows binary
+      - name: Download opencode binary
         uses: actions/download-artifact@v4
         with:
-          name: mowis-agent-windows
+          name: opencode-windows
           path: mowis-app/src-tauri/resources
 
-      - name: Verify mowis-agent binary exists
+      - name: Verify opencode binary exists
         shell: pwsh
         run: |
-          if (-not (Test-Path "src-tauri\resources\mowis-agent.exe")) {
-            Write-Error "mowis-agent.exe not found in resources"
+          if (-not (Test-Path "src-tauri\resources\opencode.exe")) {
+            Write-Error "opencode.exe not found in resources"
             exit 1
           }
-          Write-Host "mowis-agent.exe found"
-          & "src-tauri\resources\mowis-agent.exe" --help 2>&1 | Select-Object -First 3
+          Write-Host "opencode.exe found"
+          & "src-tauri\resources\opencode.exe" --help 2>&1 | Select-Object -First 3
 
       - name: Build Tauri NSIS installer
         run: npx tauri build --ci --bundles nsis
