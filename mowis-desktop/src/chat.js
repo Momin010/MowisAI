@@ -246,25 +246,6 @@ export function appendToolResult(data) {
   scrollToBottom(container);
 }
 
-function getToolIcon(toolName) {
-  // Clean monochrome SVG icons — no emojis
-  const svgs = {
-    'read_file':        '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 1h8a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1zm1 3v1h6V4H5zm0 3v1h6V7H5zm0 3v1h4v-1H5z"/></svg>',
-    'write_file':       '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.1 1.3l2.6 2.6-9.3 9.3H2.8V10.6l9.3-9.3zm-1.4 1.4L3.8 9.6v1.6h1.6l6.9-6.9-1.6-1.6z"/></svg>',
-    'create_file':      '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 1h5l4 4v9a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1zm4 1H5v12h7V6H9V2H8zm0 5h1v2h2v1h-2v2H8v-2H6V9h2V7z"/></svg>',
-    'delete_file':      '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2V1h6v1h3v1H2V2h3zm1 3v8h1V5H6zm3 0v8h1V5H9zM3 4h10l-1 11H4L3 4z"/></svg>',
-    'run_command':      '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12a1 1 0 011 1v10a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1zm1 3l3 2.5L3 10V5zm5 5h4V9H8v1z"/></svg>',
-    'git_commit':       '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 4a4 4 0 00-3.9 3H0v2h4.1A4 4 0 008 12a4 4 0 003.9-3H16V7h-4.1A4 4 0 008 4zm0 2a2 2 0 110 4 2 2 0 010-4z"/></svg>',
-    'git_diff':         '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1v3H5v1h3v3h1V5h3V4H9V1H8zM5 10v1h6v-1H5zm0 3v1h4v-1H5z"/></svg>',
-    'list_files':       '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h3v3H2V3zm5 0h7v1H7V3zm0 4h7v1H7V7zm0 4h7v1H7v-1zM2 7h3v3H2V7zm0 4h3v3H2v-3z"/></svg>',
-    'search_files':     '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M6.5 1a5.5 5.5 0 014 9.3l3.6 3.6-.7.7-3.6-3.6A5.5 5.5 0 116.5 1zm0 1a4.5 4.5 0 100 9 4.5 4.5 0 000-9z"/></svg>',
-    'move_file':        '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h5l2 2h5a1 1 0 011 1v7a1 1 0 01-1 1H2a1 1 0 01-1-1V4a1 1 0 011-1zm5 4v1H5v1h2v1l3-1.5L7 7z"/></svg>',
-    'replace_in_file':  '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 4h7V3H2v1zm0 3h5V6H2v1zm0 3h7V9H2v1zm0 3h5v-1H2v1zm10-8v2h2l-3 3-3-3h2V5h2z"/></svg>',
-    'patch_file':       '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M10.6 1.4L14.6 5.4 5.4 14.6 1.4 10.6 10.6 1.4zM8 8a1 1 0 100-2 1 1 0 000 2z"/></svg>',
-  };
-  return svgs[toolName] || '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 1a6 6 0 110 12A6 6 0 018 2zm-.5 3h1v4h-1V5zm0 5h1v1h-1v-1z"/></svg>';
-}
-
 export function createMessageRow(type, content) {
   const row = document.createElement('div');
   row.className = `msg-row ${type}`;
@@ -478,12 +459,25 @@ export function renderToolResult(part) {
 
 export function getToolIcon(name) {
   const icons = {
-    bash: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>',
-    edit: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>',
-    write: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>',
-    read: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M16 13H8"></path><path d="M16 17H8"></path></svg>',
-    glob: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
-    grep: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+    bash:             '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>',
+    edit:             '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>',
+    write:            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>',
+    read:             '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M16 13H8"></path><path d="M16 17H8"></path></svg>',
+    glob:             '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+    grep:             '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+    // agentd tool names (snake_case) mapped to the same icons
+    read_file:        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M16 13H8"></path><path d="M16 17H8"></path></svg>',
+    write_file:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>',
+    create_file:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>',
+    delete_file:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="9" y1="15" x2="15" y2="15"></line></svg>',
+    run_command:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>',
+    git_commit:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"></circle><line x1="1.05" y1="12" x2="7" y2="12"></line><line x1="17.01" y1="12" x2="22.96" y2="12"></line></svg>',
+    git_diff:         '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>',
+    list_files:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>',
+    search_files:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+    move_file:        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>',
+    replace_in_file:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>',
+    patch_file:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>',
   };
   return icons[name] || icons.bash;
 }
