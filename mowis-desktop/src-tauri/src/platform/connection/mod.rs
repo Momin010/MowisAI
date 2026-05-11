@@ -166,7 +166,7 @@ async fn tcp_auth_handshake(conn: &mut ConnectionStream, token: &str) -> Result<
 // ── Connection probe (no auth — just TCP SYN) ─────────────────────────────────
 
 pub async fn is_tcp_reachable(addr: &str) -> bool {
-    timeout(Duration::from_secs(2), TcpStream::connect(addr))
+    timeout(Duration::from_secs(5), TcpStream::connect(addr))
         .await
         .map(|r| r.is_ok())
         .unwrap_or(false)

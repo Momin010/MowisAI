@@ -537,7 +537,7 @@ impl WindowsLauncher {
 
         // Bridge Unix socket → TCP so Windows can reach it.
         let socat_cmd = format!(
-            "nohup socat TCP-LISTEN:{port},reuseaddr,fork \
+            "nohup socat TCP4-LISTEN:{port},reuseaddr,fork \
              UNIX-CONNECT:/tmp/agentd.sock \
              </dev/null >>/var/log/socat.log 2>&1 &",
             port = AGENT_TCP_PORT
@@ -867,13 +867,13 @@ impl WindowsLauncher {
 
         // Bridge with socat
         let socat_cmd = format!(
-            "nohup socat TCP-LISTEN:{port},reuseaddr,fork \
+            "nohup socat TCP4-LISTEN:{port},reuseaddr,fork \
              UNIX-CONNECT:/tmp/agentd.sock \
              </dev/null >>/var/log/socat.log 2>&1 &",
             port = AGENT_TCP_PORT
         );
         emit(pw, "booting", "Starting socat TCP relay…", 84, "command",
-            Some(format!("socat TCP-LISTEN:{},reuseaddr,fork UNIX-CONNECT:/tmp/agentd.sock", AGENT_TCP_PORT))).await;
+            Some(format!("socat TCP4-LISTEN:{},reuseaddr,fork UNIX-CONNECT:/tmp/agentd.sock", AGENT_TCP_PORT))).await;
 
         let socat_out = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "sh", "-c", &socat_cmd])

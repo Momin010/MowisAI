@@ -9,7 +9,7 @@
 //!
 //! Prerequisites:
 //!   1. agentd running in WSL:   agentd socket --path /tmp/agentd.sock
-//!   2. socat bridge running:    socat TCP-LISTEN:9722,reuseaddr,fork UNIX-CONNECT:/tmp/agentd.sock
+//!   2. socat bridge running:    socat TCP4-LISTEN:9722,reuseaddr,fork UNIX-CONNECT:/tmp/agentd.sock
 //!
 //! Run from Windows:
 //!   cargo test --package agentd --test desktop_session_test -- --nocapture
@@ -92,7 +92,7 @@ fn test_tcp_connectivity() {
             "SKIP: Cannot reach agentd at TCP {}.\n\
              Make sure:\n\
              1. agentd is running in WSL:  wsl -d MowisAI -- agentd socket --path /tmp/agentd.sock\n\
-             2. socat bridge is running:   wsl -d MowisAI -- socat TCP-LISTEN:9722,reuseaddr,fork UNIX-CONNECT:/tmp/agentd.sock &",
+             2. socat bridge is running:   wsl -d MowisAI -- socat TCP4-LISTEN:9722,reuseaddr,fork UNIX-CONNECT:/tmp/agentd.sock &",
             addr
         );
         return;

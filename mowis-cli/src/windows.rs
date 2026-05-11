@@ -213,16 +213,16 @@ impl WindowsLauncher {
 
         // Start socat bridge
         emit(pw, "booting", "Starting socat bridge (TCP:9722 → Unix socket)…", 30, "command",
-            Some(format!("socat TCP-LISTEN:9722,fork,reuseaddr UNIX-CONNECT:{}", AGENT_SOCKET))).await;
+            Some(format!("socat TCP4-LISTEN:9722,fork,reuseaddr UNIX-CONNECT:{}", AGENT_SOCKET))).await;
 
         let _ = win_cmd("wsl.exe")
-            .args(["-d", WSL_DISTRO, "--", "pkill", "-f", "socat TCP-LISTEN"])
+            .args(["-d", WSL_DISTRO, "--", "pkill", "-f", "socat TCP"])
             .stdout(Stdio::null()).stderr(Stdio::null())
             .status().await;
 
         let _ = win_cmd("wsl.exe")
             .args(["-d", WSL_DISTRO, "--", "bash", "-c", &format!(
-                "nohup socat TCP-LISTEN:9722,fork,reuseaddr UNIX-CONNECT:{} &",
+                "nohup socat TCP4-LISTEN:9722,fork,reuseaddr UNIX-CONNECT:{} &",
                 AGENT_SOCKET
             )]).stdout(Stdio::null()).stderr(Stdio::null())
             .status().await;

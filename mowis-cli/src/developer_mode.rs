@@ -901,14 +901,14 @@ impl DeveloperLauncher {
         // ── Step 9: Start socat TCP bridge ───────────────────────────────────
         log::info!("[developer_mode] Step 9: Starting socat TCP bridge");
         emit(pw, "booting", "Starting TCP bridge (socat)…", 82, "command",
-            Some("socat TCP-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &".into())).await;
+            Some("socat TCP4-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &".into())).await;
 
         // Kill any existing socat
         log::debug!("[developer_mode] Step 9: Killing any existing socat processes");
-        let _ = serial.exec_command("pkill -f 'socat TCP-LISTEN' 2>/dev/null", None, 3).await;
+        let _ = serial.exec_command("pkill -f 'socat TCP' 2>/dev/null", None, 3).await;
         sleep(Duration::from_millis(500)).await;
 
-        let socat_cmd = "socat TCP-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &";
+        let socat_cmd = "socat TCP4-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &";
         log::debug!("[developer_mode] Step 9: Starting socat: {}", socat_cmd);
         serial.exec_background(socat_cmd).await
             .context("Failed to send socat start command")?;

@@ -754,16 +754,16 @@ impl DeveloperLauncher {
 
         // ── Step 9: Start socat TCP bridge ───────────────────────────────────
         emit(pw, "booting", "Starting TCP bridge (socat)…", 82, "command",
-            Some("socat TCP-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &".into())).await;
+            Some("socat TCP4-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock &".into())).await;
         log::info!("Starting socat TCP bridge...");
 
         // Kill any existing socat
-        let _ = serial.exec_command("pkill -f 'socat TCP-LISTEN' 2>/dev/null", None, 3).await;
+        let _ = serial.exec_command("pkill -f 'socat TCP' 2>/dev/null", None, 3).await;
         sleep(Duration::from_millis(500)).await;
 
         // Same as agentd — nohup + setsid to survive serial disconnect.
         serial.exec_background(
-            "nohup setsid socat TCP-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock </dev/null >/var/log/socat.log 2>&1 &"
+            "nohup setsid socat TCP4-LISTEN:8080,fork,reuseaddr UNIX-CONNECT:/tmp/mowisai.sock </dev/null >/var/log/socat.log 2>&1 &"
         ).await.context("Failed to send socat start command")?;
         sleep(Duration::from_secs(1)).await;
 
@@ -819,25 +819,39 @@ impl VmLauncher for DeveloperLauncher {
         // ── CTO fast-path: if the agent port is already reachable, skip everything.
         // This preserves a manually-started VM (no kill, no spawn, no bootstrap).
         // Just connect directly to whatever is already listening.
+        // We retry the probe multiple times because on RAM-constrained systems the
+        // first attempt may time out while the OS is still swapping pages.
         let agent_addr = format!("127.0.0.1:{}", self.config.agent_port);
         if is_tcp_reachable(&agent_addr).await {
-            emit(pw, "detecting", &format!("Existing VM detected on port {} — connecting directly", self.config.agent_port), 5, "info", None).await;
+            emit(pw, "detecting", &format!("Existing VM detected on port {} — verifying agentd protocol…", self.config.agent_port), 5, "info", None).await;
 
-            // Quick protocol check: send a get_config to verify it's actually agentd
-            let probe_ok = match timeout(Duration::from_secs(3), TcpStream::connect(&agent_addr)).await {
-                Ok(Ok(stream)) => {
-                    let (reader, mut writer) = tokio::io::split(stream);
-                    let _ = writer.write_all(b"{\"request_type\":\"get_config\"}\n").await;
-                    let _ = writer.flush().await;
-                    let mut buf_reader = BufReader::new(reader);
-                    let mut line = String::new();
-                    match timeout(Duration::from_secs(5), buf_reader.read_line(&mut line)).await {
-                        Ok(Ok(n)) if n > 0 && line.contains("status") => true,
-                        _ => false,
+            let mut probe_ok = false;
+            for attempt in 1..=3u32 {
+                let result = match timeout(Duration::from_secs(10), TcpStream::connect(&agent_addr)).await {
+                    Ok(Ok(stream)) => {
+                        let (reader, mut writer) = tokio::io::split(stream);
+                        let _ = writer.write_all(b"{\"request_type\":\"get_config\"}\n").await;
+                        let _ = writer.flush().await;
+                        let mut buf_reader = BufReader::new(reader);
+                        let mut line = String::new();
+                        match timeout(Duration::from_secs(15), buf_reader.read_line(&mut line)).await {
+                            Ok(Ok(n)) if n > 0 && line.contains("status") => true,
+                            _ => false,
+                        }
                     }
+                    _ => false,
+                };
+
+                if result {
+                    probe_ok = true;
+                    break;
                 }
-                _ => false,
-            };
+
+                if attempt < 3 {
+                    emit(pw, "detecting", &format!("Probe attempt {}/3 — no response, retrying…", attempt), 5 + attempt as u8, "warning", None).await;
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
 
             if probe_ok {
                 emit(pw, "ready", "Connected to existing VM (manual setup preserved)", 100, "success",
@@ -852,8 +866,8 @@ impl VmLauncher for DeveloperLauncher {
                     auth_token: Some(token),
                 });
             } else {
-                emit(pw, "detecting", "Port is open but agentd not responding — will restart", 8, "warning", None).await;
-                log::warn!("Port {} reachable but no valid agentd response — proceeding with full setup", self.config.agent_port);
+                emit(pw, "detecting", "Port is open but agentd not responding after 3 attempts — will restart", 8, "warning", None).await;
+                log::warn!("Port {} reachable but no valid agentd response after 3 probes — proceeding with full setup", self.config.agent_port);
             }
         }
 
@@ -945,11 +959,11 @@ impl VmLauncher for DeveloperLauncher {
     }
 
     async fn health_check(&self) -> Result<bool> {
-        {
-            let guard = self.child.lock().unwrap();
-            if guard.is_none() {
-                return Ok(false);
-            }
+        // Check TCP reachability regardless of whether we spawned QEMU ourselves.
+        // In fast-path mode (CTO connects to existing VM), self.child is None
+        // but the agent is still alive — we just didn't spawn it.
+        if !self.running.load(Ordering::SeqCst) {
+            return Ok(false);
         }
 
         let addr = format!("127.0.0.1:{}", self.config.agent_port);
