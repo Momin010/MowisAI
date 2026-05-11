@@ -171,6 +171,100 @@ export function appendFileChanges(changes) {
   scrollToBottom(container);
 }
 
+export function appendToolCall(data) {
+  const container = $('chat-messages');
+  if (!container) return;
+
+  // Check if we have an active tool-events container, create one if not
+  let toolGroup = container.querySelector('.tool-events-group:last-child');
+  if (!toolGroup || toolGroup.dataset.finalized === 'true') {
+    toolGroup = document.createElement('div');
+    toolGroup.className = 'tool-events-group';
+    container.appendChild(toolGroup);
+  }
+
+  const item = document.createElement('div');
+  item.className = 'tool-event tool-call';
+  item.dataset.workerId = data.worker_id;
+  item.dataset.toolName = data.tool_name;
+
+  const icon = getToolIcon(data.tool_name);
+  const shortArgs = (data.args_preview || '').substring(0, 120);
+  item.innerHTML = `
+    <span class="tool-icon">${icon}</span>
+    <span class="tool-name">${escHtml(data.tool_name)}</span>
+    <span class="tool-args">${escHtml(shortArgs)}</span>
+    <span class="tool-spinner"></span>
+  `;
+  toolGroup.appendChild(item);
+  scrollToBottom(container);
+}
+
+export function appendToolResult(data) {
+  const container = $('chat-messages');
+  if (!container) return;
+
+  // Find the matching pending tool call
+  const toolGroup = container.querySelector('.tool-events-group:last-child');
+  if (toolGroup) {
+    const pending = toolGroup.querySelector(
+      `.tool-call[data-tool-name="${data.tool_name}"]:not(.resolved)`
+    );
+    if (pending) {
+      pending.classList.add('resolved', data.success ? 'success' : 'failed');
+      const spinner = pending.querySelector('.tool-spinner');
+      if (spinner) {
+        spinner.className = data.success ? 'tool-status-ok' : 'tool-status-fail';
+        spinner.textContent = data.success ? '✓' : '✗';
+      }
+      // Add preview if present
+      if (data.preview) {
+        const preview = document.createElement('div');
+        preview.className = 'tool-preview';
+        preview.textContent = data.preview.substring(0, 200);
+        pending.appendChild(preview);
+      }
+      scrollToBottom(container);
+      return;
+    }
+  }
+
+  // Standalone result (no matching call)
+  const row = document.createElement('div');
+  row.className = `tool-event tool-result ${data.success ? 'success' : 'failed'}`;
+  const icon = data.success ? '✓' : '✗';
+  row.innerHTML = `
+    <span class="tool-icon">${icon}</span>
+    <span class="tool-name">${escHtml(data.tool_name)}</span>
+    <span class="tool-preview">${escHtml((data.preview || '').substring(0, 200))}</span>
+  `;
+  if (toolGroup) {
+    toolGroup.appendChild(row);
+  } else {
+    container.appendChild(row);
+  }
+  scrollToBottom(container);
+}
+
+function getToolIcon(toolName) {
+  // Clean monochrome SVG icons — no emojis
+  const svgs = {
+    'read_file':        '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 1h8a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1zm1 3v1h6V4H5zm0 3v1h6V7H5zm0 3v1h4v-1H5z"/></svg>',
+    'write_file':       '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M12.1 1.3l2.6 2.6-9.3 9.3H2.8V10.6l9.3-9.3zm-1.4 1.4L3.8 9.6v1.6h1.6l6.9-6.9-1.6-1.6z"/></svg>',
+    'create_file':      '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 1h5l4 4v9a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1zm4 1H5v12h7V6H9V2H8zm0 5h1v2h2v1h-2v2H8v-2H6V9h2V7z"/></svg>',
+    'delete_file':      '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2V1h6v1h3v1H2V2h3zm1 3v8h1V5H6zm3 0v8h1V5H9zM3 4h10l-1 11H4L3 4z"/></svg>',
+    'run_command':      '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12a1 1 0 011 1v10a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1zm1 3l3 2.5L3 10V5zm5 5h4V9H8v1z"/></svg>',
+    'git_commit':       '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 4a4 4 0 00-3.9 3H0v2h4.1A4 4 0 008 12a4 4 0 003.9-3H16V7h-4.1A4 4 0 008 4zm0 2a2 2 0 110 4 2 2 0 010-4z"/></svg>',
+    'git_diff':         '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1v3H5v1h3v3h1V5h3V4H9V1H8zM5 10v1h6v-1H5zm0 3v1h4v-1H5z"/></svg>',
+    'list_files':       '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h3v3H2V3zm5 0h7v1H7V3zm0 4h7v1H7V7zm0 4h7v1H7v-1zM2 7h3v3H2V7zm0 4h3v3H2v-3z"/></svg>',
+    'search_files':     '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M6.5 1a5.5 5.5 0 014 9.3l3.6 3.6-.7.7-3.6-3.6A5.5 5.5 0 116.5 1zm0 1a4.5 4.5 0 100 9 4.5 4.5 0 000-9z"/></svg>',
+    'move_file':        '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h5l2 2h5a1 1 0 011 1v7a1 1 0 01-1 1H2a1 1 0 01-1-1V4a1 1 0 011-1zm5 4v1H5v1h2v1l3-1.5L7 7z"/></svg>',
+    'replace_in_file':  '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 4h7V3H2v1zm0 3h5V6H2v1zm0 3h7V9H2v1zm0 3h5v-1H2v1zm10-8v2h2l-3 3-3-3h2V5h2z"/></svg>',
+    'patch_file':       '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M10.6 1.4L14.6 5.4 5.4 14.6 1.4 10.6 10.6 1.4zM8 8a1 1 0 100-2 1 1 0 000 2z"/></svg>',
+  };
+  return svgs[toolName] || '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 1a6 6 0 110 12A6 6 0 018 2zm-.5 3h1v4h-1V5zm0 5h1v1h-1v-1z"/></svg>';
+}
+
 export function createMessageRow(type, content) {
   const row = document.createElement('div');
   row.className = `msg-row ${type}`;

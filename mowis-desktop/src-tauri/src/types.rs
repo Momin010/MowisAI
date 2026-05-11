@@ -301,4 +301,17 @@ pub enum BridgeEvent {
     },
     /// Compact file change summary to show in chat (icon + filename)
     FileChanges(Vec<FileChange>),
+    /// Structured tool call event (agent invoked a tool)
+    ToolCall {
+        worker_id: usize,
+        tool_name: String,
+        args_preview: String,
+    },
+    /// Structured tool result event (tool returned)
+    ToolResult {
+        worker_id: usize,
+        tool_name: String,
+        success: bool,
+        preview: String,
+    },
 }

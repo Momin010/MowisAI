@@ -288,6 +288,23 @@ pub async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app:
             let _ = app.emit("file_changes", &changes);
         }
 
+        BridgeEvent::ToolCall { worker_id, tool_name, args_preview } => {
+            let _ = app.emit("tool_call", serde_json::json!({
+                "worker_id": worker_id,
+                "tool_name": tool_name,
+                "args_preview": args_preview,
+            }));
+        }
+
+        BridgeEvent::ToolResult { worker_id, tool_name, success, preview } => {
+            let _ = app.emit("tool_result", serde_json::json!({
+                "worker_id": worker_id,
+                "tool_name": tool_name,
+                "success": success,
+                "preview": preview,
+            }));
+        }
+
         BridgeEvent::OrchestrationComplete => {
             // Finalize streaming
             {
@@ -382,6 +399,19 @@ pub fn socket_value_to_bridge_event(v: &serde_json::Value) -> Option<BridgeEvent
         "error"         => Some(BridgeEvent::OrchestrationFailed(
             v["message"].as_str().unwrap_or("unknown error").to_owned(),
         )),
+        "tool_call"     => {
+            let worker_id = v["worker_id"].as_u64().unwrap_or(0) as usize;
+            let tool_name = v["tool_name"].as_str().unwrap_or("").to_owned();
+            let args_preview = v["args_preview"].as_str().unwrap_or("").to_owned();
+            Some(BridgeEvent::ToolCall { worker_id, tool_name, args_preview })
+        }
+        "tool_result"   => {
+            let worker_id = v["worker_id"].as_u64().unwrap_or(0) as usize;
+            let tool_name = v["tool_name"].as_str().unwrap_or("").to_owned();
+            let success = v["success"].as_bool().unwrap_or(false);
+            let preview = v["preview"].as_str().unwrap_or("").to_owned();
+            Some(BridgeEvent::ToolResult { worker_id, tool_name, success, preview })
+        }
         "stats"         => {
             // Stats events from the orchestrator — emit as a simulation tick
             let completed = v["completed"].as_u64().unwrap_or(0) as usize;
@@ -450,18 +480,11 @@ pub async fn run_orchestration(
     bridge: Arc<BackendBridge>,
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
-    // 1. Emit plan card
-    let sb_names = vec!["frontend".to_string(), "backend".to_string(), "verification".to_string()];
-    let task_count = max_agents.min(60) as usize;
-    let agent_count = max_agents.min(48) as usize;
-    let _ = event_tx.send(BridgeEvent::PlanReady {
-        sandboxes: sb_names.clone(),
-        task_count,
-        agent_count,
-        mode: mode.clone(),
-    }).await;
+    // NOTE: Plan card is no longer emitted here. The real orchestrator inside
+    // agentd streams actual events (task_added, tool_call, agent_message, etc.)
+    // which provide accurate information instead of hardcoded fakes.
 
-    // 2. Try real bridge connection (WSL2 / QEMU / native socket)
+    // Try real bridge connection (WSL2 / QEMU / native socket)
     if bridge.is_connected() {
         // 2a. Sync provider config to agentd before orchestrating
         if !config.api_key.is_empty() || !config.gcp_project.is_empty() || config.provider == "vertex" {

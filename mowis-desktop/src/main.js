@@ -11,7 +11,8 @@ import {
 } from './state.js';
 import {
   appendChatMessage, appendAgentChunk, finalizeStreaming,
-  appendFileChanges, scrollToBottom, renderDiffPanel,
+  appendFileChanges, appendToolCall, appendToolResult,
+  scrollToBottom, renderDiffPanel,
   startAgentPolling, stopAgentPolling,
   appendThinkingIndicator, removeThinkingIndicator,
   setChatCallbacks,
@@ -484,6 +485,19 @@ async function setupListeners() {
     State.taskPanelOpen = true;
     $('home-chat')?.classList.add('task-panel-open');
     renderDiffPanel();
+  });
+
+  await listen('tool_call', (e) => {
+    const data = e.payload;
+    if (!data) return;
+    removeThinkingIndicator();
+    appendToolCall(data);
+  });
+
+  await listen('tool_result', (e) => {
+    const data = e.payload;
+    if (!data) return;
+    appendToolResult(data);
   });
 
   await listen('task_added', (e) => {

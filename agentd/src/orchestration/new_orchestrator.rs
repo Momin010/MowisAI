@@ -12,6 +12,8 @@ pub enum OrchestratorEvent {
     TaskFailed { worker_id: usize, task_id: String, error: String },
     StatsUpdate { stats: SchedulerStats },
     LayerProgress { layer: u8, message: String },
+    /// Direct LLM response for conversational/simple prompts (no sandbox needed).
+    ChatResponse { text: String },
     Done,
 }
 
@@ -20,6 +22,7 @@ use super::complexity_classifier::{classify_complexity, ComplexityMode};
 use super::health::HealthMonitor;
 use super::merge_reviewer::{AgentContribution, ConflictDetector, MergeReviewerAgent, parse_unified_diff};
 use super::planner::{plan_task, plan_task_standard, scan_directory_tree_pub};
+use super::provider_client::generate_text;
 use super::sandbox_topology::TopologyManager;
 use super::verification::VerificationLoop;
 use agentd_protocol::{AgentResult, SandboxConfig, SandboxName, SandboxResult, Task, TaskId, VerificationStatus};
@@ -769,6 +772,31 @@ impl NewOrchestrator {
     // Mode 1: Simple â€” single agent, no planner, no merge, no verification
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+    /// Check if a prompt is purely conversational (no code/file task).
+    /// These get a direct LLM call without any sandbox overhead.
+    fn is_conversational(prompt: &str) -> bool {
+        let p = prompt.trim();
+        let word_count = p.split_whitespace().count();
+
+        // Very short prompts (1-6 words) without code keywords → chat
+        if word_count <= 6 {
+            let lower = p.to_lowercase();
+            let code_words = [
+                "file", "code", "function", "class", "implement", "create",
+                "build", "write", "fix", "bug", "refactor", "test", "deploy",
+                "add", "remove", "delete", "update", "change", "modify",
+                "api", "endpoint", "database", "server", "client", "component",
+                "script", "config", "install", "setup", "docker", "run",
+            ];
+            let has_code_word = code_words.iter().any(|w| lower.contains(w));
+            if !has_code_word {
+                return true;
+            }
+        }
+
+        false
+    }
+
     async fn run_simple(
         &self,
         prompt: &str,
@@ -779,6 +807,46 @@ impl NewOrchestrator {
         let send_ev = |ev: OrchestratorEvent| {
             if let Some(ref tx) = event_tx { let _ = tx.send(ev); }
         };
+
+        // ── Direct LLM chat for conversational prompts ──────────────────────
+        // Skip sandboxes entirely for things like "hi", "what is rust?", etc.
+        if Self::is_conversational(prompt) {
+            log::info!("=== Mode: CHAT (direct LLM response, no sandbox) ===");
+            send_ev(OrchestratorEvent::LayerProgress {
+                layer: 0,
+                message: "Direct chat mode (no sandbox needed)".into(),
+            });
+
+            let response = generate_text(
+                &self.config.llm_config,
+                "You are MowisAI, a helpful AI assistant. Respond naturally and concisely.",
+                prompt,
+                false,
+                0.7,
+            ).await.context("Direct LLM call failed")?;
+
+            send_ev(OrchestratorEvent::ChatResponse { text: response.clone() });
+            send_ev(OrchestratorEvent::Done);
+
+            let duration = start_time.elapsed().as_secs();
+            let stats = SchedulerStats {
+                total_tasks: 0, completed: 0, failed: 0,
+                skipped: 0, running: 0, pending: 0,
+            };
+            log::info!("✓ Chat response in {}s", duration);
+            return Ok(FinalOutput {
+                merged_diff: String::new(),
+                sandbox_results: HashMap::new(),
+                verification_status: HashMap::new(),
+                failed_tasks: vec![],
+                known_issues: vec![],
+                summary: format!("Chat response in {}s", duration),
+                total_agents_used: 0,
+                total_duration_secs: duration,
+                scheduler_stats: stats,
+                execution_errors: vec![],
+            });
+        }
 
         log::info!("=== Mode: SIMPLE (single agent, no planner, no merge, no verification) ===");
 

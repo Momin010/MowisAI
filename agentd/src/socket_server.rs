@@ -1368,17 +1368,27 @@ fn orchestrator_event_to_json(event: &OrchestratorEvent) -> Option<serde_json::V
                 "pending": stats.pending
             }))
         }
-        OrchestratorEvent::ToolCall { tool_name, args_preview, .. } => {
+        OrchestratorEvent::ToolCall { worker_id, tool_name, args_preview } => {
             Some(json!({
-                "type": "agent_chunk",
-                "content": format!("  → {}({})\n", tool_name, args_preview)
+                "type": "tool_call",
+                "worker_id": worker_id,
+                "tool_name": tool_name,
+                "args_preview": args_preview
             }))
         }
-        OrchestratorEvent::ToolResult { tool_name, success, preview, .. } => {
-            let icon = if *success { "✓" } else { "✗" };
+        OrchestratorEvent::ToolResult { worker_id, tool_name, success, preview } => {
             Some(json!({
-                "type": "agent_chunk",
-                "content": format!("  {} {} → {}\n", icon, tool_name, preview)
+                "type": "tool_result",
+                "worker_id": worker_id,
+                "tool_name": tool_name,
+                "success": success,
+                "preview": preview
+            }))
+        }
+        OrchestratorEvent::ChatResponse { text } => {
+            Some(json!({
+                "type": "agent_message",
+                "content": text
             }))
         }
         OrchestratorEvent::Done => None, // Handled separately
