@@ -94,9 +94,12 @@ fn main() {
                 .path()
                 .resource_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let state = app.state::<AppState>();
+
+            // Get an owned AppHandle so we can move it into the async block
+            let handle = app.handle().clone();
 
             tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
                 let mut mgr = state.opencode.lock().await;
                 match mgr.find_binary(&resource_dir) {
                     Ok(path) => {
@@ -106,9 +109,10 @@ fn main() {
                         log::warn!("[setup] opencode binary not found: {:#}", e);
                     }
                 }
+                drop(mgr);
 
                 // Write opencode config from saved settings
-                let config = state.config.lock().ok();
+                let config = state.config.lock().ok().map(|c| c.clone());
                 if let Some(config) = config {
                     let provider = config.provider.as_deref().unwrap_or("anthropic");
                     let model = config.model.as_deref().unwrap_or("");

@@ -378,7 +378,7 @@ pub async fn get_agent_config(state: State<'_, AppState>) -> Result<crate::AppCo
 }
 
 #[tauri::command]
-pub async fn get_agent_port(state: State<'_, AppState>) -> Result<u16, String> {
+pub async fn get_agent_port(_state: State<'_, AppState>) -> Result<u16, String> {
     // Keep for backwards compat — return a dummy port since we no longer use HTTP
     Ok(0)
 }
