@@ -157,9 +157,9 @@ pub fn start_bridge(
                             }
                         }
 
-                        BridgeCommand::StartOrchestration { session_id, prompt, max_agents, mode, repo_context, config } => {
+                        BridgeCommand::StartOrchestration { session_id, prompt, max_agents, mode, repo_context, config, conversation_history } => {
                             tokio::spawn(async move {
-                                run_orchestration(session_id, prompt, max_agents, mode, repo_context, config, b, tx).await;
+                                run_orchestration(session_id, prompt, max_agents, mode, repo_context, config, b, tx, conversation_history).await;
                             });
                         }
 
@@ -322,15 +322,13 @@ pub async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app:
                     t.completed_at = Some(now());
                 }
             }
-            let sys = ChatMessage::System { content: "Session complete.".into(), ts: now() };
-            state.messages.lock().unwrap().push(sys.clone());
             if let Err(err) = sync_current_session(state, Some("done"), Some(Some(now()))) {
                 log::warn!("Failed to persist completed session: {err}");
             }
             if let Err(err) = record_usage_for_current(state, "done").and_then(|_| save_state(state)) {
                 log::warn!("Failed to persist completed usage: {err}");
             }
-            let _ = app.emit("chat_message", &sys);
+            // No "Session complete." system message — just signal the frontend
             let _ = app.emit("session_complete", serde_json::json!({}));
         }
 
@@ -394,7 +392,15 @@ pub fn socket_value_to_bridge_event(v: &serde_json::Value) -> Option<BridgeEvent
             Some(BridgeEvent::TaskUpdated { id, status })
         }
         "agent_chunk"   => Some(BridgeEvent::AgentChunk(v["content"].as_str()?.to_owned())),
-        "agent_message" => Some(BridgeEvent::AgentMessage(v["content"].as_str()?.to_owned())),
+        "agent_message" => {
+            let content = v["content"].as_str()?;
+            // Suppress internal layer progress messages from reaching the UI
+            if content.starts_with("— ") || content.starts_with("\u{2014} ") {
+                None
+            } else {
+                Some(BridgeEvent::AgentMessage(content.to_owned()))
+            }
+        }
         "complete"      => Some(BridgeEvent::OrchestrationComplete),
         "error"         => Some(BridgeEvent::OrchestrationFailed(
             v["message"].as_str().unwrap_or("unknown error").to_owned(),
@@ -479,6 +485,7 @@ pub async fn run_orchestration(
     config: Config,
     bridge: Arc<BackendBridge>,
     event_tx: mpsc::Sender<BridgeEvent>,
+    conversation_history: Option<Vec<serde_json::Value>>,
 ) {
     // NOTE: Plan card is no longer emitted here. The real orchestrator inside
     // agentd streams actual events (task_added, tool_call, agent_message, etc.)
@@ -528,6 +535,7 @@ pub async fn run_orchestration(
             "git_policy":  git_agent_policy(),
             "max_agents": max_agents,
             "mode":       mode,
+            "conversation_history": conversation_history,
         });
         match bridge.send(payload).await {
             Ok(()) => {

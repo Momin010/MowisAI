@@ -254,6 +254,9 @@ pub enum BridgeCommand {
         mode: String,
         repo_context: Option<RepositoryContext>,
         config: Config,
+        /// Conversation history for context-aware responses. Each entry has "role" and "content".
+        #[allow(dead_code)]
+        conversation_history: Option<Vec<serde_json::Value>>,
     },
     /// Zero-Protection mode — deprecated, use agent_send_message instead.
     StartZeroMode {

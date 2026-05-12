@@ -262,6 +262,200 @@ where
 
 // ── Text Generation ───────────────────────────────────────────────────────────
 
+/// Multi-turn chat completion — takes full conversation history.
+/// Each message in `history` has "role" ("user"/"assistant"/"system") and "content".
+/// Used by the desktop Main LLM for context-aware conversation.
+pub async fn generate_chat(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[Value],
+    temperature: f64,
+) -> Result<String> {
+    let provider_name = format!("{:?}", llm_config.provider);
+    with_retry(&format!("generate_chat/{}", provider_name), MAX_LLM_RETRIES, || {
+        generate_chat_inner(llm_config, system_prompt, history, temperature)
+    }).await
+}
+
+async fn generate_chat_inner(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[Value],
+    temperature: f64,
+) -> Result<String> {
+    match llm_config.provider {
+        AiProvider::VertexAi | AiProvider::Gemini => {
+            generate_chat_gemini(llm_config, system_prompt, history, temperature).await
+        }
+        AiProvider::OpenAi | AiProvider::Grok | AiProvider::Groq | AiProvider::Mimo => {
+            generate_chat_openai_compat(llm_config, system_prompt, history, temperature).await
+        }
+        AiProvider::Anthropic => {
+            generate_chat_anthropic(llm_config, system_prompt, history, temperature).await
+        }
+    }
+}
+
+async fn generate_chat_gemini(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[Value],
+    temperature: f64,
+) -> Result<String> {
+    let (url, auth_header) = gemini_url_and_auth(llm_config)?;
+
+    let contents: Vec<Value> = history.iter().map(|msg| {
+        let role = msg["role"].as_str().unwrap_or("user");
+        let gemini_role = if role == "assistant" { "model" } else { role };
+        let content = msg["content"].as_str().unwrap_or("");
+        json!({"role": gemini_role, "parts": [{"text": content}]})
+    }).collect();
+
+    let mut gen_config = json!({
+        "temperature": temperature,
+        "maxOutputTokens": 16384_u32,
+    });
+    if super::VERTEX_THINKING_BUDGET_TOKENS > 0 {
+        gen_config.as_object_mut().unwrap().insert(
+            "thinkingConfig".into(),
+            json!({ "thinkingBudget": super::VERTEX_THINKING_BUDGET_TOKENS }),
+        );
+    }
+
+    let request_body = json!({
+        "contents": contents,
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "generationConfig": gen_config
+    });
+
+    let client = &*HTTP_CLIENT;
+    let mut req = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS));
+
+    if let Some(header) = auth_header {
+        if header.starts_with("goog:") {
+            req = req.header("x-goog-api-key", &header[5..]);
+        } else {
+            req = req.header("Authorization", header);
+        }
+    }
+
+    let response = req.send().await.context("Gemini chat request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Gemini API error ({}): {}", status, body));
+    }
+
+    let resp_json: Value = response.json().await.context("parse Gemini chat response")?;
+    extract_gemini_text(&resp_json)
+}
+
+async fn generate_chat_openai_compat(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[Value],
+    temperature: f64,
+) -> Result<String> {
+    let url = openai_compat_url(llm_config);
+    let api_key = llm_config.api_key.as_deref()
+        .ok_or_else(|| anyhow!("No API key configured for {}", llm_config.provider))?;
+
+    let mut messages = vec![json!({"role": "system", "content": system_prompt})];
+    for msg in history {
+        messages.push(msg.clone());
+    }
+
+    let body = json!({
+        "model": llm_config.model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": 16384_u32
+    });
+
+    let client = &*HTTP_CLIENT;
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
+        .send()
+        .await
+        .context("OpenAI-compat chat request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("{} API error ({}): {}", llm_config.provider, status, text));
+    }
+
+    let resp_json: Value = response.json().await.context("parse OpenAI-compat chat response")?;
+    resp_json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| anyhow!("{}: unexpected response in chat", llm_config.provider))
+        .map(|s| s.to_string())
+}
+
+async fn generate_chat_anthropic(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[Value],
+    temperature: f64,
+) -> Result<String> {
+    let api_key = llm_config.api_key.as_deref()
+        .ok_or_else(|| anyhow!("No Anthropic API key configured"))?;
+
+    let messages: Vec<Value> = history.iter().map(|msg| {
+        let role = msg["role"].as_str().unwrap_or("user");
+        let content = msg["content"].as_str().unwrap_or("");
+        json!({"role": role, "content": content})
+    }).collect();
+
+    let body = json!({
+        "model": llm_config.model,
+        "system": system_prompt,
+        "messages": messages,
+        "max_tokens": 16384_u32,
+        "temperature": temperature
+    });
+
+    let client = &*HTTP_CLIENT;
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
+        .send()
+        .await
+        .context("Anthropic chat request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Anthropic API error ({}): {}", status, text));
+    }
+
+    let resp_json: Value = response.json().await.context("parse Anthropic chat response")?;
+    resp_json
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.iter().find(|b| b["type"].as_str() == Some("text")))
+        .and_then(|b| b["text"].as_str())
+        .ok_or_else(|| anyhow!("Anthropic: unexpected response in chat"))
+        .map(|s| s.to_string())
+}
+
 /// Generate a text (or JSON) completion — no tool calling.
 ///
 /// Used by: planner, merge reviewer, verification planner, fix-task generator.

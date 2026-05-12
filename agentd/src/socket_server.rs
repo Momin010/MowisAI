@@ -135,6 +135,9 @@ pub struct SocketRequest {
     pub repo_url: Option<String>,
     /// Git workflow policy for agents
     pub git_policy: Option<String>,
+    /// Conversation history from the desktop for context-aware responses.
+    /// Each entry has "role" ("user"/"assistant") and "content".
+    pub conversation_history: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -381,7 +384,7 @@ enum RequestLane {
 fn validate_request(req: &SocketRequest) -> Result<(), String> {
     match req.request_type.as_str() {
         "create_sandbox" | "list" | "get_audit_stats" | "get_anomalies" | "agent_spawn"
-        | "orchestrate" | "set_config" | "get_config" => Ok(()),
+        | "orchestrate" | "chat" | "set_config" | "get_config" => Ok(()),
         "create_container" => {
             if req.sandbox.is_none() {
                 Err("create_container: missing sandbox id".to_string())
@@ -1354,12 +1357,7 @@ fn orchestrator_event_to_json(event: &OrchestratorEvent) -> Option<serde_json::V
                 "error": error
             }))
         }
-        OrchestratorEvent::LayerProgress { layer, message } => {
-            Some(json!({
-                "type": "agent_message",
-                "content": format!("— **Layer {}**: {}", layer, message)
-            }))
-        }
+        OrchestratorEvent::LayerProgress { .. } => None,
         OrchestratorEvent::StatsUpdate { stats } => {
             Some(json!({
                 "type": "stats",
@@ -1572,6 +1570,112 @@ fn handle_orchestrate_streaming(
     Ok(())
 }
 
+/// Handle a chat request — direct multi-turn LLM call, no orchestration.
+/// Returns a single JSON response: {"type": "chat_response", "content": "..."} or
+/// {"type": "delegate_build", "build_instructions": "...", "summary_for_user": "..."}
+/// when the LLM determines the user wants to build something.
+fn handle_chat_streaming(
+    mut stream: UnixStream,
+    req: SocketRequest,
+) -> Result<()> {
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_write_timeout(None);
+
+    let history = req.conversation_history.unwrap_or_default();
+
+    let config = match MowisConfig::load() {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            let err = json!({"type": "error", "message": "No config found"});
+            write_socket_json(&mut stream, &err)?;
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return Ok(());
+        }
+        Err(e) => {
+            let err = json!({"type": "error", "message": format!("Config error: {}", e)});
+            write_socket_json(&mut stream, &err)?;
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return Ok(());
+        }
+    };
+
+    let llm_config = match LlmConfig::from_config(&config) {
+        Ok(c) => c,
+        Err(e) => {
+            let err = json!({"type": "error", "message": format!("LLM config error: {}", e)});
+            write_socket_json(&mut stream, &err)?;
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return Ok(());
+        }
+    };
+
+    let system_prompt = r#"You are MowisAI, an AI assistant that can both chat and build software.
+
+IMPORTANT RULES:
+1. For normal conversation (greetings, questions, opinions, etc.) — respond naturally and directly.
+2. When the user asks you to BUILD, CREATE, IMPLEMENT, CODE, FIX, or DEPLOY something that requires writing files or running commands — you MUST respond with EXACTLY this JSON format and nothing else:
+
+{"action": "build", "instructions": "<detailed instructions for the coding agent describing exactly what to build, including all requirements the user mentioned in the conversation>", "summary": "<brief 1-sentence acknowledgment to show the user before building starts>"}
+
+3. When responding normally (not building), just respond with plain text. Do NOT wrap normal responses in JSON.
+4. You remember the full conversation. Reference previous messages when relevant.
+5. Never use emojis."#;
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            let err = json!({"type": "error", "message": format!("Runtime error: {}", e)});
+            write_socket_json(&mut stream, &err)?;
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return Ok(());
+        }
+    };
+
+    let result = rt.block_on(async {
+        crate::orchestration::provider_client::generate_chat(
+            &llm_config,
+            system_prompt,
+            &history,
+            0.7,
+        ).await
+    });
+
+    match result {
+        Ok(response_text) => {
+            let trimmed = response_text.trim();
+            if trimmed.starts_with('{') {
+                if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                    if parsed.get("action").and_then(|a| a.as_str()) == Some("build") {
+                        let instructions = parsed["instructions"].as_str().unwrap_or("").to_string();
+                        let summary = parsed["summary"].as_str().unwrap_or("Starting build...").to_string();
+                        let resp = json!({
+                            "type": "delegate_build",
+                            "build_instructions": instructions,
+                            "summary_for_user": summary
+                        });
+                        write_socket_json(&mut stream, &resp)?;
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                        return Ok(());
+                    }
+                }
+            }
+
+            let resp = json!({
+                "type": "chat_response",
+                "content": response_text
+            });
+            write_socket_json(&mut stream, &resp)?;
+        }
+        Err(e) => {
+            let err = json!({"type": "error", "message": format!("LLM error: {}", e)});
+            write_socket_json(&mut stream, &err)?;
+        }
+    }
+
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    Ok(())
+}
+
 /// Write a JSON value followed by newline to the socket stream.
 fn write_socket_json(stream: &mut UnixStream, value: &serde_json::Value) -> Result<()> {
     let text = serde_json::to_string(value).context("serialize JSON")?;
@@ -1587,6 +1691,11 @@ fn process_job(job: WorkerJob) -> Result<()> {
     // Orchestrate requests use streaming: keep connection open, send multiple JSON events
     if connection.request.request_type == "orchestrate" {
         return handle_orchestrate_streaming(connection.stream, connection.request);
+    }
+
+    // Chat requests: direct LLM call, no orchestration
+    if connection.request.request_type == "chat" {
+        return handle_chat_streaming(connection.stream, connection.request);
     }
 
     let response = handle_request(connection.request);

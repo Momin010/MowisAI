@@ -313,8 +313,6 @@ pub async fn start_session(
     }
 
     // Resolve repo context, optionally redirecting project_path to a sandbox upper_dir.
-    // NOTE: zero mode does NOT use repo_context (it writes directly to a workspace on disk).
-    // Clone before the if-else because the else branch moves project_path.
     let _project_path_zero = project_path.clone();
     let repo_context = if resolved_mode == "zero" {
         None
@@ -369,7 +367,6 @@ pub async fn start_session(
         ts: started_at,
     });
 
-    // Send command to bridge — clone sender first to avoid holding lock across .await
     let summary = SessionSummary {
         id: session_id.clone(),
         prompt: prompt.chars().take(80).collect(),
@@ -394,30 +391,6 @@ pub async fn start_session(
         upsert_history(&mut history, summary);
     }
     save_state(&state)?;
-
-    let tx_opt = state.cmd_tx.lock().unwrap().clone();
-    if let Some(tx) = tx_opt {
-        if resolved_mode == "zero" {
-            log::warn!("Zero mode is deprecated for session {}", session_id);
-            let _ = tx.send(BridgeCommand::StartOrchestration {
-                session_id: session_id.clone(),
-                prompt,
-                max_agents: cfg.max_agents,
-                mode: "auto".to_string(),
-                repo_context,
-                config: cfg.clone(),
-            }).await;
-        } else {
-            let _ = tx.send(BridgeCommand::StartOrchestration {
-                session_id: session_id.clone(),
-                prompt,
-                max_agents: cfg.max_agents,
-                mode: resolved_mode,
-                repo_context,
-                config: cfg.clone(),
-            }).await;
-        }
-    }
 
     Ok(session_id)
 }
@@ -450,11 +423,12 @@ pub async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String>
 
 #[tauri::command]
 pub async fn send_message(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     message: String,
     _images: Option<Vec<ImageAttachment>>,
 ) -> Result<(), String> {
-    let _session_id = state.current_session_id.lock().unwrap().clone()
+    let session_id = state.current_session_id.lock().unwrap().clone()
         .ok_or_else(|| "No active session".to_string())?;
 
     let cfg = state.config.lock().unwrap().clone();
@@ -465,23 +439,126 @@ pub async fn send_message(
         ts: now(),
     });
 
-    // Route follow-up messages through a new orchestration request.
-    // The orchestrator handles conversational prompts directly (no sandbox)
-    // and coding prompts through the full pipeline.
-    let tx_opt = state.cmd_tx.lock().unwrap().clone();
-    if let Some(tx) = tx_opt {
-        let resolved_mode = cfg.mode.clone();
-        let _ = tx.send(BridgeCommand::StartOrchestration {
-            session_id: _session_id,
-            prompt: message,
-            max_agents: cfg.max_agents,
-            mode: resolved_mode,
-            repo_context: None,
-            config: cfg,
-        }).await;
-    }
+    // Build conversation history for the Main LLM
+    let history: Vec<serde_json::Value> = {
+        let msgs = state.messages.lock().unwrap();
+        msgs.iter().filter_map(|m| match m {
+            ChatMessage::User { content, .. } => Some(serde_json::json!({
+                "role": "user", "content": content
+            })),
+            ChatMessage::Agent { content, .. } => Some(serde_json::json!({
+                "role": "assistant", "content": content
+            })),
+            _ => None,
+        }).collect()
+    };
+
+    // Send chat request to agentd (NOT orchestrate)
+    let bridge = Arc::clone(&state.bridge);
+    let state_clone = Arc::clone(&*state);
+    let app_clone = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let result = chat_with_agentd(&bridge, &history).await;
+        match result {
+            Ok(ChatResult::Response(text)) => {
+                // Direct chat response — add to messages and emit
+                let msg = ChatMessage::Agent {
+                    content: text.clone(),
+                    streaming: false,
+                    ts: now(),
+                };
+                state_clone.messages.lock().unwrap().push(msg.clone());
+                if let Err(err) = sync_current_session(&state_clone, Some("running"), None) {
+                    log::warn!("Failed to persist chat message: {err}");
+                }
+                let _ = app_clone.emit("chat_message", &msg);
+                let _ = app_clone.emit("session_complete", serde_json::json!({}));
+            }
+            Ok(ChatResult::DelegateBuild { instructions, summary }) => {
+                // Main LLM wants to build — show summary, then orchestrate
+                let summary_msg = ChatMessage::Agent {
+                    content: summary.clone(),
+                    streaming: false,
+                    ts: now(),
+                };
+                state_clone.messages.lock().unwrap().push(summary_msg.clone());
+                let _ = app_clone.emit("chat_message", &summary_msg);
+
+                // Now trigger orchestration with the LLM's build instructions
+                let tx_opt = state_clone.cmd_tx.lock().unwrap().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(BridgeCommand::StartOrchestration {
+                        session_id: session_id.clone(),
+                        prompt: instructions,
+                        max_agents: cfg.max_agents,
+                        mode: cfg.mode.clone(),
+                        repo_context: None,
+                        config: cfg.clone(),
+                        conversation_history: None,
+                    }).await;
+                }
+            }
+            Err(e) => {
+                let msg = ChatMessage::Error {
+                    content: format!("Chat failed: {}", e),
+                    ts: now(),
+                };
+                state_clone.messages.lock().unwrap().push(msg.clone());
+                let _ = app_clone.emit("chat_message", &msg);
+                let _ = app_clone.emit("session_complete", serde_json::json!({}));
+            }
+        }
+    });
 
     Ok(())
+}
+
+enum ChatResult {
+    Response(String),
+    DelegateBuild { instructions: String, summary: String },
+}
+
+/// Send conversation history to agentd's chat endpoint and parse the response.
+async fn chat_with_agentd(
+    bridge: &Arc<crate::backend::BackendBridge>,
+    history: &[serde_json::Value],
+) -> Result<ChatResult, String> {
+    if !bridge.is_connected() {
+        return Err("Daemon not connected".into());
+    }
+
+    let payload = serde_json::json!({
+        "type": "chat",
+        "conversation_history": history,
+    });
+
+    bridge.send(payload).await.map_err(|e| format!("Send failed: {}", e))?;
+
+    // Read single response
+    match bridge.recv_next().await {
+        Ok(Some(v)) => {
+            let resp_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match resp_type {
+                "chat_response" => {
+                    let content = v["content"].as_str().unwrap_or("").to_string();
+                    Ok(ChatResult::Response(content))
+                }
+                "delegate_build" => {
+                    let instructions = v["build_instructions"].as_str().unwrap_or("").to_string();
+                    let summary = v["summary_for_user"].as_str().unwrap_or("Building...").to_string();
+                    Ok(ChatResult::DelegateBuild { instructions, summary })
+                }
+                "error" => {
+                    let msg = v["message"].as_str().unwrap_or("Unknown error").to_string();
+                    Err(msg)
+                }
+                _ => Err(format!("Unexpected response type: {}", resp_type)),
+            }
+        }
+        Ok(None) => Err("Connection closed".into()),
+        Err(e) => Err(format!("Read failed: {}", e)),
+    }
 }
 
 #[tauri::command]

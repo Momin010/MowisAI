@@ -859,8 +859,8 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
       // Startup modal succeeded but health is still false
       throw new Error('mowis-agent is not available. Check that the binary is installed alongside the app.');
     } else {
-      // Non-agent mode: use orchestration (real daemon or simulation fallback)
-      console.log('[session] Using orchestration mode:', mode || 'auto');
+      // Create session record
+      console.log('[session] Creating session, mode:', mode || 'auto');
       const id = await invoke('start_session', {
         prompt: fullPrompt,
         mode: mode || 'auto',
@@ -872,6 +872,17 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
       State.sessionId = id;
       setText('compose-session-info', `session ${id.slice(0, 12)}`);
       setText('chat-session-title', fullPrompt.slice(0, 120));
+
+      // Send first message through the Main LLM chat flow
+      setSessionActive(true);
+      appendThinkingIndicator();
+      try {
+        await invoke('send_message', { message: fullPrompt, images: null });
+      } catch (err) {
+        removeThinkingIndicator();
+        setSessionActive(false, true);
+        appendChatMessage({ kind: 'error', content: String(err), ts: nowTs() });
+      }
     }
   } catch (err) {
     removeThinkingIndicator();

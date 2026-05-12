@@ -854,13 +854,14 @@
 
 /* ── Thinking Indicator ─────────────────────────────────── */
 .msg-bubble.thinking {
-  opacity: 0.5;
-  padding: 8px 16px;
+  opacity: 0.7;
+  padding: 14px 24px;
 }
 .thinking-dots span {
   animation: blink 1.4s infinite both;
-  font-size: 20px;
+  font-size: 32px;
   line-height: 1;
+  letter-spacing: 4px;
 }
 .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
 .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
