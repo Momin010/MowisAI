@@ -118,13 +118,11 @@ jobs:
           name: mowis-windows-installer
           path: target/release/bundle/nsis/*.exe
 
-      - name: Upload updater artifacts
+      - name: Upload updater signature
         uses: actions/upload-artifact@v4
         with:
-          name: mowis-updater-artifacts
-          path: |
-            target/release/bundle/nsis/*.nsis.zip
-            target/release/bundle/nsis/*.nsis.zip.sig
+          name: mowis-updater-sig
+          path: target/release/bundle/nsis/*.exe.sig
 
   # ── Job 4: create GitHub Release with updater artifacts ─────────────────
   release:
@@ -142,10 +140,10 @@ jobs:
           name: mowis-windows-installer
           path: release-assets
 
-      - name: Download updater artifacts
+      - name: Download updater signature
         uses: actions/download-artifact@v4
         with:
-          name: mowis-updater-artifacts
+          name: mowis-updater-sig
           path: release-assets
 
       - name: Read version from tag
@@ -156,15 +154,16 @@ jobs:
         shell: bash
         run: |
           cd release-assets
-          SIG_FILE=$(ls *.nsis.zip.sig 2>/dev/null | head -1)
-          ZIP_FILE=$(ls *.nsis.zip 2>/dev/null | head -1)
-          if [ -z "$SIG_FILE" ] || [ -z "$ZIP_FILE" ]; then
+          SIG_FILE=$(ls *.exe.sig 2>/dev/null | head -1)
+          EXE_FILE=$(ls *.exe 2>/dev/null | head -1)
+          if [ -z "$SIG_FILE" ] || [ -z "$EXE_FILE" ]; then
             echo "ERROR: Missing updater artifacts"
+            ls -la
             exit 1
           fi
           SIGNATURE=$(cat "$SIG_FILE")
           TAG="v${{ steps.version.outputs.VERSION }}"
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${ZIP_FILE}"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${EXE_FILE}"
           cat > latest.json <<ENDJSON
           {
             "version": "${{ steps.version.outputs.VERSION }}",
@@ -190,6 +189,5 @@ jobs:
           prerelease: false
           files: |
             release-assets/*.exe
-            release-assets/*.nsis.zip
-            release-assets/*.nsis.zip.sig
+            release-assets/*.exe.sig
             release-assets/latest.json
