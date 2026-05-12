@@ -1241,6 +1241,8 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                         },
                         "socket_path": config.socket_path,
                         "max_agents": config.max_agents,
+                        "version": crate::version::VERSION,
+                        "build_number": crate::version::BUILD_NUMBER,
                     })))
                 }
                 Ok(None) => SocketResponse::ok(Some(json!({"configured": false}))),

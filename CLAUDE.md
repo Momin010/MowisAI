@@ -123,6 +123,7 @@ Orchestration communicates with agentd core via Unix socket at `/tmp/agentd.sock
 - **No `unwrap()` in production code paths** — use `?` or proper error handling
 - **agentd core (socket API) is immutable** — orchestration communicates via socket only
 - **Always read stdout/stderr concurrently** — sequential pipe reading causes deadlock when buffers fill
+- **ALWAYS bump BUILD_NUMBER before pushing to main** — see Version Tracking below
 
 ## AI Backend
 
@@ -164,6 +165,21 @@ runtime → agentd-protocol
 ```
 
 agentd-protocol is the shared types crate with no circular dependencies.
+
+## Version Tracking (MANDATORY)
+
+**Before every push to `main`, you MUST bump the build number** in `agentd/src/version.rs`:
+
+```rust
+pub const BUILD_NUMBER: &str = "YYYYMMDD.N";
+```
+
+- Format: `YYYYMMDD.N` where N is the Nth push of the day (e.g. `20260511.2`)
+- This is the single source of truth for verifying which binary is running inside the VM
+- The build number is exposed via:
+  - CLI: `agentd --version` and printed on socket server startup
+  - Socket API: `get_config` response includes `version` and `build_number` fields
+- **Failure to bump = impossible to verify deployments. Never skip this.**
 
 ## Known Issues and Fixes
 

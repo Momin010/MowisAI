@@ -452,9 +452,9 @@ pub async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String>
 pub async fn send_message(
     state: State<'_, Arc<AppState>>,
     message: String,
-    images: Option<Vec<ImageAttachment>>,
+    _images: Option<Vec<ImageAttachment>>,
 ) -> Result<(), String> {
-    let session_id = state.current_session_id.lock().unwrap().clone()
+    let _session_id = state.current_session_id.lock().unwrap().clone()
         .ok_or_else(|| "No active session".to_string())?;
 
     let cfg = state.config.lock().unwrap().clone();
@@ -465,15 +465,19 @@ pub async fn send_message(
         ts: now(),
     });
 
-    // Send to bridge — deprecated zero mode, falls back to orchestration
+    // Route follow-up messages through a new orchestration request.
+    // The orchestrator handles conversational prompts directly (no sandbox)
+    // and coding prompts through the full pipeline.
     let tx_opt = state.cmd_tx.lock().unwrap().clone();
     if let Some(tx) = tx_opt {
-        let _ = tx.send(BridgeCommand::ContinueZeroMode {
-            session_id,
-            message,
+        let resolved_mode = cfg.mode.clone();
+        let _ = tx.send(BridgeCommand::StartOrchestration {
+            session_id: _session_id,
+            prompt: message,
+            max_agents: cfg.max_agents,
+            mode: resolved_mode,
+            repo_context: None,
             config: cfg,
-            workspace: serde_json::Value::Null,
-            images: images.unwrap_or_default(),
         }).await;
     }
 

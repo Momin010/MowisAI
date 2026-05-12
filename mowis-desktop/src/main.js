@@ -28,6 +28,7 @@ import {
   showDeveloperBootstrap, setupDeveloperBootstrapHandlers,
   handlePointInstallationFlow,
 } from './modals.js';
+import { initUpdater } from './updater.js';
 
 // ── Wire chat callbacks (breaks circular dependency) ─────────────────────────
 
@@ -313,6 +314,9 @@ async function init() {
 
   setText('sb-provider', State.config?.provider || '—');
 
+  // Auto-updater — checks GitHub Releases in the background
+  initUpdater();
+
   document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === '1') { e.preventDefault(); navigate('home'); }
     if ((e.metaKey || e.ctrlKey) && e.key === '2') { e.preventDefault(); navigate('sessions'); }
@@ -529,6 +533,8 @@ async function setupListeners() {
 
   await listen('session_complete', async () => {
     finalizeStreaming();
+    removeThinkingIndicator();
+    setSessionActive(false, true);
 
     try {
       const hist = await invoke('get_session_history');
@@ -1199,8 +1205,12 @@ async function sendChatMessage() {
     }
   } else {
     try {
+      setSessionActive(true);
+      appendThinkingIndicator();
       await invoke('send_message', { message: fullText, images: null });
     } catch (err) {
+      removeThinkingIndicator();
+      setSessionActive(false, true);
       appendChatMessage({ kind: 'error', content: `Failed to send: ${err}`, ts: nowTs() });
     }
   }

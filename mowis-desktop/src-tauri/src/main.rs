@@ -24,6 +24,8 @@ fn main() {
     tauri::Builder::default()
         .manage(state)
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(move |app| {
             let cmd_tx = start_bridge(app.handle().clone(), Arc::clone(&state_for_setup));
             *state_for_setup.cmd_tx.lock().unwrap() = Some(cmd_tx);

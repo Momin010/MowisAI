@@ -256,3 +256,84 @@
   gap: 6px;
   animation: fadeIn 0.18s ease;
 }
+
+/* ── Update banner ────────────────────────────────────────── */
+.update-banner {
+  position: fixed;
+  top: 32px;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  background: var(--bg-2, #1a1a2e);
+  border-bottom: 1px solid var(--border, #2a2a3e);
+  padding: 0;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+.update-banner.hidden {
+  display: none;
+}
+.update-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--tx-1, #e0e0e0);
+}
+.update-banner-icon {
+  flex-shrink: 0;
+  color: var(--accent, #6c8aff);
+  display: flex;
+  align-items: center;
+}
+.update-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+.update-banner-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.update-banner-btn {
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s ease;
+}
+.update-banner-btn.primary {
+  background: var(--accent, #6c8aff);
+  color: #fff;
+}
+.update-banner-btn.primary:hover {
+  background: var(--accent-hover, #5a78ee);
+}
+.update-banner-btn.primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.update-banner-btn.dismiss {
+  background: transparent;
+  color: var(--tx-3, #888);
+  border: 1px solid var(--border, #2a2a3e);
+}
+.update-banner-btn.dismiss:hover {
+  background: var(--bg-3, #252538);
+}
+.update-banner-progress {
+  height: 2px;
+  background: var(--bg-3, #252538);
+  overflow: hidden;
+}
+.update-banner-progress.hidden {
+  display: none;
+}
+.update-banner-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent, #6c8aff);
+  transition: width 0.3s ease;
+}

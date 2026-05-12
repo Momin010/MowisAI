@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -42,6 +43,14 @@
       "resources/agentd-linux-x86_64": "agentd-linux-x86_64",
       "resources/alpine-minirootfs-x86_64.tar.gz": "alpine-minirootfs-x86_64.tar.gz",
       "resources/mowis-agent.exe": "mowis-agent.exe"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Momin010/MowisAI/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM2OEY4Qjc5REY4RTkxN0UKUldSK2tZN2ZlWXVQTmduQUVZOS9nN3BhS0VGekhoSW9VMkVPUVMwZnN3a2owbG4rTjZjUjZORmwK"
     }
   }
 }

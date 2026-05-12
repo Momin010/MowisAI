@@ -567,6 +567,7 @@ fn cmd_socket(
         eprintln!("Warning: socket server typically requires root for overlayfs mounts.");
         eprintln!("Run with sudo if sandbox creation fails.\n");
     }
+    println!("{}", libagent::version::full_version());
     println!("Starting agentd socket server at {}", path);
     println!("  log_level:     {}", log_level);
     println!("  max_sandboxes: {}", max_sandboxes);
