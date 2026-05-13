@@ -282,12 +282,12 @@ a { text-decoration: none; color: inherit; }
   gap: 8px;
 }
 
-/* ── Sidebar ─────────────────────────────────────────── */
+/* ── Sidebar / Nav Rail (slim, always icon-only) ────── */
 .sidebar {
-  width: 188px;
+  width: 52px;
   flex-shrink: 0;
   display: flex; flex-direction: column;
-  padding: 18px 10px 14px;
+  padding: 14px 8px 14px;
   border: 1px solid rgba(255,255,255,0.04);
   border-radius: var(--r);
   background: rgba(10,10,11,0.85);
@@ -303,79 +303,50 @@ a { text-decoration: none; color: inherit; }
   margin-bottom: 0;
 }
 .sb-brand {
-  padding: 0 8px;
-  margin-bottom: 28px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  justify-content: center;
+  margin-bottom: 20px;
+  padding: 0;
 }
-.sb-brand-text {
-  font-family: var(--serif);
-  font-style: italic;
-  font-size: 19px;
-  color: var(--tx);
-}
-.sb-brand-text .accent { color: var(--blue); }
-.sb-collapse {
-  width: 24px; height: 24px;
-  display: grid; place-items: center;
-  background: transparent;
-  border: 1px solid transparent;
+.sb-brand-text { display: none; }
+.sb-collapse { display: none; }
+.sb-nav { display: flex; flex-direction: column; gap: 2px; }
+.sb-item {
+  display: flex; align-items: center; justify-content: center;
+  padding: 8px;
   border-radius: var(--r);
   color: var(--tx-4);
-  transition: color 0.12s, background 0.12s, border-color 0.12s;
-}
-.sb-collapse:hover { color: var(--tx); background: rgba(255,255,255,0.035); border-color: var(--line); }
-.layout.sidebar-collapsed .sidebar { width: 52px; padding-left: 8px; padding-right: 8px; }
-.layout.sidebar-collapsed .sb-brand { justify-content: center; padding: 0; }
-.layout.sidebar-collapsed .sb-brand-text,
-.layout.sidebar-collapsed .sb-item span:not(.sb-badge),
-.layout.sidebar-collapsed .sb-daemon-status span:last-child {
-  display: none;
-}
-.layout.sidebar-collapsed .sb-item { justify-content: center; }
-.layout.sidebar-collapsed .sb-collapse svg { transform: rotate(180deg); }
-.sb-nav { display: flex; flex-direction: column; gap: 1px; }
-.sb-item {
-  display: flex; align-items: center; gap: 9px;
-  padding: 7px 8px;
-  border-radius: var(--r);
-  font-family: var(--sans);
-  font-size: 13px;
-  color: var(--tx-3);
   transition: color 0.1s, background 0.1s;
   position: relative;
 }
+.sb-item span:not(.sb-badge) { display: none; }
 .sb-item svg { flex-shrink: 0; opacity: 0.5; transition: opacity 0.1s; }
-.sb-item:hover { color: var(--tx-2); background: rgba(255,255,255,0.025); }
-.sb-item:hover svg { opacity: 0.7; }
-.sb-item.active { color: var(--tx); background: rgba(255,255,255,0.025); box-shadow: inset 2px 0 0 rgba(255,255,255,0.08); }
-.sb-item.active svg { opacity: 1; color: var(--tx-2); }
+.sb-item:hover { color: var(--tx-2); background: rgba(255,255,255,0.04); }
+.sb-item:hover svg { opacity: 0.85; }
+.sb-item.active { color: var(--tx); background: rgba(255,255,255,0.06); box-shadow: inset 2px 0 0 rgba(255,255,255,0.1); }
+.sb-item.active svg { opacity: 1; }
 .sb-badge {
-  margin-left: auto;
+  position: absolute;
+  top: 3px; right: 3px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 8px;
   color: var(--tx-4);
-  background: rgba(255,255,255,0.05);
+  background: rgba(255,255,255,0.07);
   border-radius: 3px;
-  padding: 1px 5px;
-  min-width: 16px;
+  padding: 0 3px;
+  min-width: 12px;
   text-align: center;
+  line-height: 14px;
 }
 .sb-badge:empty { display: none; }
 .sb-spacer { flex: 1; }
-.sb-bottom {
-  padding-top: 10px;
-}
+.sb-bottom { padding-top: 8px; }
 .sb-daemon-status {
-  display: flex; align-items: center; gap: 7px;
+  display: flex; align-items: center; justify-content: center;
   padding: 6px 8px;
-  font-family: var(--mono);
-  font-size: 9px;
-  color: var(--tx-5);
-  letter-spacing: 0.04em;
 }
+.sb-daemon-status span:last-child { display: none; }
 .sb-daemon-dot {
   width: 5px; height: 5px; border-radius: 50%;
   background: var(--tx-5);
@@ -383,6 +354,31 @@ a { text-decoration: none; color: inherit; }
   transition: background 0.3s;
 }
 .sb-daemon-dot.on { background: var(--green); }
+
+/* Tooltip on nav items */
+.sb-item::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(30,30,32,0.95);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--tx-2);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 999;
+}
+.sb-item:hover::after { opacity: 1; }
+
+/* Legacy collapsed-class compat (no-op now, sidebar is always slim) */
+.layout.sidebar-collapsed .sidebar { width: 52px; }
 
 /* ── Main ────────────────────────────────────────────── */
 .main {

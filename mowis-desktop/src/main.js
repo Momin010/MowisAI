@@ -15,6 +15,7 @@ import {
   scrollToBottom, renderDiffPanel,
   startAgentPolling, stopAgentPolling,
   appendThinkingIndicator, removeThinkingIndicator,
+  updateThinkingContext, appendAgentStatusBlock, updateAgentStatus,
   setChatCallbacks,
 } from './chat.js';
 import { renderSessionsPage, setupSessionsHandlers } from './sessions.js';
@@ -529,6 +530,26 @@ async function setupListeners() {
     const s = e.payload || {};
     if (s.tokens_total !== undefined) State.stats.tokens_total = s.tokens_total;
     updateStatusBar();
+  });
+
+  await listen('llm_thinking', (e) => {
+    const data = e.payload;
+    if (!data) return;
+    updateThinkingContext(data.task_description || '');
+  });
+
+  await listen('agent_status', (e) => {
+    const data = e.payload;
+    if (!data) return;
+    if (data.status === 'running') {
+      appendAgentStatusBlock(data);
+    } else {
+      updateAgentStatus(data);
+    }
+  });
+
+  await listen('layer_progress', (_e) => {
+    // Layer progress is informational — no UI action needed
   });
 
   await listen('session_complete', async () => {

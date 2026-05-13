@@ -428,6 +428,8 @@ impl VerificationLoop {
                                 &fix_task.description,
                                 &fix_tools,
                                 &fix_prompt,
+                                None,
+                                0,
                             ),
                         )
                         .await

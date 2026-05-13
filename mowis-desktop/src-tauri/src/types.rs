@@ -317,4 +317,21 @@ pub enum BridgeEvent {
         success: bool,
         preview: String,
     },
+    /// Orchestration layer progress update
+    LayerProgress {
+        layer: u8,
+        message: String,
+    },
+    /// LLM is thinking inside an agent tool loop
+    LlmThinking {
+        agent_id: String,
+        task_description: String,
+    },
+    /// Agent status changed (running / complete / failed)
+    AgentStatusChanged {
+        agent_id: String,
+        task_id: String,
+        status: String,
+        sandbox: String,
+    },
 }

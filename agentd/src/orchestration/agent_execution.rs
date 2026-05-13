@@ -1,6 +1,7 @@
 //! Layer 4: Agent Execution — provider-agnostic tool-calling loop with checkpoint system
 
 use super::checkpoint::{CheckpointLog, CheckpointManager};
+use super::new_orchestrator::OrchestratorEvent;
 use super::provider_client::{AgentConversation, AgentRoundResult, LlmConfig, ToolCall};
 use agentd_protocol::{AgentHandle, AgentResult, Checkpoint};
 use anyhow::{anyhow, Context, Result};
@@ -53,6 +54,8 @@ impl AgentExecutor {
         task_description: &str,
         tools: &[String],
         system_prompt: &str,
+        event_tx: Option<&std::sync::mpsc::Sender<OrchestratorEvent>>,
+        worker_id: usize,
     ) -> Result<AgentResult> {
         if is_verbose() {
             log::info!("\n┌─────────────────────────────────────────────────────────");
@@ -79,6 +82,8 @@ impl AgentExecutor {
                     tools,
                     system_prompt,
                     &mut checkpoint_log,
+                    event_tx,
+                    worker_id,
                 )
                 .await
             {
@@ -159,7 +164,10 @@ impl AgentExecutor {
         tools: &[String],
         system_prompt: &str,
         checkpoint_log: &mut CheckpointLog,
+        event_tx: Option<&std::sync::mpsc::Sender<OrchestratorEvent>>,
+        worker_id: usize,
     ) -> Result<AgentResult> {
+        let agent_id_short = agent.agent_id[..8.min(agent.agent_id.len())].to_string();
         let mut conversation = AgentConversation::new();
 
         // Initial user message
@@ -253,6 +261,14 @@ impl AgentExecutor {
 
         // Tool-calling loop
         for _ in 0..self.max_tool_rounds {
+            // Emit LlmThinking before each LLM call
+            if let Some(tx) = event_tx {
+                let _ = tx.send(OrchestratorEvent::LlmThinking {
+                    agent_id: agent_id_short.clone(),
+                    task_description: task_description.chars().take(80).collect(),
+                });
+            }
+
             let round_result = super::provider_client::call_agent_round(
                 &self.llm_config,
                 &enhanced_system_prompt,
@@ -320,6 +336,18 @@ impl AgentExecutor {
                     );
                 }
 
+                // Emit ToolCall event before execution
+                if let Some(tx) = event_tx {
+                    let args_preview = serde_json::to_string(&tool_call.args)
+                        .unwrap_or_default()
+                        .chars().take(200).collect::<String>();
+                    let _ = tx.send(OrchestratorEvent::ToolCall {
+                        worker_id,
+                        tool_name: tool_call.name.clone(),
+                        args_preview,
+                    });
+                }
+
                 let tool_result = self
                     .execute_tool_with_retry(
                         &agent.sandbox_name,
@@ -328,6 +356,23 @@ impl AgentExecutor {
                         &tool_call.args,
                     )
                     .await?;
+
+                // Emit ToolResult event after execution
+                if let Some(tx) = event_tx {
+                    let result_str = serde_json::to_string(&tool_result).unwrap_or_default();
+                    let has_error = tool_result.get("error").is_some();
+                    let preview = if result_str.len() > 200 {
+                        format!("{}...", &result_str[..200])
+                    } else {
+                        result_str
+                    };
+                    let _ = tx.send(OrchestratorEvent::ToolResult {
+                        worker_id,
+                        tool_name: tool_call.name.clone(),
+                        success: !has_error,
+                        preview,
+                    });
+                }
 
                 // Checkpoint after every successful tool call (best-effort - don't abort on failure)
                 let checkpoint_id = checkpoint_log.next_checkpoint_id();

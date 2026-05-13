@@ -1,3 +1,134 @@
+/* ── Thinking indicator ─────────────────────────────── */
+.msg-bubble.thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+}
+.thinking-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--tx-4);
+  letter-spacing: 0.03em;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+
+/* ── Agent status block ─────────────────────────────── */
+.msg-row.agent-status-row {
+  padding: 4px 40px;
+}
+.agent-status-block {
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--r);
+  background: rgba(14,14,14,0.6);
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+.agent-status-block.running { border-color: rgba(52,199,89,0.2); }
+.agent-status-block.complete { border-color: rgba(255,255,255,0.06); }
+.agent-status-block.failed { border-color: rgba(255,69,58,0.2); }
+
+.agent-status-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.agent-status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--tx-5);
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+.agent-status-dot.running { background: var(--green); box-shadow: 0 0 6px rgba(52,199,89,0.4); animation: pulse-dot 1.5s infinite; }
+.agent-status-dot.complete { background: var(--tx-4); }
+.agent-status-dot.failed { background: #ff453a; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.agent-status-id {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--tx-3);
+  letter-spacing: 0.04em;
+}
+.agent-status-task {
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--tx-4);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-status-badge {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.agent-status-badge.running { background: rgba(52,199,89,0.12); color: var(--green); }
+.agent-status-badge.complete { background: rgba(255,255,255,0.05); color: var(--tx-4); }
+.agent-status-badge.failed { background: rgba(255,69,58,0.12); color: #ff453a; }
+
+.agent-status-toggle {
+  background: transparent; border: none;
+  color: var(--tx-5); padding: 0 2px;
+  display: grid; place-items: center;
+  transition: color 0.1s;
+}
+.agent-status-toggle:hover { color: var(--tx-3); }
+
+.agent-status-body {
+  border-top: 1px solid rgba(255,255,255,0.05);
+  padding: 8px 12px;
+  display: flex; flex-direction: column; gap: 4px;
+  overflow: hidden;
+  transition: max-height 0.2s ease, padding 0.2s ease;
+  max-height: 400px;
+}
+.agent-status-body.collapsed {
+  max-height: 0;
+  padding-top: 0; padding-bottom: 0;
+  border-top: none;
+}
+
+/* ── Multi-agent grid ───────────────────────────────── */
+.msg-row.agent-grid-row {
+  padding: 4px 40px;
+}
+.agent-run-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 6px 0;
+}
+.agent-square {
+  width: 12px; height: 12px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.1);
+  transition: background 0.3s, box-shadow 0.3s;
+  cursor: default;
+}
+.agent-square.running {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(52,199,89,0.4);
+  animation: pulse-dot 1.5s infinite;
+}
+.agent-square.complete { background: rgba(255,255,255,0.18); }
+.agent-square.failed { background: #ff453a; }
+
 /* ── Home page ───────────────────────────────────────── */
 .home-empty {
   flex: 1;

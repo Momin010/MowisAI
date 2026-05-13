@@ -1357,7 +1357,13 @@ fn orchestrator_event_to_json(event: &OrchestratorEvent) -> Option<serde_json::V
                 "error": error
             }))
         }
-        OrchestratorEvent::LayerProgress { .. } => None,
+        OrchestratorEvent::LayerProgress { layer, message } => {
+            Some(json!({
+                "type": "layer_progress",
+                "layer": layer,
+                "message": message
+            }))
+        }
         OrchestratorEvent::StatsUpdate { stats } => {
             Some(json!({
                 "type": "stats",
@@ -1389,6 +1395,36 @@ fn orchestrator_event_to_json(event: &OrchestratorEvent) -> Option<serde_json::V
             Some(json!({
                 "type": "agent_message",
                 "content": text
+            }))
+        }
+        OrchestratorEvent::LlmThinking { agent_id, task_description } => {
+            Some(json!({
+                "type": "llm_thinking",
+                "agent_id": agent_id,
+                "task_description": task_description
+            }))
+        }
+        OrchestratorEvent::LlmChunk { agent_id, chunk } => {
+            Some(json!({
+                "type": "agent_chunk",
+                "agent_id": agent_id,
+                "content": chunk
+            }))
+        }
+        OrchestratorEvent::SandboxCreated { name, agent_count } => {
+            Some(json!({
+                "type": "sandbox_created",
+                "name": name,
+                "agent_count": agent_count
+            }))
+        }
+        OrchestratorEvent::AgentStatusChanged { agent_id, task_id, status, sandbox } => {
+            Some(json!({
+                "type": "agent_status",
+                "agent_id": agent_id,
+                "task_id": task_id,
+                "status": status,
+                "sandbox": sandbox
             }))
         }
         OrchestratorEvent::Done => None, // Handled separately

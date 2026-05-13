@@ -14,6 +14,14 @@ pub enum OrchestratorEvent {
     LayerProgress { layer: u8, message: String },
     /// Direct LLM response for conversational/simple prompts (no sandbox needed).
     ChatResponse { text: String },
+    /// LLM is thinking / waiting for a response in an agent tool loop.
+    LlmThinking { agent_id: String, task_description: String },
+    /// Streaming LLM chunk from an agent.
+    LlmChunk { agent_id: String, chunk: String },
+    /// A new sandbox was created.
+    SandboxCreated { name: String, agent_count: usize },
+    /// Agent status changed (running, complete, failed, idle).
+    AgentStatusChanged { agent_id: String, task_id: String, status: String, sandbox: String },
     Done,
 }
 
@@ -318,8 +326,18 @@ impl NewOrchestrator {
                                 task_description
                             );
 
+                            // Notify agent status: running
+                            if let Some(ref tx) = event_tx_for_worker {
+                                let _ = tx.send(OrchestratorEvent::AgentStatusChanged {
+                                    agent_id: agent.agent_id[..8.min(agent.agent_id.len())].to_string(),
+                                    task_id: ready_task_id.clone(),
+                                    status: "running".to_string(),
+                                    sandbox: sandbox.name.clone(),
+                                });
+                            }
+
                             let result = match executor_clone
-                                .execute_task(&agent, &task_description, &sandbox.tools, &system_prompt)
+                                .execute_task(&agent, &task_description, &sandbox.tools, &system_prompt, event_tx_for_worker.as_ref(), worker_id)
                                 .await {
                                     Ok(r) => r,
                                     Err(e) => {
@@ -846,7 +864,7 @@ impl NewOrchestrator {
         });
 
         let result = executor
-            .execute_task(&agent, prompt, &sandbox.tools, &system_prompt)
+            .execute_task(&agent, prompt, &sandbox.tools, &system_prompt, event_tx.as_ref(), 0)
             .await;
 
         // Capture host-side diff BEFORE sleeping the container.
@@ -1099,7 +1117,7 @@ impl NewOrchestrator {
                             );
 
                             let mut result = match executor_clone
-                                .execute_task(&agent, &task_description, &sandbox.tools, &system_prompt)
+                                .execute_task(&agent, &task_description, &sandbox.tools, &system_prompt, event_tx_for_worker.as_ref(), worker_id)
                                 .await
                             {
                                 Ok(r) => r,

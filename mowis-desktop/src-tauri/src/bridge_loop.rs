@@ -344,6 +344,29 @@ pub async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app:
             let _ = app.emit("chat_message", &msg);
         }
 
+        BridgeEvent::LayerProgress { layer, message } => {
+            let _ = app.emit("layer_progress", serde_json::json!({
+                "layer": layer,
+                "message": message,
+            }));
+        }
+
+        BridgeEvent::LlmThinking { agent_id, task_description } => {
+            let _ = app.emit("llm_thinking", serde_json::json!({
+                "agent_id": agent_id,
+                "task_description": task_description,
+            }));
+        }
+
+        BridgeEvent::AgentStatusChanged { agent_id, task_id, status, sandbox } => {
+            let _ = app.emit("agent_status", serde_json::json!({
+                "agent_id": agent_id,
+                "task_id": task_id,
+                "status": status,
+                "sandbox": sandbox,
+            }));
+        }
+
         BridgeEvent::SimulationTick { tasks_done, active_agents, tokens_delta } => {
             *state.tokens_total.lock().unwrap() += tokens_delta;
             *state.tool_calls_total.lock().unwrap() += 1;
@@ -427,6 +450,23 @@ pub fn socket_value_to_bridge_event(v: &serde_json::Value) -> Option<BridgeEvent
                 active_agents: running,
                 tokens_delta: 0,
             })
+        }
+        "layer_progress" => {
+            let layer = v["layer"].as_u64().unwrap_or(0) as u8;
+            let message = v["message"].as_str().unwrap_or("").to_owned();
+            Some(BridgeEvent::LayerProgress { layer, message })
+        }
+        "llm_thinking" => {
+            let agent_id = v["agent_id"].as_str().unwrap_or("").to_owned();
+            let task_description = v["task_description"].as_str().unwrap_or("").to_owned();
+            Some(BridgeEvent::LlmThinking { agent_id, task_description })
+        }
+        "agent_status" => {
+            let agent_id = v["agent_id"].as_str().unwrap_or("").to_owned();
+            let task_id = v["task_id"].as_str().unwrap_or("").to_owned();
+            let status = v["status"].as_str().unwrap_or("").to_owned();
+            let sandbox = v["sandbox"].as_str().unwrap_or("").to_owned();
+            Some(BridgeEvent::AgentStatusChanged { agent_id, task_id, status, sandbox })
         }
         _ => None,
     }

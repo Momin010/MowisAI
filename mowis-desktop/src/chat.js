@@ -308,12 +308,16 @@ export function scrollToBottom(el) {
 export function appendThinkingIndicator() {
   const container = $('chat-messages');
   if (!container) return;
+  if ($('thinking-indicator')) return;
   const row = document.createElement('div');
   row.className = 'msg-row agent';
   row.id = 'thinking-indicator';
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble thinking';
-  bubble.innerHTML = '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>';
+  bubble.innerHTML = `
+    <span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>
+    <span class="thinking-label" id="thinking-label">Thinking</span>
+  `;
   row.appendChild(bubble);
   container.appendChild(row);
   scrollToBottom(container);
@@ -321,6 +325,115 @@ export function appendThinkingIndicator() {
 
 export function removeThinkingIndicator() {
   $('thinking-indicator')?.remove();
+}
+
+export function updateThinkingContext(taskDesc) {
+  const label = $('thinking-label');
+  if (!label) return;
+  const text = taskDesc ? taskDesc.substring(0, 60) : 'Thinking';
+  label.textContent = text;
+}
+
+// ── Agent status blocks (inline in chat) ─────────────────────────────────────
+
+const _agentBlocks = {};
+
+export function appendAgentStatusBlock(data) {
+  const container = $('chat-messages');
+  if (!container) return;
+
+  const blockId = `agent-block-${data.agent_id}`;
+  if ($(`${blockId}`)) return;
+
+  const row = document.createElement('div');
+  row.className = 'msg-row agent-status-row';
+
+  const block = document.createElement('div');
+  block.className = 'agent-status-block running';
+  block.id = blockId;
+
+  const header = document.createElement('div');
+  header.className = 'agent-status-header';
+  header.innerHTML = `
+    <span class="agent-status-dot"></span>
+    <span class="agent-status-id">${escHtml(data.agent_id)}</span>
+    <span class="agent-status-task">${escHtml((data.task_id || '').substring(0, 40))}</span>
+    <span class="agent-status-badge running">running</span>
+    <button class="agent-status-toggle" aria-label="Toggle">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+  `;
+
+  const body = document.createElement('div');
+  body.className = 'agent-status-body collapsed';
+  body.id = `${blockId}-body`;
+
+  header.querySelector('.agent-status-toggle')?.addEventListener('click', () => {
+    body.classList.toggle('collapsed');
+    header.querySelector('.agent-status-toggle svg path').setAttribute(
+      'd',
+      body.classList.contains('collapsed') ? 'M4 6l4 4 4-4' : 'M4 10l4-4 4 4'
+    );
+  });
+
+  block.appendChild(header);
+  block.appendChild(body);
+  row.appendChild(block);
+  container.appendChild(row);
+  _agentBlocks[data.agent_id] = blockId;
+  scrollToBottom(container);
+
+  updateAgentGrid();
+}
+
+export function updateAgentStatus(data) {
+  const blockId = _agentBlocks[data.agent_id];
+  if (!blockId) return;
+  const block = $(blockId);
+  if (!block) return;
+
+  const status = data.status || 'done';
+  block.className = `agent-status-block ${status}`;
+  const badge = block.querySelector('.agent-status-badge');
+  if (badge) {
+    badge.className = `agent-status-badge ${status}`;
+    badge.textContent = status;
+  }
+  const dot = block.querySelector('.agent-status-dot');
+  if (dot) dot.className = `agent-status-dot ${status}`;
+
+  updateAgentGrid();
+}
+
+// ── Multi-agent grid ──────────────────────────────────────────────────────────
+
+function updateAgentGrid() {
+  const agentIds = Object.keys(_agentBlocks);
+  if (agentIds.length < 2) return;
+
+  let grid = $('agent-run-grid');
+  if (!grid) {
+    const container = $('chat-messages');
+    if (!container) return;
+    const row = document.createElement('div');
+    row.className = 'msg-row agent-grid-row';
+    grid = document.createElement('div');
+    grid.className = 'agent-run-grid';
+    grid.id = 'agent-run-grid';
+    row.appendChild(grid);
+    container.insertBefore(row, container.firstChild);
+  }
+
+  grid.innerHTML = agentIds.map(id => {
+    const blockId = _agentBlocks[id];
+    const block = $(blockId);
+    const status = block
+      ? (block.classList.contains('running') ? 'running'
+        : block.classList.contains('complete') ? 'complete'
+        : block.classList.contains('failed') ? 'failed' : 'idle')
+      : 'idle';
+    return `<div class="agent-square ${status}" title="Agent ${escHtml(id)}"></div>`;
+  }).join('');
 }
 
 // ── Agent polling ────────────────────────────────────────────────────────────
