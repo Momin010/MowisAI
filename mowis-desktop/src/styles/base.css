@@ -282,9 +282,9 @@ a { text-decoration: none; color: inherit; }
   gap: 8px;
 }
 
-/* ── Sidebar / Nav Rail (slim, always icon-only) ────── */
+/* ── Sidebar / Nav Rail ─────────────────────────────── */
 .sidebar {
-  width: 52px;
+  width: 180px;
   flex-shrink: 0;
   display: flex; flex-direction: column;
   padding: 14px 8px 14px;
@@ -300,27 +300,45 @@ a { text-decoration: none; color: inherit; }
     inset -1px 0 0 rgba(0,0,0,0.3),
     inset 0 -1px 0 rgba(0,0,0,0.2),
     0 2px 16px rgba(0,0,0,0.35);
+  transition: width 0.2s ease;
   margin-bottom: 0;
 }
 .sb-brand {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   margin-bottom: 20px;
-  padding: 0;
+  padding: 0 4px;
+  gap: 8px;
 }
-.sb-brand-text { display: none; }
-.sb-collapse { display: none; }
+.sb-brand-text {
+  font-family: var(--sans); font-size: 13px; font-weight: 600;
+  color: var(--tx-2); white-space: nowrap; overflow: hidden;
+}
+.sb-brand-text .accent { color: var(--blue); }
+.sb-collapse {
+  display: flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; flex-shrink: 0;
+  border: none; border-radius: 4px;
+  background: transparent; color: var(--tx-4);
+  cursor: pointer; transition: background 0.12s, color 0.12s;
+}
+.sb-collapse:hover { background: rgba(255,255,255,0.06); color: var(--tx-2); }
+.sb-collapse svg { transition: transform 0.2s ease; }
 .sb-nav { display: flex; flex-direction: column; gap: 2px; }
 .sb-item {
-  display: flex; align-items: center; justify-content: center;
-  padding: 8px;
+  display: flex; align-items: center; justify-content: flex-start;
+  gap: 9px; padding: 8px 10px;
   border-radius: var(--r);
   color: var(--tx-4);
   transition: color 0.1s, background 0.1s;
   position: relative;
+  white-space: nowrap; overflow: hidden;
 }
-.sb-item span:not(.sb-badge) { display: none; }
+.sb-item span:not(.sb-badge) {
+  font-family: var(--sans); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis;
+}
 .sb-item svg { flex-shrink: 0; opacity: 0.5; transition: opacity 0.1s; }
 .sb-item:hover { color: var(--tx-2); background: rgba(255,255,255,0.04); }
 .sb-item:hover svg { opacity: 0.85; }
@@ -343,10 +361,14 @@ a { text-decoration: none; color: inherit; }
 .sb-spacer { flex: 1; }
 .sb-bottom { padding-top: 8px; }
 .sb-daemon-status {
-  display: flex; align-items: center; justify-content: center;
-  padding: 6px 8px;
+  display: flex; align-items: center;
+  gap: 7px; padding: 6px 10px;
+  white-space: nowrap; overflow: hidden;
 }
-.sb-daemon-status span:last-child { display: none; }
+.sb-daemon-status span:last-child {
+  font-family: var(--sans); font-size: 11px; color: var(--tx-5);
+  overflow: hidden; text-overflow: ellipsis;
+}
 .sb-daemon-dot {
   width: 5px; height: 5px; border-radius: 50%;
   background: var(--tx-5);
@@ -355,8 +377,21 @@ a { text-decoration: none; color: inherit; }
 }
 .sb-daemon-dot.on { background: var(--green); }
 
-/* Tooltip on nav items */
-.sb-item::after {
+/* Tooltips hidden in expanded state (labels already visible) */
+.sb-item::after { content: none; }
+
+/* ── Collapsed sidebar ───────────────────────────────── */
+.layout.sidebar-collapsed .sidebar { width: 52px; }
+.layout.sidebar-collapsed .sb-brand { justify-content: center; padding: 0; }
+.layout.sidebar-collapsed .sb-brand-text { display: none; }
+.layout.sidebar-collapsed .sb-collapse svg { transform: rotate(180deg); }
+.layout.sidebar-collapsed .sb-item { justify-content: center; padding: 8px; gap: 0; }
+.layout.sidebar-collapsed .sb-item span:not(.sb-badge) { display: none; }
+.layout.sidebar-collapsed .sb-daemon-status { justify-content: center; padding: 6px 8px; }
+.layout.sidebar-collapsed .sb-daemon-status span:last-child { display: none; }
+
+/* Tooltips visible in collapsed state */
+.layout.sidebar-collapsed .sb-item::after {
   content: attr(data-tooltip);
   position: absolute;
   left: calc(100% + 10px);
@@ -375,10 +410,7 @@ a { text-decoration: none; color: inherit; }
   transition: opacity 0.15s;
   z-index: 999;
 }
-.sb-item:hover::after { opacity: 1; }
-
-/* Legacy collapsed-class compat (no-op now, sidebar is always slim) */
-.layout.sidebar-collapsed .sidebar { width: 52px; }
+.layout.sidebar-collapsed .sb-item:hover::after { opacity: 1; }
 
 /* ── Main ────────────────────────────────────────────── */
 .main {
@@ -415,6 +447,7 @@ a { text-decoration: none; color: inherit; }
 }
 .page-body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 24px 32px 40px;
 }
