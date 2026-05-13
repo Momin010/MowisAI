@@ -319,6 +319,38 @@ pub enum SchedulerMessage {
     Shutdown,
 }
 
+/// Detailed runtime event category for real-time desktop streaming
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum RuntimeEventKind {
+    Orchestration,
+    Planner,
+    Scheduler,
+    Sandbox,
+    Agent,
+    Llm,
+    Tool,
+    File,
+    Command,
+    Merge,
+    Verification,
+    System,
+    Error,
+}
+
+/// Real-time event envelope streamed from agentd to desktop
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeEvent {
+    pub event_id: String,
+    pub session_id: String,
+    pub timestamp_ms: u64,
+    pub kind: RuntimeEventKind,
+    pub sandbox_name: Option<SandboxName>,
+    pub agent_id: Option<String>,
+    pub task_id: Option<TaskId>,
+    pub summary: String,
+    pub details: serde_json::Value,
+}
+
 /// Overlayfs layer information (Layer 2)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OverlayfsLayer {

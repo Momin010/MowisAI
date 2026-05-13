@@ -117,6 +117,85 @@ export function finalizeStreaming() {
   State.streamingContent = '';
 }
 
+export function upsertOrchestrationEvent(event) {
+  const container = $('chat-messages');
+  if (!container) return;
+  let card = $('orchestration-card');
+  if (!card) {
+    const row = document.createElement('div');
+    row.className = 'msg-row orchestration-row';
+    row.innerHTML = `
+      <div class="orchestration-card" id="orchestration-card">
+        <div class="orchestration-head">
+          <div class="orchestration-title">Multi-Agent Orchestration</div>
+          <div class="orchestration-subtitle" id="orchestration-subtitle">Starting…</div>
+        </div>
+        <div class="orchestration-grid" id="orchestration-grid"></div>
+        <div class="orchestration-timeline" id="orchestration-timeline"></div>
+      </div>
+    `;
+    container.appendChild(row);
+    card = $('orchestration-card');
+  }
+
+  State.orchestration.started = true;
+  const agentId = event.agent_id || event.agentId;
+  if (agentId) {
+    if (!State.orchestration.agents[agentId]) {
+      State.orchestration.agents[agentId] = { status: 'running', logs: [] };
+    }
+    const agent = State.orchestration.agents[agentId];
+    if (event.type === 'agent_completed' || event.success === true) agent.status = 'done';
+    if (event.type === 'error' || event.success === false) agent.status = 'error';
+    agent.logs.push(`${event.type || 'event'}: ${event.message || event.summary || ''}`);
+    if (agent.logs.length > 40) agent.logs.shift();
+  }
+  State.orchestration.timeline.push(event);
+  if (State.orchestration.timeline.length > 80) State.orchestration.timeline.shift();
+  renderOrchestrationCard();
+  scrollToBottom(container);
+}
+
+function renderOrchestrationCard() {
+  const subtitle = $('orchestration-subtitle');
+  if (subtitle) {
+    const agents = Object.values(State.orchestration.agents);
+    const running = agents.filter(a => a.status === 'running').length;
+    const done = agents.filter(a => a.status === 'done').length;
+    const error = agents.filter(a => a.status === 'error').length;
+    subtitle.textContent = `${running} running · ${done} done · ${error} errors`;
+  }
+  const grid = $('orchestration-grid');
+  if (grid) {
+    grid.innerHTML = Object.entries(State.orchestration.agents).map(([id, a]) => `
+      <button class="agent-chip ${a.status}" data-agent-id="${escHtml(id)}">
+        <span class="dot"></span>
+        <span class="label">${escHtml(id.slice(0, 8))}</span>
+      </button>
+      <div class="agent-log ${State.orchestration.openAgents.has(id) ? 'open' : ''}" data-agent-log="${escHtml(id)}">
+        ${(a.logs || []).slice(-10).map(log => `<div>${escHtml(log)}</div>`).join('')}
+      </div>
+    `).join('');
+    grid.querySelectorAll('.agent-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.agentId;
+        if (State.orchestration.openAgents.has(id)) State.orchestration.openAgents.delete(id);
+        else State.orchestration.openAgents.add(id);
+        renderOrchestrationCard();
+      });
+    });
+  }
+  const timeline = $('orchestration-timeline');
+  if (timeline) {
+    timeline.innerHTML = State.orchestration.timeline.slice(-20).map(evt => `
+      <div class="orchestration-line">
+        <span>${escHtml(evt.type || 'event')}</span>
+        <span>${escHtml(evt.message || evt.summary || '')}</span>
+      </div>
+    `).join('');
+  }
+}
+
 export function appendFileChanges(changes) {
   const container = $('chat-messages');
   if (!container) return;

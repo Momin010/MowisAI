@@ -15,7 +15,7 @@ import {
   scrollToBottom, renderDiffPanel,
   startAgentPolling, stopAgentPolling,
   appendThinkingIndicator, removeThinkingIndicator,
-  setChatCallbacks,
+  setChatCallbacks, upsertOrchestrationEvent,
 } from './chat.js';
 import { renderSessionsPage, setupSessionsHandlers } from './sessions.js';
 import { renderUsagePage } from './usage.js';
@@ -529,6 +529,15 @@ async function setupListeners() {
     const s = e.payload || {};
     if (s.tokens_total !== undefined) State.stats.tokens_total = s.tokens_total;
     updateStatusBar();
+  });
+  await listen('runtime_event', (e) => {
+    const payload = e.payload || {};
+    upsertOrchestrationEvent({
+      type: payload.kind || payload.type || 'runtime',
+      message: payload.summary || payload.message || '',
+      agent_id: payload.agent_id || payload.agentId || null,
+      success: payload.success,
+    });
   });
 
   await listen('session_complete', async () => {

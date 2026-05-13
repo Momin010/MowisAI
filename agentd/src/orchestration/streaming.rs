@@ -4,7 +4,7 @@
 //! can connect to for real-time updates during orchestration.
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
@@ -38,6 +38,42 @@ pub enum StreamEvent {
         agent_id: String,
         tool_name: String,
         round: u32,
+        timestamp: u64,
+    },
+    /// Every LLM request
+    LlmCallStarted {
+        agent_id: String,
+        provider: String,
+        model: String,
+        prompt_tokens_estimate: u64,
+        timestamp: u64,
+    },
+    /// Every LLM response
+    LlmCallCompleted {
+        agent_id: String,
+        provider: String,
+        model: String,
+        completion_tokens: u64,
+        duration_ms: u64,
+        timestamp: u64,
+    },
+    /// File operation inside any sandbox/agent layer
+    FileOperation {
+        sandbox_name: String,
+        agent_id: Option<String>,
+        operation: String,
+        path: String,
+        metadata: Value,
+        timestamp: u64,
+    },
+    /// Command execution inside any sandbox
+    CommandExecution {
+        sandbox_name: String,
+        agent_id: Option<String>,
+        command: String,
+        exit_code: Option<i32>,
+        duration_ms: Option<u64>,
+        output_preview: String,
         timestamp: u64,
     },
     /// Agent completed task
@@ -218,6 +254,42 @@ pub fn cost_update_event(cost: f64, remaining: f64, tokens: u64) -> StreamEvent 
 
 pub fn heartbeat_event() -> StreamEvent {
     StreamEvent::Heartbeat {
+        timestamp: now_ms(),
+    }
+}
+
+pub fn file_operation_event(
+    sandbox_name: &str,
+    agent_id: Option<&str>,
+    operation: &str,
+    path: &str,
+    metadata: Value,
+) -> StreamEvent {
+    StreamEvent::FileOperation {
+        sandbox_name: sandbox_name.to_string(),
+        agent_id: agent_id.map(|v| v.to_string()),
+        operation: operation.to_string(),
+        path: path.to_string(),
+        metadata,
+        timestamp: now_ms(),
+    }
+}
+
+pub fn command_execution_event(
+    sandbox_name: &str,
+    agent_id: Option<&str>,
+    command: &str,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+    output_preview: &str,
+) -> StreamEvent {
+    StreamEvent::CommandExecution {
+        sandbox_name: sandbox_name.to_string(),
+        agent_id: agent_id.map(|v| v.to_string()),
+        command: command.to_string(),
+        exit_code,
+        duration_ms,
+        output_preview: output_preview.to_string(),
         timestamp: now_ms(),
     }
 }

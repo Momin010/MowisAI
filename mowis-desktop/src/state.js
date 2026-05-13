@@ -32,6 +32,12 @@ export const State = {
     actions: new Set(['created', 'modified', 'deleted', 'moved', 'read']),
     expanded: new Set(),
   },
+  orchestration: {
+    started: false,
+    agents: {},
+    timeline: [],
+    openAgents: new Set(),
+  },
 };
 
 export const $ = (id) => document.getElementById(id);
