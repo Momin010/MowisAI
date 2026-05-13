@@ -289,3 +289,21 @@ export function setupSessionsHandlers() {
     }, 5000);
   }
 }
+
+let _sessionsRefreshInterval = null;
+
+export function startSessionsRefresh() {
+  stopSessionsRefresh();
+  renderSessionsPage();
+  _sessionsRefreshInterval = setInterval(() => {
+    renderSessionsPage();
+  }, 5000);
+}
+
+export function stopSessionsRefresh() {
+  if (_sessionsRefreshInterval) {
+    clearInterval(_sessionsRefreshInterval);
+    _sessionsRefreshInterval = null;
+  }
+}
+}
