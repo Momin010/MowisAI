@@ -618,6 +618,13 @@ pub async fn clear_current_session(state: State<'_, Arc<AppState>>) -> Result<()
     save_state(&state)
 }
 
+
+#[tauri::command]
+pub async fn delete_session(state: State<'_, Arc<AppState>>, session_id: String) -> Result<(), String> {
+    state.session_history.lock().unwrap().retain(|s| s.id != session_id);
+    save_state(&state)
+}
+
 /// Return the zero-mode workspace — deprecated, returns null.
 #[tauri::command]
 pub async fn get_zero_workspace() -> Result<Option<serde_json::Value>, String> {

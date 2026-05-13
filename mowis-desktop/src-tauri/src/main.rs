@@ -48,6 +48,7 @@ fn main() {
             get_current_session,
             load_session,
             clear_current_session,
+            delete_session,
             window_control,
             get_system_info,
             get_stats,
@@ -82,3 +83,4 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");
 }
+

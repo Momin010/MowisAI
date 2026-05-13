@@ -574,7 +574,7 @@
 /* Statusbar removed */
 
 /* ── Usage page ──────────────────────────────────────────────────────── */
-.usage-page-body { padding: 16px 20px 24px; gap: 16px; display: flex; flex-direction: column; }
+.usage-page-body { padding: 16px 20px 24px; gap: 16px; display: flex; flex-direction: column; overflow-y: auto; height: 100%; }
 .usage-charts-row { display: flex; gap: 12px; }
 .usage-chart-card {
   flex: 1;
@@ -659,3 +659,4 @@
   opacity: 0.7; transition: opacity 0.12s; cursor: default;
 }
 .usage-timeline-bar:hover { opacity: 1; }
+

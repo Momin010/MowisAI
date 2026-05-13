@@ -213,15 +213,11 @@
             <textarea id="home-input" class="home-textarea" placeholder="Describe your task… e.g. build a REST API with OAuth2, rate limiting, and OpenAPI docs" rows="3"></textarea>
             <div class="home-compose-row">
               <select id="home-mode" class="mini-select">
-                <option value="agent">Agent</option>
                 <option value="auto">Auto</option>
                 <option value="simple">Simple</option>
                 <option value="standard">Standard</option>
                 <option value="full">Full</option>
               </select>
-              <div class="agent-mode-hint" id="home-agent-hint">
-                <span class="agent-badge">AGENT</span> mowis-agent · full tool access · persistent sessions
-              </div>
               <button class="btn-icon" id="btn-home-attach" title="Attach files" aria-label="Attach files">
                 <span class="material-symbols-outlined">attach_file</span>
               </button>
@@ -540,17 +536,12 @@
             <label class="form-label">Mode<span class="form-hint">Orchestration complexity</span></label>
             <div class="form-ctrl">
               <select id="set-mode" class="form-select">
-                <option value="agent">Agent — mowis-agent coding</option>
                 <option value="auto">Auto — classify complexity</option>
                 <option value="simple">Simple — 1 agent</option>
                 <option value="standard">Standard — ≤3 agents</option>
                 <option value="full">Full — 7-layer pipeline</option>
               </select>
-              <div class="agent-mode-settings-hint" id="settings-agent-hint">
-                <span class="agent-badge">AGENT</span>
-                Agent mode uses mowis-agent for single-agent coding tasks with full tool access, persistent sessions, and LSP integration.
               </div>
-            </div>
           </div>
           <div class="form-row">
             <label class="form-label">Engine setup<span class="form-hint">Point to QEMU/WSL after onboarding</span></label>
@@ -834,3 +825,4 @@
     </div>
   </div>
 </div>
+

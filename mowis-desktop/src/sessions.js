@@ -2,7 +2,7 @@
  * MowisAI Desktop — Sessions Page
  */
 
-import { State, $, setText, escHtml, toast, showConfirm } from './state.js';
+import { State, $, setText, escHtml, toast } from './state.js';
 import { invoke } from './bridge.js';
 import { fmtNumber } from './utils.js';
 
@@ -11,7 +11,6 @@ export const SessionsState = {
   search: '',
   filter: 'all',
   sort: 'newest',
-  refreshTimer: null,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -207,31 +206,17 @@ export function renderSessionsList() {
       const id = btn.dataset.id;
       if (!id) return;
 
-      const confirmed = await showConfirm({
-        title: 'Delete session?',
-        message: 'This will permanently delete the session and all its messages. This cannot be undone.',
-        confirmLabel: 'Delete',
-        danger: true,
-      });
-      if (!confirmed) return;
-
-      // Abort if this is the running session
-      if (State.agentSessionId === id) {
-        try { await invoke('agent_abort', { sessionId: id }); } catch {}
-        State.agentSessionId = null;
-        State.sessionActive = false;
-      }
+      if (!confirm('Delete this session? This cannot be undone.')) return;
 
       try {
-        await invoke('delete_session_local', { sessionId: id });
+        await invoke('delete_session', { sessionId: id });
       } catch (err) {
-        console.error('delete_session_local failed:', err);
+        toast('Failed to delete: ' + err, 'error');
+        return;
       }
 
       SessionsState.all = SessionsState.all.filter(s => s.id !== id);
-      renderSessionsList();
-      setText('sessions-count', `${SessionsState.all.length} session${SessionsState.all.length !== 1 ? 's' : ''}`);
-      setText('sb-badge-sessions', SessionsState.all.length ? String(SessionsState.all.length) : '');
+      renderSessionsPage();
       toast('Session deleted', 'success');
     });
   });
@@ -247,22 +232,6 @@ async function openSession(sessionId) {
     navigate('home', { preserveHomeMode: true });
   } catch (err) {
     toast('Could not open session: ' + err, 'error');
-  }
-}
-
-// ── Auto-refresh ─────────────────────────────────────────────────────────────
-
-export function startSessionsRefresh() {
-  stopSessionsRefresh();
-  SessionsState.refreshTimer = setInterval(() => {
-    if (State.page === 'sessions') renderSessionsPage();
-  }, 5000);
-}
-
-export function stopSessionsRefresh() {
-  if (SessionsState.refreshTimer) {
-    clearInterval(SessionsState.refreshTimer);
-    SessionsState.refreshTimer = null;
   }
 }
 
@@ -310,4 +279,13 @@ export function setupSessionsHandlers() {
     const { navigate } = await import('./main.js');
     navigate('home');
   });
+
+  // Auto-refresh every 5 seconds so externally-deleted sessions disappear
+  if (!window._sessionsRefreshTimer) {
+    window._sessionsRefreshTimer = setInterval(() => {
+      if (document.getElementById('page-sessions')?.classList.contains('active')) {
+        renderSessionsPage();
+      }
+    }, 5000);
+  }
 }
