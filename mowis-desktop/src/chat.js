@@ -286,35 +286,24 @@ export function scrollToBottom(el) {
   requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
 }
 
-// ── Thinking indicator ───────────────────────────────────────────────────────
+// ── Agent running status (replaces thinking indicator) ───────────────────────
 
-export function appendThinkingIndicator() {
-  const container = $('chat-messages');
-  if (!container) return;
-  if ($('thinking-indicator')) return;
-  const row = document.createElement('div');
-  row.className = 'msg-row agent';
-  row.id = 'thinking-indicator';
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble thinking';
-  bubble.innerHTML = `
-    <span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>
-    <span class="thinking-label" id="thinking-label">Thinking</span>
-  `;
-  row.appendChild(bubble);
-  container.appendChild(row);
-  scrollToBottom(container);
+export function appendThinkingIndicator(label) {
+  const el = $('agent-running-status');
+  if (!el) return;
+  el.classList.remove('hidden');
+  const labelEl = $('agent-running-label');
+  if (labelEl) labelEl.textContent = label || 'Working';
 }
 
 export function removeThinkingIndicator() {
-  $('thinking-indicator')?.remove();
+  $('agent-running-status')?.classList.add('hidden');
 }
 
 export function updateThinkingContext(taskDesc) {
-  const label = $('thinking-label');
-  if (!label) return;
-  const text = taskDesc ? taskDesc.substring(0, 60) : 'Thinking';
-  label.textContent = text;
+  const labelEl = $('agent-running-label');
+  if (!labelEl) return;
+  labelEl.textContent = taskDesc ? taskDesc.substring(0, 40) : 'Working';
 }
 
 // ── Agent status blocks (inline in chat) ─────────────────────────────────────
@@ -435,15 +424,12 @@ export function startAgentPolling(sessionId) {
       const messages = await invoke('agent_list_messages', { sessionId });
       if (!messages || !Array.isArray(messages)) return;
 
+      let nextDelay = 1000;
       if (messages.length > State.lastMessageCount) {
         const newMessages = messages.slice(State.lastMessageCount);
         State.lastMessageCount = messages.length;
-        console.log(`[poll] ${newMessages.length} new message(s), total: ${messages.length}`);
-
-        removeThinkingIndicator();
 
         for (const msg of newMessages) {
-          console.log(`[poll] Rendering ${msg.role} message with ${(msg.parts||[]).length} parts`);
           renderAgentMessage(msg);
         }
 
@@ -451,24 +437,26 @@ export function startAgentPolling(sessionId) {
         if (lastMsg?.role === 'assistant') {
           const hasFinish = (lastMsg.parts || []).some(p => p.type === 'finish');
           if (hasFinish) {
-            console.log('[poll] Agent finished — stopping poll');
+            removeThinkingIndicator();
             finalizeStreaming();
             if (_setSessionActive) _setSessionActive(false, true);
             stopAgentPolling();
             return;
           }
         }
+        // Messages are flowing — poll faster
+        nextDelay = 400;
       }
     } catch (e) {
       console.warn('Agent poll error:', e);
     }
 
     if (State.agentSessionId === sessionId) {
-      State.pollTimer = setTimeout(poll, 1000);
+      State.pollTimer = setTimeout(poll, nextDelay);
     }
   }
 
-  State.pollTimer = setTimeout(poll, 500);
+  State.pollTimer = setTimeout(poll, 300);
 }
 
 export function stopAgentPolling() {
