@@ -292,6 +292,7 @@
               <span class="zero-badge sm">ZERO</span>
               <code class="zero-workspace-path" id="zero-workspace-path"></code>
             </div>
+            <span class="routing-badge hidden" id="routing-badge" title="Routing mode"></span>
             <button class="task-open-btn" id="task-panel-open" style="display:none">
               <span id="task-toggle-label">Tasks</span>
               <span id="task-counts">0 / 0</span>
@@ -523,6 +524,12 @@
             <div class="form-ctrl">
               <select id="set-model" class="form-select"></select>
               <input type="text" id="set-model-custom" class="form-input hidden" placeholder="Custom model ID" />
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Execution Model<span class="form-hint">Faster/cheaper model for agent tool-calling (leave blank to use same model for everything)</span></label>
+            <div class="form-ctrl">
+              <select id="set-execution-model" class="form-select"></select>
             </div>
           </div>
           <div class="form-row">

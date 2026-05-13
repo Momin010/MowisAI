@@ -105,6 +105,10 @@ pub struct Config {
     /// The original project (lower_dir) is never modified by agents.
     #[serde(default = "default_sandbox_enabled")]
     pub sandbox_enabled: bool,
+    /// Execution model for Layer 4 agent tool-calling loops.
+    /// When empty, falls back to `model` so single-model setups work unchanged.
+    #[serde(default)]
+    pub execution_model: String,
 }
 
 pub fn default_sandbox_enabled() -> bool {
@@ -127,6 +131,7 @@ impl Default for Config {
             gcp_region: default_gcp_region(),
             gcp_service_account_key_path: String::new(),
             sandbox_enabled: true,
+            execution_model: String::new(),
         }
     }
 }
@@ -333,5 +338,11 @@ pub enum BridgeEvent {
         task_id: String,
         status: String,
         sandbox: String,
+    },
+    /// Routing gate decision emitted at the start of each orchestration run.
+    RoutingDecision {
+        mode: String,
+        planning_model: String,
+        execution_model: String,
     },
 }

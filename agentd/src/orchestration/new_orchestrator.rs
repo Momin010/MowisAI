@@ -23,6 +23,8 @@ pub enum OrchestratorEvent {
     /// Agent status changed (running, complete, failed, idle).
     AgentStatusChanged { agent_id: String, task_id: String, status: String, sandbox: String },
     Done,
+    /// Routing gate decision: which complexity mode was chosen and which models are active.
+    RoutingDecision { mode: String, planning_model: String, execution_model: String },
 }
 
 use super::agent_execution::AgentExecutor;
@@ -79,6 +81,9 @@ pub struct OrchestratorConfig {
     /// Explicit mode override from CLI (`--mode simple|standard|full`).
     /// When `None`, the complexity classifier decides automatically.
     pub mode_override: Option<ComplexityMode>,
+    /// Optional separate LLM config for agent execution (Layer 4).
+    /// When `None`, falls back to `llm_config` so single-model setups work unchanged.
+    pub execution_llm_config: Option<super::provider_client::LlmConfig>,
 }
 
 /// Carries an agent result alongside the human-readable task description
@@ -146,6 +151,16 @@ impl NewOrchestrator {
             message: format!("Routing mode: {}", mode),
         });
 
+        let execution_model_name = self.config.execution_llm_config
+            .as_ref()
+            .map(|c| c.model.clone())
+            .unwrap_or_else(|| self.config.llm_config.model.clone());
+        send_event!(OrchestratorEvent::RoutingDecision {
+            mode: format!("{}", mode),
+            planning_model: self.config.llm_config.model.clone(),
+            execution_model: execution_model_name,
+        });
+
         match mode {
             ComplexityMode::Simple => {
                 return self.run_simple(prompt, &dir_tree, start_time, event_tx).await;
@@ -199,8 +214,11 @@ impl NewOrchestrator {
         // Layer 4: Agent Execution (TRUE PARALLELISM)
         send_event!(OrchestratorEvent::LayerProgress { layer: 4, message: "Executing tasks with agents...".into() });
         log::info!("Layer 4: Executing tasks with agents...");
+        let execution_llm = self.config.execution_llm_config
+            .clone()
+            .unwrap_or_else(|| self.config.llm_config.clone());
         let agent_executor = Arc::new(AgentExecutor::new(
-            self.config.llm_config.clone(),
+            execution_llm,
             self.config.socket_path.clone(),
             self.config.checkpoint_root.clone(),
         )?);
@@ -837,8 +855,11 @@ impl NewOrchestrator {
             message: "Executing task (simple mode)...".into(),
         });
 
+        let execution_llm_simple = self.config.execution_llm_config
+            .clone()
+            .unwrap_or_else(|| self.config.llm_config.clone());
         let executor = AgentExecutor::new(
-            self.config.llm_config.clone(),
+            execution_llm_simple,
             self.config.socket_path.clone(),
             self.config.checkpoint_root.clone(),
         )?;
@@ -1030,8 +1051,11 @@ impl NewOrchestrator {
             layer: 4,
             message: "Executing tasks (standard mode)...".into(),
         });
+        let execution_llm_std = self.config.execution_llm_config
+            .clone()
+            .unwrap_or_else(|| self.config.llm_config.clone());
         let executor = Arc::new(AgentExecutor::new(
-            self.config.llm_config.clone(),
+            execution_llm_std,
             self.config.socket_path.clone(),
             self.config.checkpoint_root.clone(),
         )?);

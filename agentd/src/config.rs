@@ -90,8 +90,12 @@ pub struct MowisConfig {
 
     // ── Shared fields ───────────────────────────────────────────────────────
     pub socket_path: String,
-    /// Active model identifier (Gemini model for VertexAi, Grok model for Grok).
+    /// Planning model — used for Layer 1 task decomposition and merge review.
     pub model: String,
+    /// Execution model — used for Layer 4 agent tool-calling loops.
+    /// When empty, falls back to `model` so single-model setups work unchanged.
+    #[serde(default)]
+    pub execution_model: String,
     pub max_agents: usize,
     pub overlay_root: String,
     pub checkpoint_root: String,
@@ -117,6 +121,7 @@ impl Default for MowisConfig {
             mimo_model: String::new(),
             socket_path: "/tmp/agentd.sock".into(),
             model: "gemini-2.5-pro".into(),
+            execution_model: String::new(),
             max_agents: 1000,
             overlay_root: "/tmp/mowis-overlay".into(),
             checkpoint_root: "/tmp/mowis-checkpoints".into(),

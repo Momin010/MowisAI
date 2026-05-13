@@ -20,7 +20,7 @@ import {
 } from './chat.js';
 import { renderSessionsPage, setupSessionsHandlers } from './sessions.js';
 import { renderUsagePage } from './usage.js';
-import { loadSettings, saveSettings, isAgentMode, setupSettingsHandlers, PROVIDER_MODELS, populateModelDropdown } from './settings.js';
+import { loadSettings, saveSettings, isAgentMode, setupSettingsHandlers, PROVIDER_MODELS, populateModelDropdown, populateExecutionModelDropdown } from './settings.js';
 import { initSpeechRecognition } from './speech.js';
 import { initFileUpload, pendingAttachments, clearAttachments } from './file-upload.js';
 import {
@@ -552,6 +552,19 @@ async function setupListeners() {
     // Layer progress is informational — no UI action needed
   });
 
+  await listen('routing_decision', (e) => {
+    const data = e.payload;
+    if (!data) return;
+    const badge = $('routing-badge');
+    if (!badge) return;
+    const mode = data.mode || 'auto';
+    badge.textContent = mode;
+    badge.className = `routing-badge mode-${mode}`;
+    badge.title = data.planning_model && data.execution_model !== data.planning_model
+      ? `Planning: ${data.planning_model} · Execution: ${data.execution_model}`
+      : `Model: ${data.planning_model || '—'}`;
+  });
+
   await listen('session_complete', async () => {
     finalizeStreaming();
     removeThinkingIndicator();
@@ -612,6 +625,7 @@ async function ensureProvider() {
       if (rowGcp) rowGcp.classList.toggle('hidden', !isVertex);
       if (hintEl) hintEl.textContent = PM_HINTS[prov] || '';
       populateModelDropdown(prov);
+      populateExecutionModelDropdown(prov, State.config?.execution_model || '');
     }
 
     provSel.value = State.config?.provider || 'gemini';

@@ -553,6 +553,7 @@ impl App {
 
                 let orch_config = crate::orchestration::OrchestratorConfig {
                     llm_config,
+                    execution_llm_config: None,
                     socket_path: config.socket_path.clone(),
                     project_root,
                     overlay_root,

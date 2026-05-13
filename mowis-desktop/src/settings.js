@@ -71,6 +71,15 @@ export function populateModelDropdown(provider) {
   };
 }
 
+export function populateExecutionModelDropdown(provider, currentVal) {
+  const sel = $('set-execution-model');
+  if (!sel) return;
+  const models = PROVIDER_MODELS[provider] || [];
+  sel.innerHTML = '<option value="">Same as planning model</option>'
+    + models.map(m => `<option value="${m.id}">${m.label}</option>`).join('');
+  if (currentVal) sel.value = currentVal;
+}
+
 export function setVal(id, val) {
   const e = $(id);
   if (!e) return;
@@ -104,6 +113,8 @@ export function loadSettings() {
     modelSel.value = '__custom';
     if (modelCustom) { modelCustom.value = c.model; modelCustom.classList.remove('hidden'); }
   }
+
+  populateExecutionModelDropdown(c.provider || 'gemini', c.execution_model || '');
 
   setVal('set-api-key', c.api_key || '');
   setVal('set-gcp', c.gcp_project || '');
@@ -141,6 +152,7 @@ export async function saveSettings() {
     mode: getVal('set-mode'),
     provider: getVal('set-provider'),
     model: modelVal,
+    execution_model: getVal('set-execution-model') || '',
     api_key: getVal('set-api-key'),
     gcp_project: getVal('set-gcp'),
     gcp_region: getVal('set-gcp-region'),

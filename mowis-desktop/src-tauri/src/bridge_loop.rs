@@ -367,6 +367,14 @@ pub async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app:
             }));
         }
 
+        BridgeEvent::RoutingDecision { mode, planning_model, execution_model } => {
+            let _ = app.emit("routing_decision", serde_json::json!({
+                "mode": mode,
+                "planning_model": planning_model,
+                "execution_model": execution_model,
+            }));
+        }
+
         BridgeEvent::SimulationTick { tasks_done, active_agents, tokens_delta } => {
             *state.tokens_total.lock().unwrap() += tokens_delta;
             *state.tool_calls_total.lock().unwrap() += 1;
@@ -467,6 +475,12 @@ pub fn socket_value_to_bridge_event(v: &serde_json::Value) -> Option<BridgeEvent
             let status = v["status"].as_str().unwrap_or("").to_owned();
             let sandbox = v["sandbox"].as_str().unwrap_or("").to_owned();
             Some(BridgeEvent::AgentStatusChanged { agent_id, task_id, status, sandbox })
+        }
+        "routing_decision" => {
+            let mode = v["mode"].as_str().unwrap_or("auto").to_owned();
+            let planning_model = v["planning_model"].as_str().unwrap_or("").to_owned();
+            let execution_model = v["execution_model"].as_str().unwrap_or("").to_owned();
+            Some(BridgeEvent::RoutingDecision { mode, planning_model, execution_model })
         }
         _ => None,
     }

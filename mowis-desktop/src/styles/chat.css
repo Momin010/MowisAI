@@ -1,3 +1,24 @@
+/* ── Routing badge (session bar) ────────────────────── */
+.routing-badge {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+  color: var(--tx-4);
+  flex-shrink: 0;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.routing-badge.hidden { display: none; }
+.routing-badge.mode-simple { border-color: rgba(52,199,89,0.2); color: #34c759; background: rgba(52,199,89,0.06); }
+.routing-badge.mode-standard { border-color: rgba(46,91,255,0.25); color: var(--blue); background: rgba(46,91,255,0.07); }
+.routing-badge.mode-full { border-color: rgba(255,149,0,0.25); color: #ff9500; background: rgba(255,149,0,0.07); }
+.routing-badge.mode-agent { border-color: rgba(175,82,222,0.25); color: #af52de; background: rgba(175,82,222,0.07); }
+.routing-badge.mode-auto { border-color: rgba(255,255,255,0.1); color: var(--tx-3); background: rgba(255,255,255,0.04); }
+
 /* ── Thinking indicator ─────────────────────────────── */
 .msg-bubble.thinking {
   display: flex;

@@ -114,6 +114,13 @@ impl LlmConfig {
         }
     }
 
+    /// Return a clone of this config with a different model ID.
+    /// Useful for per-role routing (planning vs. execution model).
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        self
+    }
+
     /// Convenience constructor for Vertex AI from a project ID (CLI compat).
     pub fn vertex(project_id: impl Into<String>) -> Self {
         Self {

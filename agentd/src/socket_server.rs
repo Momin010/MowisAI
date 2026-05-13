@@ -121,8 +121,11 @@ pub struct SocketRequest {
     // ── Config sync fields ──────────────────────────────────────────────────
     /// Provider name for set_config requests (e.g., "gemini", "vertex_ai", "open_ai")
     pub provider: Option<String>,
-    /// Model name for set_config requests
+    /// Model name for set_config requests (planning model — Layer 1)
     pub model: Option<String>,
+    /// Execution model for set_config requests (Layer 4 agent tool-calling).
+    /// When absent, falls back to `model`.
+    pub execution_model: Option<String>,
     /// Plaintext API key for set_config requests (agentd encrypts before saving)
     pub api_key: Option<String>,
     /// GCP project ID for set_config requests (Vertex AI)
@@ -1192,6 +1195,10 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
                 }
             }
 
+            if let Some(ref execution_model) = req.execution_model {
+                config.execution_model = execution_model.clone();
+            }
+
             if let Some(ref project_id) = req.gcp_project_id {
                 config.gcp_project_id = project_id.clone();
             }
@@ -1428,6 +1435,14 @@ fn orchestrator_event_to_json(event: &OrchestratorEvent) -> Option<serde_json::V
             }))
         }
         OrchestratorEvent::Done => None, // Handled separately
+        OrchestratorEvent::RoutingDecision { mode, planning_model, execution_model } => {
+            Some(json!({
+                "type": "routing_decision",
+                "mode": mode,
+                "planning_model": planning_model,
+                "execution_model": execution_model
+            }))
+        }
     }
 }
 
@@ -1503,8 +1518,14 @@ fn handle_orchestrate_streaming(
         .cloned()
         .unwrap_or_else(|| config.socket_path.clone());
     let project = std::path::PathBuf::from(&project_root);
+    let execution_llm_config = if !config.execution_model.is_empty() {
+        Some(llm_config.clone().with_model(config.execution_model.clone()))
+    } else {
+        None
+    };
     let orchestrator_config = OrchestratorConfig {
         llm_config,
+        execution_llm_config,
         socket_path: actual_socket,
         project_root: project.clone(),
         overlay_root: std::path::PathBuf::from(&config.overlay_root),

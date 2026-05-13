@@ -680,6 +680,7 @@ fn cmd_orchestrate(args: OrchestrateArgs) -> Result<()> {
     // Build config
     let config = libagent::orchestration::new_orchestrator::OrchestratorConfig {
         llm_config,
+        execution_llm_config: None,
         socket_path: args.socket.clone(),
         project_root: project_root.clone(),
         overlay_root,

@@ -248,6 +248,7 @@ pub async fn save_config(state: State<'_, Arc<AppState>>, config: Config) -> Res
             "request_type": "set_config",
             "provider": config.provider,
             "model": config.model,
+            "execution_model": if config.execution_model.is_empty() { None } else { Some(&config.execution_model) },
             "api_key": if config.api_key.is_empty() { None } else { Some(&config.api_key) },
             "gcp_project_id": if config.gcp_project.is_empty() { None } else { Some(&config.gcp_project) },
         });
