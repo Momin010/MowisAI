@@ -286,24 +286,34 @@ export function scrollToBottom(el) {
   requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
 }
 
-// ── Agent running status (replaces thinking indicator) ───────────────────────
+// ── Thinking indicator ───────────────────────────────────────────────────────
 
-export function appendThinkingIndicator(label) {
-  const el = $('agent-running-status');
-  if (!el) return;
-  el.classList.remove('hidden');
-  const labelEl = $('agent-running-label');
-  if (labelEl) labelEl.textContent = label || 'Working';
+export function appendThinkingIndicator() {
+  const container = $('chat-messages');
+  if (!container) return;
+  if ($('thinking-indicator')) return;
+  const row = document.createElement('div');
+  row.className = 'msg-row agent';
+  row.id = 'thinking-indicator';
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble thinking';
+  bubble.innerHTML = `
+    <span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>
+    <span class="thinking-label" id="thinking-label"></span>
+  `;
+  row.appendChild(bubble);
+  container.appendChild(row);
+  scrollToBottom(container);
 }
 
 export function removeThinkingIndicator() {
-  $('agent-running-status')?.classList.add('hidden');
+  $('thinking-indicator')?.remove();
 }
 
 export function updateThinkingContext(taskDesc) {
-  const labelEl = $('agent-running-label');
-  if (!labelEl) return;
-  labelEl.textContent = taskDesc ? taskDesc.substring(0, 40) : 'Working';
+  const label = $('thinking-label');
+  if (!label) return;
+  label.textContent = taskDesc ? taskDesc.substring(0, 60) : '';
 }
 
 // ── Agent status blocks (inline in chat) ─────────────────────────────────────
