@@ -4,9 +4,11 @@
 //! with ONE LLM call that produces both task graph AND sandbox topology
 
 use super::provider_client::{generate_text, LlmConfig};
+use super::verification::extract_json;
 use agentd_protocol::{SandboxTopology, TaskGraph, TaskId};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -332,34 +334,184 @@ Output ONLY valid JSON in this exact format:
     Ok(text)
 }
 
+/// Try to complete truncated JSON by adding missing closing brackets
+fn complete_truncated_json(json_str: &str) -> String {
+    let mut result = json_str.to_string();
+    
+    // Count unmatched braces and brackets
+    let mut brace_count = 0;
+    let mut bracket_count = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    
+    for ch in result.chars() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escape_next = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => brace_count += 1,
+            '}' if !in_string => brace_count -= 1,
+            '[' if !in_string => bracket_count += 1,
+            ']' if !in_string => bracket_count -= 1,
+            _ => {}
+        }
+    }
+    
+    // If we have unmatched braces/brackets, try to complete them
+    if brace_count > 0 || bracket_count > 0 {
+        // Remove trailing incomplete string if present
+        if let Some(last_brace) = result.rfind('}') {
+            // Check if there's an incomplete string after the last brace
+            let after_brace = &result[last_brace + 1..];
+            if after_brace.contains('"') && !after_brace.contains('}') {
+                // There's an incomplete string, truncate at the last brace
+                result = result[..=last_brace].to_string();
+                // Recalculate counts
+                brace_count = 0;
+                bracket_count = 0;
+                in_string = false;
+                escape_next = false;
+                for ch in result.chars() {
+                    if escape_next {
+                        escape_next = false;
+                        continue;
+                    }
+                    match ch {
+                        '\\' if in_string => escape_next = true,
+                        '"' => in_string = !in_string,
+                        '{' if !in_string => brace_count += 1,
+                        '}' if !in_string => brace_count -= 1,
+                        '[' if !in_string => bracket_count += 1,
+                        ']' if !in_string => bracket_count -= 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        
+        // Add missing closing brackets and braces
+        let mut completion = String::new();
+        for _ in 0..bracket_count {
+            completion.push(']');
+        }
+        for _ in 0..brace_count {
+            completion.push('}');
+        }
+        
+        if !completion.is_empty() {
+            result.push_str(&completion);
+            log::info!("Planner: Completed truncated JSON with: {}", completion);
+        }
+    }
+    
+    result
+}
+
+/// Fix common JSON issues from LLM responses
+fn fix_common_json_issues(json_str: &str) -> String {
+    // First try to complete truncated JSON
+    let mut result = complete_truncated_json(json_str);
+    
+    // Try to parse as Value first to see if it's already valid
+    if serde_json::from_str::<Value>(&result).is_ok() {
+        return result;
+    }
+    
+    // Fix 1: If a field that should be an array is a map, convert it
+    // This is a heuristic - we look for patterns like "tasks": {} and convert to "tasks": []
+    // We'll do this by parsing as Value and fixing structure
+    if let Ok(mut value) = serde_json::from_str::<Value>(&result) {
+        // Fix task_graph.tasks if it's a map
+        if let Some(task_graph) = value.get_mut("task_graph") {
+            if let Some(tasks) = task_graph.get_mut("tasks") {
+                if tasks.is_object() {
+                    // Convert object to array of its values
+                    if let Some(obj) = tasks.as_object() {
+                        let arr: Vec<Value> = obj.values().cloned().collect();
+                        *tasks = Value::Array(arr);
+                    }
+                }
+            }
+        }
+        
+        // Fix sandbox_topology.sandboxes if it's a map
+        if let Some(topology) = value.get_mut("sandbox_topology") {
+            if let Some(sandboxes) = topology.get_mut("sandboxes") {
+                if sandboxes.is_object() {
+                    if let Some(obj) = sandboxes.as_object() {
+                        let arr: Vec<Value> = obj.values().cloned().collect();
+                        *sandboxes = Value::Array(arr);
+                    }
+                }
+            }
+        }
+        
+        // Fix task deps if it's a string instead of array
+        if let Some(task_graph) = value.get_mut("task_graph") {
+            if let Some(tasks) = task_graph.get_mut("tasks") {
+                if let Some(tasks_arr) = tasks.as_array_mut() {
+                    for task in tasks_arr.iter_mut() {
+                        if let Some(deps) = task.get_mut("deps") {
+                            if deps.is_string() {
+                                // Convert string to array with single element
+                                if let Some(s) = deps.as_str() {
+                                    *deps = Value::Array(vec![Value::String(s.to_string())]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fix sandbox tools if it's a string instead of array
+        if let Some(topology) = value.get_mut("sandbox_topology") {
+            if let Some(sandboxes) = topology.get_mut("sandboxes") {
+                if let Some(sandboxes_arr) = sandboxes.as_array_mut() {
+                    for sandbox in sandboxes_arr.iter_mut() {
+                        if let Some(tools) = sandbox.get_mut("tools") {
+                            if tools.is_string() {
+                                if let Some(s) = tools.as_str() {
+                                    *tools = Value::Array(vec![Value::String(s.to_string())]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Serialize back to string
+        if let Ok(fixed) = serde_json::to_string(&value) {
+            if fixed != json_str {
+                log::info!("Planner: Applied JSON fixes for common LLM issues");
+            }
+            result = fixed;
+        }
+    }
+    
+    result
+}
+
 /// Parse planner response into structured output
 fn parse_planner_response(response: &str) -> Result<PlannerOutput> {
     if response.is_empty() {
         return Err(anyhow!("Empty response from planner"));
     }
 
-    // Extract JSON from response (may have markdown code blocks)
-    let json_str = if response.contains("```json") {
-        response
-            .split("```json")
-            .nth(1)
-            .and_then(|s| s.split("```").next())
-            .unwrap_or(response)
-    } else if response.contains("```") {
-        response
-            .split("```")
-            .nth(1)
-            .and_then(|s| s.split("```").next())
-            .unwrap_or(response)
-    } else {
-        response
-    }
-    .trim();
-
+    // Extract JSON from response using robust extraction
+    let json_str = extract_json(response);
+    
     if json_str.is_empty() {
         return Err(anyhow!("No JSON content found in planner response"));
     }
 
+    // Fix common JSON issues from LLM
+    let fixed_json = fix_common_json_issues(&json_str);
+    
     #[derive(Deserialize)]
     struct PlannerJson {
         task_graph: TaskGraph,
@@ -367,7 +519,7 @@ fn parse_planner_response(response: &str) -> Result<PlannerOutput> {
     }
 
     let parsed: PlannerJson =
-        serde_json::from_str(json_str).context(format!("Failed to parse planner JSON from: {}", json_str.chars().take(200).collect::<String>()))?;
+        serde_json::from_str(&fixed_json).context(format!("Failed to parse planner JSON from: {}", fixed_json.chars().take(500).collect::<String>()))?;
 
     // Validate we have at least one task and one sandbox
     if parsed.task_graph.tasks.is_empty() {
@@ -431,6 +583,71 @@ mod tests {
         let output = result.unwrap();
         assert_eq!(output.task_graph.tasks.len(), 1);
         assert_eq!(output.sandbox_topology.sandboxes.len(), 1);
+    }
+
+    #[test]
+    fn test_fix_common_json_issues_tasks_map() {
+        // Simulate LLM returning tasks as map instead of array
+        let json = r#"{"task_graph":{"tasks":{"t1":{"id":"t1","description":"task 1","deps":[],"hint":"backend"}}},"sandbox_topology":{"sandboxes":[{"name":"backend","scope":"src/","tools":["read_file"],"max_agents":50}]}}"#;
+        let fixed = fix_common_json_issues(json);
+        let parsed: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        // tasks should now be an array
+        assert!(parsed["task_graph"]["tasks"].is_array());
+        assert_eq!(parsed["task_graph"]["tasks"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_fix_common_json_issues_sandboxes_map() {
+        // Simulate LLM returning sandboxes as map instead of array
+        let json = r#"{"task_graph":{"tasks":[{"id":"t1","description":"task 1","deps":[],"hint":"backend"}]},"sandbox_topology":{"sandboxes":{"backend":{"name":"backend","scope":"src/","tools":["read_file"],"max_agents":50}}}}"#;
+        let fixed = fix_common_json_issues(json);
+        let parsed: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        // sandboxes should now be an array
+        assert!(parsed["sandbox_topology"]["sandboxes"].is_array());
+        assert_eq!(parsed["sandbox_topology"]["sandboxes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_fix_common_json_issues_deps_string() {
+        // Simulate LLM returning deps as string instead of array
+        let json = r#"{"task_graph":{"tasks":[{"id":"t1","description":"task 1","deps":"t2","hint":"backend"}]},"sandbox_topology":{"sandboxes":[{"name":"backend","scope":"src/","tools":["read_file"],"max_agents":50}]}}"#;
+        let fixed = fix_common_json_issues(json);
+        let parsed: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        // deps should now be an array
+        assert!(parsed["task_graph"]["tasks"][0]["deps"].is_array());
+        assert_eq!(parsed["task_graph"]["tasks"][0]["deps"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["task_graph"]["tasks"][0]["deps"][0].as_str().unwrap(), "t2");
+    }
+
+    #[test]
+    fn test_parse_planner_response_malformed_json() {
+        // Simulate the error the user encountered - JSON with map instead of array
+        let response = r#"{"task_graph":{"tasks":{"t1":{"id":"t1","description":"Create index.html","deps":[],"hint":"main"}}},"sandbox_topology":{"sandboxes":{"main":{"name":"main","scope":".","tools":["read_file","write_file"],"max_agents":3}}}}"#;
+        let result = parse_planner_response(response);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.task_graph.tasks.len(), 1);
+        assert_eq!(output.sandbox_topology.sandboxes.len(), 1);
+    }
+
+    #[test]
+    fn test_complete_truncated_json() {
+        // Simulate truncated JSON (missing closing brackets)
+        let truncated = r#"{"task_graph":{"tasks":[{"id":"t1","description":"task 1"#;
+        let completed = complete_truncated_json(truncated);
+        // Should be valid JSON after completion
+        let parsed: serde_json::Value = serde_json::from_str(&completed).unwrap();
+        assert!(parsed.is_object());
+    }
+
+    #[test]
+    fn test_fix_common_json_issues_truncated() {
+        // Simulate the exact error from user: truncated JSON
+        let json = r#"{"task_graph":{"tasks":[{"id":"t1","description":"Create index.html with full flower shop website including embedded CSS and JavaScript, Google Fonts, all sections (nav, hero, featured flowers, about,"#;
+        let fixed = fix_common_json_issues(json);
+        // Should be parseable after fixes
+        let parsed: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        assert!(parsed.is_object());
     }
 
     #[cfg(not(target_os = "linux"))]
