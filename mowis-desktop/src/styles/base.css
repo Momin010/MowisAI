@@ -737,6 +737,41 @@ a { text-decoration: none; color: inherit; }
 .toast.error   { border-color: rgba(138,138,138,0.25); }
 @keyframes toast-in { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
 
+/* ── Confirm dialog ──────────────────────────────────── */
+.confirm-overlay {
+  position: fixed; inset: 0; z-index: 9100;
+  background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  animation: toast-in 0.12s ease;
+}
+.confirm-dialog {
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  padding: 22px 24px 18px;
+  width: 340px;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.7);
+}
+.confirm-title {
+  font-family: var(--sans); font-size: 14px; font-weight: 600;
+  color: var(--tx); margin-bottom: 8px;
+}
+.confirm-message {
+  font-family: var(--sans); font-size: 12px; color: var(--tx-3);
+  line-height: 1.5; margin-bottom: 20px;
+}
+.confirm-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+.confirm-actions .btn-primary.danger {
+  background: var(--red);
+  box-shadow: 0 2px 8px rgba(220,53,69,0.3);
+}
+.confirm-actions .btn-primary.danger:hover {
+  background: #e04455;
+}
+
 /* ── Responsive ──────────────────────────────────────── */
 @media (max-width: 900px) {
   .sidebar { width: 52px; padding-left: 8px; padding-right: 8px; }
