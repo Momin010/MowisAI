@@ -73,6 +73,8 @@ fn main() {
             agent_health,
             agent_delete_session,
             delete_session_local,
+            get_session_workspace,
+            export_workspace_to,
             agent_list_messages,
             agent_start,
         ])

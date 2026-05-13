@@ -7,7 +7,7 @@ import { loadTauri, isTauri, invoke, listen, openDialogNative } from './bridge.j
 import { delay, nowTs, fmtNumber, fmtTs, escapeHtml } from './utils.js';
 import {
   State, $, setText, toast, escHtml, setSidebarCollapsed,
-  updateHomeAgentHint, renderRepoChip, syncCustomSelect,
+  updateHomeAgentHint, renderRepoChip, syncCustomSelect, promptSaveOutput,
 } from './state.js';
 import {
   appendChatMessage, appendAgentChunk, finalizeStreaming,
@@ -578,6 +578,10 @@ async function setupListeners() {
     } catch {}
 
     updateStatusBar();
+
+    // Offer to save output to laptop
+    const fileChangeCount = State.fileChanges.reduce((n, batch) => n + (batch.changes?.length || 0), 0);
+    promptSaveOutput({ prompt: State.streamingContent || '', fileChangeCount });
   });
 }
 
