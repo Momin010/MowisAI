@@ -368,7 +368,7 @@
 
 /* ── Usage page ──────────────────────────────────────── */
 .usage-stats {
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
@@ -433,26 +433,17 @@
   font-size: 10px;
   color: var(--tx-4);
 }
-.usage-chart {
+.usage-dashboard .usage-chart {
   height: 170px;
   border: 1px solid var(--line);
   border-radius: var(--r);
   background: linear-gradient(to bottom, rgba(255,255,255,0.018), rgba(255,255,255,0.004));
   overflow: hidden;
 }
-.usage-chart svg {
+.usage-dashboard .usage-chart svg {
   width: 100%;
   height: 100%;
   display: block;
-}
-.usage-chart .axis { stroke: rgba(255,255,255,0.08); stroke-width: 1; }
-.usage-chart .trend-fill { fill: rgba(59,139,255,0.12); }
-.usage-chart .trend-line { fill: none; stroke: var(--blue); stroke-width: 2; }
-.usage-chart .trend-dot { fill: var(--green); stroke: var(--bg-1); stroke-width: 2; }
-.usage-chart .trend-label {
-  fill: var(--tx-4);
-  font-family: var(--mono);
-  font-size: 10px;
 }
 
 /* ── Settings ────────────────────────────────────────── */
