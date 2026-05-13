@@ -18,7 +18,7 @@ import {
   updateThinkingContext, appendAgentStatusBlock, updateAgentStatus,
   setChatCallbacks,
 } from './chat.js';
-import { renderSessionsPage, setupSessionsHandlers } from './sessions.js';
+import { renderSessionsPage, setupSessionsHandlers, startSessionsRefresh, stopSessionsRefresh } from './sessions.js';
 import { renderUsagePage } from './usage.js';
 import { loadSettings, saveSettings, isAgentMode, setupSettingsHandlers, PROVIDER_MODELS, populateModelDropdown, populateExecutionModelDropdown } from './settings.js';
 import { initSpeechRecognition } from './speech.js';
@@ -48,7 +48,8 @@ export function navigate(page, opts = {}) {
   if (page === 'home' && !opts.preserveHomeMode) {
     showHomeLanding({ clearBackend: !State.sessionActive });
   }
-  if (page === 'sessions') renderSessionsPage();
+  if (page === 'sessions') { renderSessionsPage(); startSessionsRefresh(); }
+  else { stopSessionsRefresh(); }
   if (page === 'usage') renderUsagePage();
   if (page === 'settings') loadSettings();
 }

@@ -909,6 +909,28 @@ pub async fn agent_delete_session(
 }
 
 #[tauri::command]
+pub async fn delete_session_local(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<(), String> {
+    // Also try to tell the agent to clean up, ignoring errors (agent may not be running)
+    if let Ok(client) = get_agent_client(&state) {
+        let _ = client.delete_session(&session_id).await;
+    }
+    // Remove from in-memory state
+    {
+        let mut history = state.session_history.lock().map_err(|_| "lock poisoned".to_string())?;
+        history.retain(|s| s.id != session_id);
+    }
+    {
+        let mut sessions = state.sessions.lock().map_err(|_| "lock poisoned".to_string())?;
+        sessions.remove(&session_id);
+    }
+    // Persist to disk
+    crate::state::save_state(&state)
+}
+
+#[tauri::command]
 pub async fn agent_list_messages(
     state: State<'_, Arc<AppState>>,
     session_id: String,

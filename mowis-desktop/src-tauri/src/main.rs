@@ -72,6 +72,7 @@ fn main() {
             agent_list_sessions,
             agent_health,
             agent_delete_session,
+            delete_session_local,
             agent_list_messages,
             agent_start,
         ])

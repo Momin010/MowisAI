@@ -47,6 +47,28 @@ export function toast(msg, type = 'info') {
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s'; setTimeout(() => t.remove(), 320); }, 3200);
 }
 
+export function showConfirm({ title, message, confirmLabel = 'Delete', cancelLabel = 'Cancel', danger = true }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    overlay.innerHTML = `
+      <div class="confirm-dialog" role="alertdialog" aria-modal="true">
+        <div class="confirm-title">${escHtml(title)}</div>
+        <div class="confirm-message">${escHtml(message)}</div>
+        <div class="confirm-actions">
+          <button class="btn-outline confirm-cancel">${escHtml(cancelLabel)}</button>
+          <button class="btn-primary confirm-ok ${danger ? 'danger' : ''}">${escHtml(confirmLabel)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const cleanup = (result) => { overlay.remove(); resolve(result); };
+    overlay.querySelector('.confirm-ok').addEventListener('click', () => cleanup(true));
+    overlay.querySelector('.confirm-cancel').addEventListener('click', () => cleanup(false));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(false); });
+    overlay.querySelector('.confirm-ok').focus();
+  });
+}
+
 export function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }

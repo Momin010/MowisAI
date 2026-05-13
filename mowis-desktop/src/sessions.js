@@ -2,7 +2,7 @@
  * MowisAI Desktop — Sessions Page
  */
 
-import { State, $, setText, escHtml, toast } from './state.js';
+import { State, $, setText, escHtml, toast, showConfirm } from './state.js';
 import { invoke } from './bridge.js';
 import { fmtNumber } from './utils.js';
 
@@ -11,6 +11,7 @@ export const SessionsState = {
   search: '',
   filter: 'all',
   sort: 'newest',
+  refreshTimer: null,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -206,7 +207,15 @@ export function renderSessionsList() {
       const id = btn.dataset.id;
       if (!id) return;
 
-      // If this is the running session, abort it first
+      const confirmed = await showConfirm({
+        title: 'Delete session?',
+        message: 'This will permanently delete the session and all its messages. This cannot be undone.',
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+      if (!confirmed) return;
+
+      // Abort if this is the running session
       if (State.agentSessionId === id) {
         try { await invoke('agent_abort', { sessionId: id }); } catch {}
         State.agentSessionId = null;
@@ -214,13 +223,15 @@ export function renderSessionsList() {
       }
 
       try {
-        // Delete from mowis-agent
-        await invoke('agent_delete_session', { sessionId: id });
-      } catch {}
+        await invoke('delete_session_local', { sessionId: id });
+      } catch (err) {
+        console.error('delete_session_local failed:', err);
+      }
 
-      // Delete from local history
       SessionsState.all = SessionsState.all.filter(s => s.id !== id);
-      renderSessionsPage();
+      renderSessionsList();
+      setText('sessions-count', `${SessionsState.all.length} session${SessionsState.all.length !== 1 ? 's' : ''}`);
+      setText('sb-badge-sessions', SessionsState.all.length ? String(SessionsState.all.length) : '');
       toast('Session deleted', 'success');
     });
   });
@@ -236,6 +247,22 @@ async function openSession(sessionId) {
     navigate('home', { preserveHomeMode: true });
   } catch (err) {
     toast('Could not open session: ' + err, 'error');
+  }
+}
+
+// ── Auto-refresh ─────────────────────────────────────────────────────────────
+
+export function startSessionsRefresh() {
+  stopSessionsRefresh();
+  SessionsState.refreshTimer = setInterval(() => {
+    if (State.page === 'sessions') renderSessionsPage();
+  }, 5000);
+}
+
+export function stopSessionsRefresh() {
+  if (SessionsState.refreshTimer) {
+    clearInterval(SessionsState.refreshTimer);
+    SessionsState.refreshTimer = null;
   }
 }
 
