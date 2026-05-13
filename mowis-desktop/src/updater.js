@@ -1,17 +1,15 @@
 /**
  * MowisAI Desktop — Auto-updater
- * Checks for updates via GitHub Releases. Shows an in-app notification bar
- * when a new version is available, downloads in the background, and prompts
- * the user to relaunch — same UX as the Claude Desktop app.
+ * Checks for updates via GitHub Releases. Shows a modal asking the user
+ * whether to install, downloads with progress, then prompts to relaunch.
  */
 
 import { isTauri } from './bridge.js';
-import { $ } from './state.js';
-
-let updateBanner = null;
+import { $, showConfirm } from './state.js';
 
 function createBanner() {
-  if (updateBanner) return updateBanner;
+  const existing = $('update-banner');
+  if (existing) return existing;
   const el = document.createElement('div');
   el.id = 'update-banner';
   el.className = 'update-banner hidden';
@@ -25,7 +23,7 @@ function createBanner() {
           <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
         </svg>
       </span>
-      <span class="update-banner-text" id="update-banner-text">A new update is available.</span>
+      <span class="update-banner-text" id="update-banner-text"></span>
       <div class="update-banner-actions">
         <button class="update-banner-btn primary" id="btn-update-action" style="display:none">Relaunch</button>
         <button class="update-banner-btn dismiss" id="btn-update-dismiss">Dismiss</button>
@@ -35,16 +33,11 @@ function createBanner() {
       <div class="update-banner-progress-fill" id="update-progress-fill"></div>
     </div>`;
   document.body.prepend(el);
-  updateBanner = el;
-
-  $('btn-update-dismiss')?.addEventListener('click', () => {
-    el.classList.add('hidden');
-  });
-
+  $('btn-update-dismiss')?.addEventListener('click', () => el.classList.add('hidden'));
   return el;
 }
 
-function showBanner(text, showAction) {
+function showBanner(text, showAction = false) {
   const banner = createBanner();
   const textEl = $('update-banner-text');
   const actionBtn = $('btn-update-action');
@@ -57,12 +50,11 @@ function setProgress(pct) {
   const bar = $('update-progress');
   const fill = $('update-progress-fill');
   if (bar) bar.classList.remove('hidden');
-  if (fill) fill.style.width = Math.round(pct) + '%';
+  if (fill) fill.style.width = `${Math.round(pct)}%`;
 }
 
 function hideProgress() {
-  const bar = $('update-progress');
-  if (bar) bar.classList.add('hidden');
+  $('update-progress')?.classList.add('hidden');
 }
 
 /**
@@ -72,14 +64,14 @@ function hideProgress() {
 export async function initUpdater() {
   if (!isTauri()) return;
 
-  // Delay the check so boot isn't blocked
+  // Delay so boot is not blocked
   setTimeout(async () => {
     try {
       await checkAndUpdate();
     } catch (e) {
       console.warn('[updater] Update check failed:', e);
     }
-  }, 5000);
+  }, 8000);
 }
 
 async function checkAndUpdate() {
@@ -95,7 +87,13 @@ async function checkAndUpdate() {
   }
 
   console.log('[updater] Checking for updates...');
-  const update = await check();
+  let update;
+  try {
+    update = await check();
+  } catch (e) {
+    console.warn('[updater] check() failed:', e);
+    return;
+  }
 
   if (!update) {
     console.log('[updater] App is up to date.');
@@ -103,45 +101,54 @@ async function checkAndUpdate() {
   }
 
   console.log('[updater] Update available:', update.version);
-  showBanner(`MowisAI v${update.version} is available. Downloading...`, false);
+
+  // Ask the user first — prominent modal, not a subtle banner
+  const confirmed = await showConfirm({
+    title: `MowisAI ${update.version} is available`,
+    message: 'A new version is ready to install. It will download in the background and apply on the next relaunch. Install now?',
+    confirmLabel: 'Install Update',
+    cancelLabel: 'Later',
+    danger: false,
+  });
+
+  if (!confirmed) {
+    console.log('[updater] User deferred update.');
+    return;
+  }
+
+  showBanner(`Downloading MowisAI v${update.version}…`);
 
   let totalBytes = 0;
   let downloadedBytes = 0;
 
   try {
     await update.downloadAndInstall((event) => {
-      switch (event.event) {
-        case 'Started':
-          totalBytes = event.data?.contentLength || 0;
-          downloadedBytes = 0;
-          if (totalBytes > 0) setProgress(0);
-          break;
-        case 'Progress':
-          downloadedBytes += event.data?.chunkLength || 0;
-          if (totalBytes > 0) {
-            setProgress((downloadedBytes / totalBytes) * 100);
-          }
-          break;
-        case 'Finished':
-          hideProgress();
-          break;
+      if (event.event === 'Started') {
+        totalBytes = event.data?.contentLength || 0;
+        downloadedBytes = 0;
+        if (totalBytes > 0) setProgress(0);
+      } else if (event.event === 'Progress') {
+        downloadedBytes += event.data?.chunkLength || 0;
+        if (totalBytes > 0) setProgress((downloadedBytes / totalBytes) * 100);
+      } else if (event.event === 'Finished') {
+        hideProgress();
       }
     });
   } catch (e) {
     console.error('[updater] Download failed:', e);
     hideProgress();
-    showBanner('Update download failed. Will retry next launch.', false);
+    showBanner('Update download failed. It will retry on the next launch.');
     return;
   }
 
-  // Update downloaded and installed — prompt user to relaunch
-  const actionBtn = $('btn-update-action');
-  showBanner(`MowisAI v${update.version} has been downloaded. Relaunch to apply.`, true);
+  // Downloaded — prompt to relaunch
+  showBanner(`MowisAI v${update.version} installed. Relaunch to apply.`, true);
 
+  const actionBtn = $('btn-update-action');
   if (actionBtn) {
     actionBtn.addEventListener('click', async () => {
       actionBtn.disabled = true;
-      actionBtn.textContent = 'Relaunching...';
+      actionBtn.textContent = 'Relaunching…';
       try {
         await relaunch();
       } catch (e) {
