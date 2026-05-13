@@ -25,6 +25,8 @@ pub enum OrchestratorEvent {
     Done,
     /// Routing gate decision: which complexity mode was chosen and which models are active.
     RoutingDecision { mode: String, planning_model: String, execution_model: String },
+    /// Orchestration finished; files are ready to be saved from the workspace.
+    WorkspaceReady { project_path: String, changed_files: Vec<String> },
 }
 
 use super::agent_execution::AgentExecutor;
@@ -786,6 +788,11 @@ impl NewOrchestrator {
 
         // Signal TUI that orchestration is complete
         if let Some(ref tx) = event_tx_clone {
+            let changed = collect_changed_files(&self.config.project_root);
+            let _ = tx.send(OrchestratorEvent::WorkspaceReady {
+                project_path: self.config.project_root.to_string_lossy().into_owned(),
+                changed_files: changed,
+            });
             let _ = tx.send(OrchestratorEvent::Done);
         }
 
@@ -921,6 +928,10 @@ impl NewOrchestrator {
                 send_ev(OrchestratorEvent::LayerProgress { layer: 5, message: "Merge (single agent — pass-through)".into() });
                 send_ev(OrchestratorEvent::LayerProgress { layer: 6, message: "Verification skipped (simple mode).".into() });
                 send_ev(OrchestratorEvent::LayerProgress { layer: 7, message: "Output ready.".into() });
+                send_ev(OrchestratorEvent::WorkspaceReady {
+                    project_path: self.config.project_root.to_string_lossy().into_owned(),
+                    changed_files: collect_changed_files(&self.config.project_root),
+                });
                 send_ev(OrchestratorEvent::Done);
 
                 let sandbox_result = SandboxResult {
@@ -1418,9 +1429,14 @@ impl NewOrchestrator {
         let collected_errors = execution_errors.read().await.clone();
         let agent_count = planner_output.task_graph.tasks.len().min(max_concurrent);
 
-        log::info!("âœ“ Standard mode complete in {}s", duration);
+        log::info!("\u{2713} Standard mode complete in {}s", duration);
 
         if let Some(ref tx) = self.config.event_tx {
+            let changed = collect_changed_files(&self.config.project_root);
+            let _ = tx.send(OrchestratorEvent::WorkspaceReady {
+                project_path: self.config.project_root.to_string_lossy().into_owned(),
+                changed_files: changed,
+            });
             let _ = tx.send(OrchestratorEvent::Done);
         }
 
@@ -1440,6 +1456,23 @@ impl NewOrchestrator {
             scheduler_stats,
             execution_errors: collected_errors,
         })
+    }
+}
+
+fn collect_changed_files(project_root: &std::path::Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(project_root)
+        .output();
+    match output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.len() > 3 { Some(line[3..].to_string()) } else { None }
+            })
+            .collect(),
+        Err(_) => vec![],
     }
 }
 

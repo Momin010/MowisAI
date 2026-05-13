@@ -1327,6 +1327,472 @@ fn extract_gemini_text(resp_json: &Value) -> Result<String> {
         .map(|s| s.to_string())
 }
 
+// ── Streaming Agent Round ─────────────────────────────────────────────────────
+
+/// Execute one round of the agent tool-calling loop with streaming text output.
+///
+/// Identical to `call_agent_round` except it calls `on_chunk` for each text delta
+/// as the model streams it, enabling real-time display in the desktop UI.
+/// Tool calls (which have no streaming text) are collected and returned normally.
+pub async fn call_agent_round_streaming<F>(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    conversation: &mut AgentConversation,
+    allowed_tools: &[String],
+    temperature: f64,
+    on_chunk: F,
+) -> Result<AgentRoundResult>
+where
+    F: Fn(String) + Send + 'static,
+{
+    let boxed: Box<dyn Fn(String) + Send> = Box::new(on_chunk);
+    match llm_config.provider {
+        AiProvider::VertexAi | AiProvider::Gemini => {
+            call_agent_round_gemini_streaming(
+                llm_config, system_prompt, conversation, allowed_tools, temperature, boxed,
+            ).await
+        }
+        AiProvider::OpenAi | AiProvider::Grok | AiProvider::Groq | AiProvider::Mimo => {
+            call_agent_round_openai_streaming(
+                llm_config, system_prompt, conversation, allowed_tools, temperature, boxed,
+            ).await
+        }
+        AiProvider::Anthropic => {
+            call_agent_round_anthropic_streaming(
+                llm_config, system_prompt, conversation, allowed_tools, temperature, boxed,
+            ).await
+        }
+    }
+}
+
+// ── SSE helper ────────────────────────────────────────────────────────────────
+
+/// Extract the next complete line from buf, consuming it. Returns None when no
+/// complete line (ending with \n) is present yet.
+fn pop_line(buf: &mut String) -> Option<String> {
+    buf.find('\n').map(|pos| {
+        let line = buf[..pos].trim_end_matches('\r').to_string();
+        *buf = buf[pos + 1..].to_string();
+        line
+    })
+}
+
+// ── Gemini/Vertex streaming ───────────────────────────────────────────────────
+
+async fn call_agent_round_gemini_streaming(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    conversation: &mut AgentConversation,
+    allowed_tools: &[String],
+    temperature: f64,
+    on_chunk: Box<dyn Fn(String) + Send>,
+) -> Result<AgentRoundResult> {
+    let (base_url, auth_header) = gemini_url_and_auth(llm_config)?;
+    // Switch from generateContent to streamGenerateContent with SSE output
+    let url = base_url
+        .replace(":generateContent", ":streamGenerateContent")
+        + "?alt=sse";
+
+    let contents = conversation_to_gemini(conversation);
+    let tool_decls = build_gemini_tool_declarations(allowed_tools);
+
+    let mut gen_config = json!({
+        "temperature": temperature,
+        "maxOutputTokens": super::VERTEX_MAX_OUTPUT_TOKENS,
+    });
+    if super::VERTEX_THINKING_BUDGET_TOKENS > 0 {
+        gen_config.as_object_mut().unwrap().insert(
+            "thinkingConfig".into(),
+            json!({ "thinkingBudget": super::VERTEX_THINKING_BUDGET_TOKENS }),
+        );
+    }
+
+    let request_body = json!({
+        "contents": contents,
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "tools": [{"functionDeclarations": tool_decls}],
+        "generationConfig": gen_config
+    });
+
+    let client = &*HTTP_CLIENT;
+    let mut req = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS));
+
+    if let Some(header) = auth_header {
+        if header.starts_with("goog:") {
+            req = req.header("x-goog-api-key", &header[5..]);
+        } else {
+            req = req.header("Authorization", header);
+        }
+    }
+
+    let mut response = req
+        .send()
+        .await
+        .context("Gemini streaming request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Gemini API error ({}): {}", status, body));
+    }
+
+    let mut buf = String::new();
+    let mut full_text = String::new();
+    let mut latest_tool_calls: Vec<ToolCall> = Vec::new();
+
+    while let Some(chunk) = response.chunk().await.context("Gemini streaming read failed")? {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(line) = pop_line(&mut buf) {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(val) = serde_json::from_str::<Value>(data) {
+                    if let Some(parts) = val
+                        .pointer("/candidates/0/content/parts")
+                        .and_then(|p| p.as_array())
+                    {
+                        let mut round_tools: Vec<ToolCall> = Vec::new();
+                        for part in parts {
+                            if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                if !t.is_empty() {
+                                    on_chunk(t.to_string());
+                                    full_text.push_str(t);
+                                }
+                            }
+                            if let Some(fc) = part.get("functionCall") {
+                                let name = fc
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let args = fc.get("args").cloned().unwrap_or(json!({}));
+                                let seq = TOOL_CALL_COUNTER
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let id = format!("call_{}_{}", name, seq);
+                                round_tools.push(ToolCall { id, name, args });
+                            }
+                        }
+                        if !round_tools.is_empty() {
+                            latest_tool_calls = round_tools;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let text = if full_text.is_empty() { None } else { Some(full_text) };
+    if latest_tool_calls.is_empty() {
+        if let Some(ref t) = text {
+            conversation
+                .messages
+                .push(ConvMessage::AssistantText(t.clone()));
+        }
+    } else {
+        conversation
+            .messages
+            .push(ConvMessage::AssistantToolCalls(latest_tool_calls.clone()));
+    }
+    Ok(AgentRoundResult { text, tool_calls: latest_tool_calls })
+}
+
+// ── OpenAI-compatible streaming ───────────────────────────────────────────────
+
+async fn call_agent_round_openai_streaming(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    conversation: &mut AgentConversation,
+    allowed_tools: &[String],
+    temperature: f64,
+    on_chunk: Box<dyn Fn(String) + Send>,
+) -> Result<AgentRoundResult> {
+    let url = openai_compat_url(llm_config);
+    let api_key = llm_config
+        .api_key
+        .as_deref()
+        .ok_or_else(|| anyhow!("No API key for {}", llm_config.provider))?;
+
+    let messages = conversation_to_openai(conversation, system_prompt);
+    let tools = build_openai_tool_declarations(allowed_tools);
+
+    let body = json!({
+        "model": llm_config.model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
+        "temperature": temperature,
+        "max_tokens": 16384,
+        "stream": true
+    });
+
+    let client = &*HTTP_CLIENT;
+    let mut response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
+        .send()
+        .await
+        .context("OpenAI-compat streaming request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "{} API error ({}): {}",
+            llm_config.provider,
+            status,
+            text
+        ));
+    }
+
+    let mut buf = String::new();
+    let mut full_text = String::new();
+    // index → (id, name, accumulated_args_json)
+    let mut tool_map: std::collections::HashMap<usize, (String, String, String)> =
+        std::collections::HashMap::new();
+
+    'outer: while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("OpenAI streaming read failed")?
+    {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(line) = pop_line(&mut buf) {
+            let line = line.trim().to_string();
+            if line == "data: [DONE]" {
+                break 'outer;
+            }
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(val) = serde_json::from_str::<Value>(data) {
+                    if let Some(delta) = val.pointer("/choices/0/delta") {
+                        if let Some(content) =
+                            delta.get("content").and_then(|c| c.as_str())
+                        {
+                            if !content.is_empty() {
+                                on_chunk(content.to_string());
+                                full_text.push_str(content);
+                            }
+                        }
+                        if let Some(tc_arr) =
+                            delta.get("tool_calls").and_then(|tc| tc.as_array())
+                        {
+                            for tc_delta in tc_arr {
+                                let index = tc_delta
+                                    .get("index")
+                                    .and_then(|i| i.as_u64())
+                                    .unwrap_or(0) as usize;
+                                let entry = tool_map
+                                    .entry(index)
+                                    .or_insert_with(|| (String::new(), String::new(), String::new()));
+                                if let Some(id) =
+                                    tc_delta.get("id").and_then(|i| i.as_str())
+                                {
+                                    entry.0 = id.to_string();
+                                }
+                                if let Some(func) = tc_delta.get("function") {
+                                    if let Some(name) =
+                                        func.get("name").and_then(|n| n.as_str())
+                                    {
+                                        entry.1 = name.to_string();
+                                    }
+                                    if let Some(args) =
+                                        func.get("arguments").and_then(|a| a.as_str())
+                                    {
+                                        entry.2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut tool_call_list: Vec<(usize, ToolCall)> = tool_map
+        .into_iter()
+        .map(|(idx, (id, name, args_str))| {
+            let args = serde_json::from_str::<Value>(&args_str).unwrap_or(json!({}));
+            (idx, ToolCall { id, name, args })
+        })
+        .collect();
+    tool_call_list.sort_by_key(|(idx, _)| *idx);
+    let tool_calls: Vec<ToolCall> = tool_call_list.into_iter().map(|(_, tc)| tc).collect();
+
+    let text = if full_text.is_empty() { None } else { Some(full_text) };
+
+    if tool_calls.is_empty() {
+        if let Some(ref t) = text {
+            conversation
+                .messages
+                .push(ConvMessage::AssistantText(t.clone()));
+        }
+    } else {
+        conversation
+            .messages
+            .push(ConvMessage::AssistantToolCalls(tool_calls.clone()));
+    }
+    Ok(AgentRoundResult { text, tool_calls })
+}
+
+// ── Anthropic streaming ───────────────────────────────────────────────────────
+
+async fn call_agent_round_anthropic_streaming(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    conversation: &mut AgentConversation,
+    allowed_tools: &[String],
+    temperature: f64,
+    on_chunk: Box<dyn Fn(String) + Send>,
+) -> Result<AgentRoundResult> {
+    let api_key = llm_config
+        .api_key
+        .as_deref()
+        .ok_or_else(|| anyhow!("No Anthropic API key configured"))?;
+
+    let messages = conversation_to_anthropic(conversation);
+    let tools = build_anthropic_tool_declarations(allowed_tools);
+
+    let body = json!({
+        "model": llm_config.model,
+        "system": system_prompt,
+        "messages": messages,
+        "tools": tools,
+        "max_tokens": 8192,
+        "temperature": temperature,
+        "stream": true
+    });
+
+    let client = &*HTTP_CLIENT;
+    let mut response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(super::HTTP_TIMEOUT_SECS))
+        .send()
+        .await
+        .context("Anthropic streaming request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Anthropic API error ({}): {}", status, text));
+    }
+
+    let mut buf = String::new();
+    let mut full_text = String::new();
+    // block_index → (id, name, accumulated_partial_json)
+    let mut tool_blocks: std::collections::HashMap<usize, (String, String, String)> =
+        std::collections::HashMap::new();
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Anthropic streaming read failed")?
+    {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(line) = pop_line(&mut buf) {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(val) = serde_json::from_str::<Value>(data) {
+                    match val.get("type").and_then(|t| t.as_str()) {
+                        Some("content_block_start") => {
+                            let idx = val
+                                .get("index")
+                                .and_then(|i| i.as_u64())
+                                .unwrap_or(0) as usize;
+                            if let Some(block) = val.get("content_block") {
+                                if block
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    == Some("tool_use")
+                                {
+                                    let id = block
+                                        .get("id")
+                                        .and_then(|i| i.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let name = block
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    tool_blocks.insert(idx, (id, name, String::new()));
+                                }
+                            }
+                        }
+                        Some("content_block_delta") => {
+                            let idx = val
+                                .get("index")
+                                .and_then(|i| i.as_u64())
+                                .unwrap_or(0) as usize;
+                            if let Some(delta) = val.get("delta") {
+                                match delta
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                {
+                                    Some("text_delta") => {
+                                        if let Some(text) =
+                                            delta.get("text").and_then(|t| t.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                on_chunk(text.to_string());
+                                                full_text.push_str(text);
+                                            }
+                                        }
+                                    }
+                                    Some("input_json_delta") => {
+                                        if let Some(partial) = delta
+                                            .get("partial_json")
+                                            .and_then(|p| p.as_str())
+                                        {
+                                            if let Some(entry) = tool_blocks.get_mut(&idx) {
+                                                entry.2.push_str(partial);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let mut tool_call_list: Vec<(usize, ToolCall)> = tool_blocks
+        .into_iter()
+        .map(|(idx, (id, name, args_str))| {
+            let args = serde_json::from_str::<Value>(&args_str).unwrap_or(json!({}));
+            (idx, ToolCall { id, name, args })
+        })
+        .collect();
+    tool_call_list.sort_by_key(|(idx, _)| *idx);
+    let tool_calls: Vec<ToolCall> = tool_call_list.into_iter().map(|(_, tc)| tc).collect();
+
+    let text = if full_text.is_empty() { None } else { Some(full_text) };
+
+    if tool_calls.is_empty() {
+        if let Some(ref t) = text {
+            conversation
+                .messages
+                .push(ConvMessage::AssistantText(t.clone()));
+        }
+    } else {
+        conversation
+            .messages
+            .push(ConvMessage::AssistantToolCalls(tool_calls.clone()));
+    }
+    Ok(AgentRoundResult { text, tool_calls })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

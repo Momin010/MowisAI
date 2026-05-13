@@ -648,6 +648,7 @@ mod tests {
             staging_dir: None,
             event_tx: None,
             mode_override: None,
+            execution_llm_config: None,
         };
 
         let orchestrator = NewOrchestrator::new(config);

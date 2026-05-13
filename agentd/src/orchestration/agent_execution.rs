@@ -269,12 +269,25 @@ impl AgentExecutor {
                 });
             }
 
-            let round_result = super::provider_client::call_agent_round(
+            // Clone event sender so the streaming chunk callback can emit LlmChunk events
+            let chunk_tx: Option<std::sync::mpsc::Sender<OrchestratorEvent>> =
+                event_tx.map(|tx| tx.clone());
+            let chunk_agent_id = agent_id_short.clone();
+
+            let round_result = super::provider_client::call_agent_round_streaming(
                 &self.llm_config,
                 &enhanced_system_prompt,
                 &mut conversation,
                 tools,
                 0.7,
+                move |chunk| {
+                    if let Some(ref tx) = chunk_tx {
+                        let _ = tx.send(OrchestratorEvent::LlmChunk {
+                            agent_id: chunk_agent_id.clone(),
+                            chunk,
+                        });
+                    }
+                },
             )
             .await
             .context("LLM call failed in agent tool loop")?;

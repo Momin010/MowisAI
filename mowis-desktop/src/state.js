@@ -32,6 +32,7 @@ export const State = {
     actions: new Set(['created', 'modified', 'deleted', 'moved', 'read']),
     expanded: new Set(),
   },
+  workspaceReady: null,  // { project_path, changed_files } when workspace is ready to export
 };
 
 export const $ = (id) => document.getElementById(id);

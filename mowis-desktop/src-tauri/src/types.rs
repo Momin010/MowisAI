@@ -345,4 +345,9 @@ pub enum BridgeEvent {
         planning_model: String,
         execution_model: String,
     },
+    /// Orchestration finished; workspace files are ready to export.
+    WorkspaceReady {
+        project_path: String,
+        changed_files: Vec<String>,
+    },
 }

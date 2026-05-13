@@ -566,6 +566,14 @@ async function setupListeners() {
       : `Model: ${data.planning_model || '—'}`;
   });
 
+  await listen('workspace_ready', (event) => {
+    const data = event.payload || event;
+    State.workspaceReady = {
+      project_path: data.project_path || '',
+      changed_files: data.changed_files || [],
+    };
+  });
+
   await listen('session_complete', async () => {
     finalizeStreaming();
     removeThinkingIndicator();

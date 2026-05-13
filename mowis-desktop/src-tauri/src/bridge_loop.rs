@@ -375,6 +375,15 @@ pub async fn handle_bridge_event(event: BridgeEvent, state: &Arc<AppState>, app:
             }));
         }
 
+        BridgeEvent::WorkspaceReady { project_path, changed_files } => {
+            *state.workspace_path.lock().unwrap() = Some(project_path.clone());
+            *state.workspace_files.lock().unwrap() = changed_files.clone();
+            let _ = app.emit("workspace_ready", serde_json::json!({
+                "project_path": project_path,
+                "changed_files": changed_files,
+            }));
+        }
+
         BridgeEvent::SimulationTick { tasks_done, active_agents, tokens_delta } => {
             *state.tokens_total.lock().unwrap() += tokens_delta;
             *state.tool_calls_total.lock().unwrap() += 1;
@@ -481,6 +490,14 @@ pub fn socket_value_to_bridge_event(v: &serde_json::Value) -> Option<BridgeEvent
             let planning_model = v["planning_model"].as_str().unwrap_or("").to_owned();
             let execution_model = v["execution_model"].as_str().unwrap_or("").to_owned();
             Some(BridgeEvent::RoutingDecision { mode, planning_model, execution_model })
+        }
+        "workspace_ready" => {
+            let project_path = v["project_path"].as_str().unwrap_or("").to_owned();
+            let changed_files = v["changed_files"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(ToOwned::to_owned)).collect())
+                .unwrap_or_default();
+            Some(BridgeEvent::WorkspaceReady { project_path, changed_files })
         }
         _ => None,
     }

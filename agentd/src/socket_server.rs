@@ -1435,6 +1435,13 @@ fn orchestrator_event_to_json(event: &OrchestratorEvent) -> Option<serde_json::V
             }))
         }
         OrchestratorEvent::Done => None, // Handled separately
+        OrchestratorEvent::WorkspaceReady { project_path, changed_files } => {
+            Some(json!({
+                "type": "workspace_ready",
+                "project_path": project_path,
+                "changed_files": changed_files
+            }))
+        }
         OrchestratorEvent::RoutingDecision { mode, planning_model, execution_model } => {
             Some(json!({
                 "type": "routing_decision",

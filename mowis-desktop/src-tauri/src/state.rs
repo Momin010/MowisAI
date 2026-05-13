@@ -35,6 +35,11 @@ pub struct AppState {
 
     // mowis-agent subprocess manager (None until started).
     pub agent_manager: Mutex<Option<AgentManager>>,
+
+    // Last workspace path emitted by WorkspaceReady event.
+    pub workspace_path: Mutex<Option<String>>,
+    // Changed file paths relative to workspace_path from last WorkspaceReady.
+    pub workspace_files: Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -89,6 +94,8 @@ impl AppState {
             cmd_tx: Mutex::new(None),
             active_sandbox: Mutex::new(None),
             agent_manager: Mutex::new(None),
+            workspace_path: Mutex::new(None),
+            workspace_files: Mutex::new(Vec::new()),
         }
     }
 }
