@@ -1,7 +1,7 @@
 {
   "$schema": "https://tauri.app",
   "productName": "MowisAI Desktop",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "identifier": "ai.mowis.desktop",
   "build": {
     "frontendDist": "../dist",
