@@ -47,6 +47,49 @@ export function toast(msg, type = 'info') {
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s'; setTimeout(() => t.remove(), 320); }, 3200);
 }
 
+export async function promptSaveOutput({ prompt, fileChangeCount }) {
+  // Check if there's a workspace to save
+  let hasWorkspace = false;
+  try {
+    const { invoke: inv } = await import('./bridge.js');
+    const ws = await inv('get_session_workspace');
+    hasWorkspace = !!ws;
+  } catch {}
+
+  if (!hasWorkspace) return;
+
+  const summary = fileChangeCount > 0
+    ? `${fileChangeCount} file change${fileChangeCount !== 1 ? 's' : ''} ready to save.`
+    : 'Your session has completed.';
+
+  const confirmed = await showConfirm({
+    title: 'Session complete — save output?',
+    message: `${summary}\n\nWould you like to save the output files to your laptop?`,
+    confirmLabel: 'Save to Laptop',
+    cancelLabel: 'Not Now',
+    danger: false,
+  });
+
+  if (!confirmed) return;
+
+  // Open folder picker
+  let destPath;
+  try {
+    const { openDialogNative } = await import('./bridge.js');
+    destPath = await openDialogNative({ title: 'Choose destination folder', directory: true, multiple: false });
+  } catch {}
+
+  if (!destPath) return;
+
+  try {
+    const { invoke: inv } = await import('./bridge.js');
+    await inv('export_workspace_to', { destination: Array.isArray(destPath) ? destPath[0] : destPath });
+    toast('Output saved to ' + (Array.isArray(destPath) ? destPath[0] : destPath), 'success');
+  } catch (e) {
+    toast('Save failed: ' + e, 'error');
+  }
+}
+
 export function showConfirm({ title, message, confirmLabel = 'Delete', cancelLabel = 'Cancel', danger = true }) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');

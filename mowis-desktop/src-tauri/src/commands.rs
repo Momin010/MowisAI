@@ -909,6 +909,37 @@ pub async fn agent_delete_session(
 }
 
 #[tauri::command]
+pub async fn get_session_workspace(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    let sandbox = state.active_sandbox.lock().map_err(|_| "lock poisoned".to_string())?;
+    Ok(sandbox.as_ref().map(|s| s.upper_dir.clone()))
+}
+
+#[tauri::command]
+pub async fn export_workspace_to(
+    state: State<'_, Arc<AppState>>,
+    destination: String,
+) -> Result<u64, String> {
+    let upper_dir = {
+        let sandbox = state.active_sandbox.lock().map_err(|_| "lock poisoned".to_string())?;
+        match sandbox.as_ref() {
+            Some(s) => s.upper_dir.clone(),
+            None => return Err("No active workspace to export".to_string()),
+        }
+    };
+    let src = Path::new(&upper_dir);
+    let dst = Path::new(&destination);
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    sandbox::copy_dir_recursive(src, dst).map_err(|e| e.to_string())?;
+    Ok(sandbox::upper_dir_size(&crate::sandbox::SandboxInfo {
+        id: String::new(),
+        lower_dir: String::new(),
+        upper_dir: upper_dir,
+    }))
+}
+
+#[tauri::command]
 pub async fn delete_session_local(
     state: State<'_, Arc<AppState>>,
     session_id: String,

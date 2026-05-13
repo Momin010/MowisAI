@@ -84,7 +84,7 @@ const SKIP_DIRS: &[&str] = &[
     "venv",
 ];
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     if !src.exists() {
         return Ok(());
     }

@@ -2,7 +2,7 @@
  * MowisAI Desktop — Chat Rendering & Agent Polling
  */
 
-import { State, $, setText, escHtml, mdLite } from './state.js';
+import { State, $, setText, escHtml, mdLite, promptSaveOutput } from './state.js';
 import { invoke } from './bridge.js';
 import { nowTs } from './utils.js';
 
@@ -441,6 +441,8 @@ export function startAgentPolling(sessionId) {
             finalizeStreaming();
             if (_setSessionActive) _setSessionActive(false, true);
             stopAgentPolling();
+            const fileChangeCount = State.fileChanges.reduce((n, batch) => n + (batch.changes?.length || 0), 0);
+            promptSaveOutput({ prompt: '', fileChangeCount });
             return;
           }
         }
