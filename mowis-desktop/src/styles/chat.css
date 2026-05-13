@@ -120,6 +120,7 @@
 
 /* AI Agents Side Panel */
 .agents-panel {
+  display: none;
   position: absolute;
   top: 0;
   left: 0;
@@ -136,6 +137,31 @@
   flex-direction: column;
   box-shadow: 20px 0 50px rgba(0,0,0,0.5);
 }
+
+.orchestration-row { margin-top: 10px; }
+.orchestration-card {
+  width: min(760px, 100%);
+  border: 1px solid rgba(146,146,146,0.24);
+  border-radius: 12px;
+  padding: 14px;
+  background: rgba(18,18,18,0.55);
+}
+.orchestration-head { display: flex; justify-content: space-between; color: #c9c9c9; margin-bottom: 10px; }
+.orchestration-title { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: #e8e8e8; }
+.orchestration-subtitle { font-size: 11px; color: #909090; }
+.orchestration-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(120px,1fr)); gap: 8px; }
+.agent-chip {
+  background: #222; border: 1px solid #3b3b3b; border-radius: 8px; color: #d5d5d5;
+  display:flex; align-items:center; gap:8px; padding:8px; font-size:11px;
+}
+.agent-chip .dot { width: 8px; height: 8px; border-radius: 50%; background: #727272; }
+.agent-chip.running .dot { background: #2ecc71; }
+.agent-chip.error .dot { background: #ff4d4f; }
+.agent-chip.done .dot { background: #9aa0a6; }
+.agent-log { display:none; grid-column: 1 / -1; background:#111; border:1px solid #2e2e2e; border-radius:8px; padding:8px; font-family:var(--mono); font-size:11px; color:#a9a9a9; max-height:160px; overflow:auto; }
+.agent-log.open { display:block; }
+.orchestration-timeline { margin-top: 10px; border-top: 1px solid #2b2b2b; padding-top: 8px; }
+.orchestration-line { display:flex; gap:10px; font-size:11px; color:#9a9a9a; }
 .agents-panel.open {
   transform: translateX(0);
 }

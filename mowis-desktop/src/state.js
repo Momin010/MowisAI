@@ -32,6 +32,12 @@ export const State = {
     actions: new Set(['created', 'modified', 'deleted', 'moved', 'read']),
     expanded: new Set(),
   },
+  orchestration: {
+    started: false,
+    agents: {},
+    timeline: [],
+    openAgents: new Set(),
+  },
 };
 
 export const $ = (id) => document.getElementById(id);
@@ -48,7 +54,12 @@ export function toast(msg, type = 'info') {
 }
 
 export function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 export function mdLite(text) {
