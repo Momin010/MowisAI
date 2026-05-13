@@ -19,12 +19,29 @@
 .routing-badge.mode-agent { border-color: rgba(175,82,222,0.25); color: #af52de; background: rgba(175,82,222,0.07); }
 .routing-badge.mode-auto { border-color: rgba(255,255,255,0.1); color: var(--tx-3); background: rgba(255,255,255,0.04); }
 
-/* ── Thinking indicator ─────────────────────────────── */
+/* ── Agent running status (session bar) ─────────────── */
+.agent-running-status {
+  display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0;
+}
+.agent-running-status.hidden { display: none; }
+.agent-running-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--blue);
+  animation: agent-pulse 1.4s ease-in-out infinite;
+}
+@keyframes agent-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+.agent-running-label {
+  font-family: var(--mono); font-size: 10px;
+  color: var(--tx-4); letter-spacing: 0.04em;
+}
+
+/* ── Thinking indicator (kept for compat but hidden) ─ */
 .msg-bubble.thinking {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
+  display: none;
 }
 .thinking-label {
   font-family: var(--mono);
@@ -932,23 +949,7 @@
 }
 .attach-chip .attach-remove:hover { color: var(--red); }
 
-/* ── Thinking Indicator ─────────────────────────────────── */
-.msg-bubble.thinking {
-  opacity: 0.7;
-  padding: 14px 24px;
-}
-.thinking-dots span {
-  animation: blink 1.4s infinite both;
-  font-size: 18px;
-  line-height: 1;
-  letter-spacing: 3px;
-}
-.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
-.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
-@keyframes blink {
-  0%, 80%, 100% { opacity: 0; }
-  40% { opacity: 1; }
-}
+/* thinking indicator removed — replaced by agent-running-status in session bar */
 
 /* ── Tool Call Cards ────────────────────────────────────── */
 .msg-row.tool-call {
