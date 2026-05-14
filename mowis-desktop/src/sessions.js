@@ -306,4 +306,3 @@ export function stopSessionsRefresh() {
     _sessionsRefreshInterval = null;
   }
 }
-}
