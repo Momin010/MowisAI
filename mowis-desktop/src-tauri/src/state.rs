@@ -1,4 +1,3 @@
-use crate::agent_manager::AgentManager;
 use crate::backend::BackendBridge;
 use crate::sandbox::SandboxInfo;
 use crate::types::*;
@@ -32,9 +31,6 @@ pub struct AppState {
 
     // Active soft sandbox for the current session (None when sandbox is off or no session).
     pub active_sandbox: Mutex<Option<SandboxInfo>>,
-
-    // mowis-agent subprocess manager (None until started).
-    pub agent_manager: Mutex<Option<AgentManager>>,
 
     // Last workspace path emitted by WorkspaceReady event.
     pub workspace_path: Mutex<Option<String>>,
@@ -98,7 +94,6 @@ impl AppState {
             storage_path,
             cmd_tx: Mutex::new(None),
             active_sandbox: Mutex::new(None),
-            agent_manager: Mutex::new(None),
             workspace_path: Mutex::new(None),
             workspace_files: Mutex::new(Vec::new()),
             active_sandbox_ids: Mutex::new(Vec::new()),

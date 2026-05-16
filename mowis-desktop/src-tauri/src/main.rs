@@ -3,8 +3,6 @@
 mod platform;
 mod backend;
 mod sandbox;
-mod agent_client;
-mod agent_manager;
 mod types;
 mod state;
 mod bridge_loop;
@@ -64,20 +62,9 @@ fn main() {
             validate_developer_config,
             start_developer_bootstrap,
             clear_developer_config,
-            // New agent commands
-            agent_create_session,
-            agent_send_message,
-            agent_abort,
-            agent_approve_permission,
-            agent_deny_permission,
-            agent_list_sessions,
-            agent_health,
-            agent_delete_session,
             delete_session_local,
             get_session_workspace,
             export_workspace_to,
-            agent_list_messages,
-            agent_start,
             open_url,
             get_session_state,
         ])

@@ -263,7 +263,7 @@ pub enum BridgeCommand {
         #[allow(dead_code)]
         conversation_history: Option<Vec<serde_json::Value>>,
     },
-    /// Zero-Protection mode — deprecated, use agent_send_message instead.
+    /// Zero-Protection mode — deprecated.
     StartZeroMode {
         session_id: String,
         prompt: String,
@@ -271,7 +271,7 @@ pub enum BridgeCommand {
         workspace: serde_json::Value,
         images: Vec<ImageAttachment>,
     },
-    /// Continue an existing zero mode session — deprecated, use agent_send_message instead.
+    /// Continue an existing zero mode session — deprecated.
     ContinueZeroMode {
         session_id: String,
         message: String,

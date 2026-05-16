@@ -13,14 +13,13 @@ import {
   appendChatMessage, appendAgentChunk, finalizeStreaming,
   appendFileChanges, appendToolCall, appendToolResult,
   scrollToBottom, renderDiffPanel,
-  startAgentPolling, stopAgentPolling,
   appendThinkingIndicator, removeThinkingIndicator,
   updateThinkingContext, appendAgentStatusBlock, updateAgentStatus,
   setChatCallbacks,
 } from './chat.js';
 import { renderSessionsPage, setupSessionsHandlers, startSessionsRefresh, stopSessionsRefresh } from './sessions.js';
 import { renderUsagePage } from './usage.js';
-import { loadSettings, saveSettings, isAgentMode, setupSettingsHandlers, PROVIDER_MODELS, populateModelDropdown, populateExecutionModelDropdown } from './settings.js';
+import { loadSettings, saveSettings, setupSettingsHandlers, PROVIDER_MODELS, populateModelDropdown, populateExecutionModelDropdown } from './settings.js';
 import { initSpeechRecognition } from './speech.js';
 import { initFileUpload, pendingAttachments, clearAttachments } from './file-upload.js';
 import {
@@ -67,9 +66,7 @@ export async function showHomeLanding({ clearBackend = false } = {}) {
   updateTaskPanelVisibility();
 
   if (clearBackend) {
-    stopAgentPolling();
     State.sessionId = null;
-    State.agentSessionId = null;
     State.tasks = {};
     State.streamingContent = '';
     State.isStreaming = false;
@@ -279,31 +276,6 @@ async function init() {
   await maybeShowWelcome();
 
   await checkDaemonWithGuidance();
-
-  // Check mowis-agent health (retry up to 10 times with 1s delay — agent may still be starting)
-  const splashHint = $('splash-hint');
-  for (let attempt = 1; attempt <= 10; attempt++) {
-    if (splashHint) splashHint.textContent = `Connecting to agent... (${attempt}/10)`;
-    console.log(`[agent] Health check attempt ${attempt}/10`);
-    try {
-      const health = await invoke('agent_health');
-      if (health?.healthy) {
-        State.agentHealthy = true;
-        console.log(`[agent] ✓ Connected — v${health.version}, cwd: ${health.cwd}`);
-        if (splashHint) splashHint.textContent = `Agent connected (v${health.version})`;
-        break;
-      } else {
-        console.log(`[agent] Responded but not healthy:`, health);
-      }
-    } catch (e) {
-      console.warn(`[agent] Attempt ${attempt}/10 failed:`, e);
-      if (attempt === 10) {
-        console.log('[agent] ✗ Not available after 10 attempts — falling back to simulation mode');
-        if (splashHint) splashHint.textContent = 'Agent not available — using simulation mode';
-      }
-    }
-    if (attempt < 10) await delay(1000);
-  }
 
   try { await setupListeners(); } catch (e) { console.error('Listener setup failed:', e); }
 
@@ -703,122 +675,12 @@ async function ensureProvider() {
   });
 }
 
-// ── Agent startup modal ───────────────────────────────────────────────────────
-
-async function startAgentWithModal() {
-  return new Promise((resolve) => {
-    const modal    = $('agent-startup-modal');
-    const logBody  = $('agent-startup-log-body');
-    const spinner  = $('agent-startup-spinner');
-    const spinnerText = $('agent-startup-spinner-text');
-    const subtitle = $('agent-startup-subtitle');
-    const errorEl  = $('agent-startup-error');
-    const errorMsg = $('agent-startup-error-msg');
-    const actionsEl = $('agent-startup-actions');
-    const cancelBtn = $('btn-agent-startup-cancel');
-    const retryBtn  = $('btn-agent-startup-retry');
-
-    if (!modal) { resolve(false); return; }
-
-    let unlistenLog = null;
-    const cleanups = [];
-
-    const kindIcons = {
-      info:    '\u2022',
-      command: '\u25B6',
-      output:  ' ',
-      success: '\u2713',
-      error:   '\u2717',
-      warning: '\u26A0',
-    };
-
-    function addLogLine(text, level) {
-      if (!logBody) return;
-      const line = document.createElement('div');
-      line.className = `agent-log-line ${level || 'info'}`;
-
-      const ts = document.createElement('span');
-      ts.className = 'agent-log-ts';
-      const d = new Date();
-      ts.textContent = d.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-      const icon = document.createElement('span');
-      icon.className = 'agent-log-icon';
-      icon.textContent = kindIcons[level] || '\u2022';
-
-      const msg = document.createElement('span');
-      msg.className = 'agent-log-text';
-      msg.textContent = text;
-
-      line.appendChild(ts);
-      line.appendChild(icon);
-      line.appendChild(msg);
-      logBody.appendChild(line);
-
-      const logEl = $('agent-startup-log');
-      if (logEl) logEl.scrollTop = logEl.scrollHeight;
-    }
-
-    function resetUI() {
-      if (logBody) logBody.innerHTML = '';
-      if (errorEl) errorEl.classList.add('hidden');
-      if (actionsEl) actionsEl.classList.add('hidden');
-      if (spinner) { spinner.classList.remove('done', 'error'); }
-      if (subtitle) subtitle.textContent = 'Connecting to the agent process...';
-      if (spinnerText) spinnerText.textContent = 'Starting up...';
-    }
-
-    function closeModal() {
-      modal.classList.add('hidden');
-      modal.setAttribute('aria-hidden', 'true');
-      cleanups.forEach(fn => fn());
-    }
-
-    // Subscribe to live log events from the backend
-    listen('agent_startup_log', (e) => {
-      addLogLine(e.payload?.text, e.payload?.level);
-    }).then(u => { unlistenLog = u; cleanups.push(u); });
-
-    function tryStart() {
-      invoke('agent_start')
-        .then(() => {
-          if (spinner) spinner.classList.add('done');
-          if (spinnerText) spinnerText.textContent = 'Agent connected';
-          if (subtitle) subtitle.textContent = 'mowis-agent is ready';
-          State.agentHealthy = true;
-          setTimeout(() => { closeModal(); resolve(true); }, 600);
-        })
-        .catch((err) => {
-          if (spinner) spinner.classList.add('error');
-          if (spinnerText) spinnerText.textContent = 'Failed to start';
-          if (subtitle) subtitle.textContent = 'Agent could not be started';
-          if (errorEl) errorEl.classList.remove('hidden');
-          if (errorMsg) errorMsg.textContent = String(err);
-          if (actionsEl) actionsEl.classList.remove('hidden');
-        });
-    }
-
-    const onCancel = () => { closeModal(); resolve(false); };
-    const onRetry  = () => { resetUI(); tryStart(); };
-    cancelBtn?.addEventListener('click', onCancel);
-    retryBtn?.addEventListener('click', onRetry);
-    cleanups.push(() => cancelBtn?.removeEventListener('click', onCancel));
-    cleanups.push(() => retryBtn?.removeEventListener('click', onRetry));
-
-    resetUI();
-    modal.classList.remove('hidden');
-    modal.setAttribute('aria-hidden', 'false');
-    tryStart();
-  });
-}
-
 // ── Session start ─────────────────────────────────────────────────────────────
 
 export async function startSession(prompt, mode, repo = State.selectedRepo) {
   if (!prompt.trim() && pendingAttachments.length === 0) { toast('Enter a task description', 'error'); return; }
 
   const fullPrompt = prompt.trim();
-  const agentModeRequested = mode === 'agent';
   clearAttachments();
 
   State.tasks = {};
@@ -858,79 +720,29 @@ export async function startSession(prompt, mode, repo = State.selectedRepo) {
   }
 
   try {
-    // Re-check health if we think it's unhealthy
-    if (!State.agentHealthy) {
-      try {
-        const health = await invoke('agent_health');
-        State.agentHealthy = health?.healthy === true;
-        if (State.agentHealthy) console.log('[session] Agent reconnected:', health.version);
-      } catch (e) {
-        console.warn('[session] Agent re-check failed:', e);
-        State.agentHealthy = false;
-      }
-    }
+    // Create session record
+    console.log('[session] Creating session, mode:', mode || 'auto');
+    const id = await invoke('start_session', {
+      prompt: fullPrompt,
+      mode: mode || 'auto',
+      projectPath: repo?.path || null,
+      repoUrl: repo?.repo_url || repo?.remote_url || null,
+      repoSource: repo?.source || null,
+      images: null,
+    });
+    State.sessionId = id;
+    setText('compose-session-info', `session ${id.slice(0, 12)}`);
+    setText('chat-session-title', fullPrompt.slice(0, 120));
 
-    // When agent mode is explicitly requested and agent isn't running,
-    // show the startup modal — never silently fall back to simulation.
-    if (agentModeRequested && !State.agentHealthy) {
-      console.log('[session] Agent mode requested but not healthy — showing startup modal');
-      const started = await startAgentWithModal();
-      if (!started) {
-        // User cancelled or agent failed — abort cleanly, no simulation
-        removeThinkingIndicator();
-        setSessionActive(false);
-        navigate('home', { preserveHomeMode: true });
-        return;
-      }
-    }
-
-    if (agentModeRequested && State.agentHealthy) {
-      const title = fullPrompt.slice(0, 120);
-      console.log('[session] Creating agent session:', title);
-      const session = await invoke('agent_create_session', { title });
-      State.agentSessionId = session.id;
-      State.sessionId = session.id;
-      console.log('[session] Session created:', session.id);
-      setText('compose-session-info', `session ${session.id.slice(0, 8)}`);
-      setText('chat-session-title', fullPrompt.slice(0, 120));
-
-      appendThinkingIndicator();
-      console.log('[session] Sending message (async)...');
-      await invoke('agent_send_message', {
-        sessionId: session.id,
-        text: fullPrompt,
-        background: true,
-      });
-      console.log('[session] Message sent, starting polling');
-      startAgentPolling(session.id);
-    } else if (agentModeRequested) {
-      // Startup modal succeeded but health is still false
-      throw new Error('mowis-agent is not available. Check that the binary is installed alongside the app.');
-    } else {
-      // Create session record
-      console.log('[session] Creating session, mode:', mode || 'auto');
-      const id = await invoke('start_session', {
-        prompt: fullPrompt,
-        mode: mode || 'auto',
-        projectPath: repo?.path || null,
-        repoUrl: repo?.repo_url || repo?.remote_url || null,
-        repoSource: repo?.source || null,
-        images: null,
-      });
-      State.sessionId = id;
-      setText('compose-session-info', `session ${id.slice(0, 12)}`);
-      setText('chat-session-title', fullPrompt.slice(0, 120));
-
-      // Send first message through the Main LLM chat flow
-      setSessionActive(true);
-      appendThinkingIndicator();
-      try {
-        await invoke('send_message', { message: fullPrompt, images: null });
-      } catch (err) {
-        removeThinkingIndicator();
-        setSessionActive(false, true);
-        appendChatMessage({ kind: 'error', content: String(err), ts: nowTs() });
-      }
+    // Send first message through the Main LLM chat flow
+    setSessionActive(true);
+    appendThinkingIndicator();
+    try {
+      await invoke('send_message', { message: fullPrompt, images: null });
+    } catch (err) {
+      removeThinkingIndicator();
+      setSessionActive(false, true);
+      appendChatMessage({ kind: 'error', content: String(err), ts: nowTs() });
     }
   } catch (err) {
     removeThinkingIndicator();
@@ -1154,15 +966,10 @@ function setupHandlers() {
 
   // Stop
   $('btn-stop')?.addEventListener('click', async () => {
-    stopAgentPolling();
-    if (State.agentSessionId && State.agentHealthy) {
-      try { await invoke('agent_abort', { sessionId: State.agentSessionId }); } catch {}
-    }
     await invoke('stop_session');
     finalizeStreaming();
     removeThinkingIndicator();
     setSessionActive(false, true);
-    State.agentSessionId = null;
     const sys = { kind: 'system', content: 'Session stopped.', ts: nowTs() };
     appendChatMessage(sys);
     toast('Session stopped');
@@ -1245,33 +1052,14 @@ async function sendChatMessage() {
   input.value = '';
   autoResize.call(input);
 
-  if (State.agentSessionId && State.agentHealthy) {
-    console.log('[chat] Sending follow-up to session:', State.agentSessionId);
-    appendThinkingIndicator();
+  try {
     setSessionActive(true);
-    try {
-      await invoke('agent_send_message', {
-        sessionId: State.agentSessionId,
-        text: fullText,
-        background: true,
-      });
-      console.log('[chat] ✓ Message sent, restarting poll');
-      startAgentPolling(State.agentSessionId);
-    } catch (err) {
-      console.error('[chat] ✗ Send failed:', err);
-      removeThinkingIndicator();
-      appendChatMessage({ kind: 'error', content: `Failed to send: ${err}`, ts: nowTs() });
-    }
-  } else {
-    try {
-      setSessionActive(true);
-      appendThinkingIndicator();
-      await invoke('send_message', { message: fullText, images: null });
-    } catch (err) {
-      removeThinkingIndicator();
-      setSessionActive(false, true);
-      appendChatMessage({ kind: 'error', content: `Failed to send: ${err}`, ts: nowTs() });
-    }
+    appendThinkingIndicator();
+    await invoke('send_message', { message: fullText, images: null });
+  } catch (err) {
+    removeThinkingIndicator();
+    setSessionActive(false, true);
+    appendChatMessage({ kind: 'error', content: `Failed to send: ${err}`, ts: nowTs() });
   }
 }
 

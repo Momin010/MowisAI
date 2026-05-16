@@ -2,7 +2,6 @@ use crate::sandbox;
 use crate::sandbox::SandboxInfo;
 use crate::state::*;
 use crate::types::*;
-use crate::agent_client;
 use crate::platform;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -805,126 +804,8 @@ pub async fn clear_developer_config() -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Agent commands — talk to mowis-agent via HTTP
+// Session workspace commands
 // ─────────────────────────────────────────────────────────────────────────────
-
-fn get_agent_client(state: &State<'_, Arc<AppState>>) -> Result<agent_client::AgentClient, String> {
-    let mgr = state.agent_manager.lock().map_err(|e| {
-        log::error!("[cmd] Failed to lock agent_manager mutex: {}", e);
-        e.to_string()
-    })?;
-    let mgr = mgr.as_ref().ok_or_else(|| {
-        log::warn!("[cmd] Agent not initialized — agent_manager is None");
-        "Agent not initialized".to_string()
-    })?;
-    Ok(mgr.client().clone())
-}
-
-#[tauri::command]
-pub async fn agent_health(state: State<'_, Arc<AppState>>) -> Result<agent_client::HealthResponse, String> {
-    let client = get_agent_client(&state)?;
-    match client.health().await {
-        Ok(resp) => {
-            log::info!("[cmd] agent_health OK: v{}, healthy={}", resp.version, resp.healthy);
-            Ok(resp)
-        }
-        Err(e) => {
-            log::warn!("[cmd] agent_health FAILED: {}", e);
-            Err(e.to_string())
-        }
-    }
-}
-
-#[tauri::command]
-pub async fn agent_create_session(
-    state: State<'_, Arc<AppState>>,
-    title: String,
-) -> Result<agent_client::Session, String> {
-    let client = get_agent_client(&state)?;
-    log::info!("[cmd] Creating agent session: {}", title);
-    match client.create_session(&title).await {
-        Ok(sess) => {
-            log::info!("[cmd] Session created: {}", sess.id);
-            Ok(sess)
-        }
-        Err(e) => {
-            log::error!("[cmd] Create session failed: {}", e);
-            Err(e.to_string())
-        }
-    }
-}
-
-#[tauri::command]
-pub async fn agent_list_sessions(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<agent_client::Session>, String> {
-    let client = get_agent_client(&state)?;
-    client.list_sessions().await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn agent_send_message(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    text: String,
-    background: Option<bool>,
-) -> Result<serde_json::Value, String> {
-    let client = get_agent_client(&state)?;
-    let preview = if text.len() > 80 { &text[..80] } else { &text };
-    log::info!("[cmd] Sending message to session {}: \"{}\" (async={})", session_id, preview, background.unwrap_or(false));
-    if background.unwrap_or(false) {
-        client.send_message_async(&session_id, &text).await.map_err(|e| {
-            log::error!("[cmd] send_message_async failed: {}", e);
-            e.to_string()
-        })?;
-        Ok(serde_json::json!({ "status": "accepted" }))
-    } else {
-        let result = client.send_message(&session_id, &text).await.map_err(|e| {
-            log::error!("[cmd] send_message failed: {}", e);
-            e.to_string()
-        })?;
-        log::info!("[cmd] Message sent, response received");
-        Ok(result)
-    }
-}
-
-#[tauri::command]
-pub async fn agent_abort(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Result<(), String> {
-    let client = get_agent_client(&state)?;
-    client.abort(&session_id).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn agent_approve_permission(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    permission_id: String,
-) -> Result<(), String> {
-    let client = get_agent_client(&state)?;
-    client.approve_permission(&session_id, &permission_id).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn agent_deny_permission(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    permission_id: String,
-) -> Result<(), String> {
-    let client = get_agent_client(&state)?;
-    client.deny_permission(&session_id, &permission_id).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn agent_delete_session(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Result<(), String> {
-    let client = get_agent_client(&state)?;
-    client.delete_session(&session_id).await.map_err(|e| e.to_string())
-}
 
 #[tauri::command]
 pub async fn get_session_workspace(
@@ -962,10 +843,6 @@ pub async fn delete_session_local(
     state: State<'_, Arc<AppState>>,
     session_id: String,
 ) -> Result<(), String> {
-    // Also try to tell the agent to clean up, ignoring errors (agent may not be running)
-    if let Ok(client) = get_agent_client(&state) {
-        let _ = client.delete_session(&session_id).await;
-    }
     // Remove from in-memory state
     {
         let mut history = state.session_history.lock().map_err(|_| "lock poisoned".to_string())?;
@@ -979,15 +856,6 @@ pub async fn delete_session_local(
     crate::state::save_state(&state)
 }
 
-#[tauri::command]
-pub async fn agent_list_messages(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> Result<Vec<agent_client::AgentMessage>, String> {
-    let client = get_agent_client(&state)?;
-    client.list_messages(&session_id).await.map_err(|e| e.to_string())
-}
-
 /// Return current session streaming state: sandbox IDs, per-agent states, and session ID.
 #[tauri::command]
 pub async fn get_session_state(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
@@ -999,64 +867,5 @@ pub async fn get_session_state(state: State<'_, Arc<AppState>>) -> Result<serde_
         "active_sandbox_ids": sandbox_ids,
         "agent_states": agent_states,
     }))
-}
-
-/// Explicitly start (or connect to) the mowis-agent subprocess.
-/// Emits `agent_startup_log` events with `{ text, level }` as it progresses
-/// so the frontend can display live logs in the startup modal.
-#[tauri::command]
-pub async fn agent_start(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
-    // Check if already running and healthy
-    let maybe_client = {
-        let lock = state.agent_manager.lock().map_err(|e| e.to_string())?;
-        lock.as_ref().map(|m| (m.client().clone(), m.port()))
-    };
-
-    if let Some((client, port)) = maybe_client {
-        if let Ok(health) = client.health().await {
-            if health.healthy {
-                let _ = app.emit("agent_startup_log", serde_json::json!({
-                    "text": format!("Agent already running on port {} (v{})", port, health.version),
-                    "level": "success"
-                }));
-                return Ok(serde_json::json!({ "port": port, "already_running": true }));
-            }
-        }
-    }
-
-    let resource_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_default();
-
-    // Create a channel for live log forwarding from the agent manager
-    let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<crate::agent_manager::LogEntry>();
-
-    // Spawn a task that forwards log entries to the Tauri frontend
-    let app_clone = app.clone();
-    tokio::spawn(async move {
-        while let Some((text, level)) = log_rx.recv().await {
-            let _ = app_clone.emit("agent_startup_log", serde_json::json!({
-                "text": text,
-                "level": level
-            }));
-        }
-    });
-
-    let mut mgr = crate::agent_manager::AgentManager::new(crate::agent_manager::DEFAULT_AGENT_PORT);
-
-    match mgr.start(&resource_dir, Some(log_tx)).await {
-        Ok(()) => {
-            let port = mgr.port();
-            *state.agent_manager.lock().map_err(|e| e.to_string())? = Some(mgr);
-            Ok(serde_json::json!({ "port": port }))
-        }
-        Err(e) => {
-            Err(format!("{:#}", e))
-        }
-    }
 }
 

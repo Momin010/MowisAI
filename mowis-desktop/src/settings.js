@@ -209,12 +209,6 @@ export async function refreshSandboxInfo() {
   } catch {}
 }
 
-// ── Agent mode ───────────────────────────────────────────────────────────────
-
-export function isAgentMode() {
-  return (State.config?.mode || '') === 'agent' || State.agentHealthy;
-}
-
 export function updateZeroWorkspaceBar(path) {
   State.zeroWorkspacePath = path || null;
 }

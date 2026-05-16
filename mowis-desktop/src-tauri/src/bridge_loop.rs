@@ -58,61 +58,7 @@ pub fn start_bridge(
         });
     }
 
-    // ── 2. Start mowis-agent subprocess ────────────────────────────────────────
-    {
-        let state_clone = Arc::clone(&state);
-        let app_for_agent = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let resource_dir = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-                .unwrap_or_default();
-
-            let port = crate::agent_manager::DEFAULT_AGENT_PORT;
-            log::info!("[bridge] Initializing mowis-agent manager (default port: {})", port);
-
-            // Create a channel so agent startup logs appear in the boot terminal
-            let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<crate::agent_manager::LogEntry>();
-            tokio::spawn(async move {
-                while let Some((text, level)) = log_rx.recv().await {
-                    // Map agent log levels to setup_progress kinds
-                    let kind = match level.as_str() {
-                        "command" => "command",
-                        "output" => "output",
-                        "success" => "success",
-                        "error" => "error",
-                        "warning" => "warning",
-                        _ => "info",
-                    };
-                    let _ = app_for_agent.emit("setup_progress", serde_json::json!({
-                        "stage": "agent",
-                        "message": text,
-                        "pct": 60,
-                        "kind": kind,
-                        "timestamp": std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
-                    }));
-                }
-            });
-
-            let mut mgr = crate::agent_manager::AgentManager::new(port);
-            match mgr.start(&resource_dir, Some(log_tx)).await {
-                Ok(()) => {
-                    log::info!("[bridge] mowis-agent ready on port {}", mgr.port());
-                    *state_clone.agent_manager.lock().unwrap() = Some(mgr);
-                }
-                Err(e) => {
-                    log::error!("[bridge] mowis-agent failed to start: {}", e);
-                    log::info!("[bridge] Agent commands will not be available — falling back to simulation");
-                    *state_clone.agent_manager.lock().unwrap() = Some(mgr);
-                }
-            }
-        });
-    }
-
-    // ── 3. Watch bridge connection-state changes (health-loop reconnects) ─────
+    // ── 2. Watch bridge connection-state changes (health-loop reconnects) ─────
     {
         let mut state_rx = bridge.state_rx.clone();
         let evt_tx_clone = evt_tx.clone();
@@ -130,7 +76,7 @@ pub fn start_bridge(
         });
     }
 
-    // ── 4. Command handler (background thread with its own tokio runtime) ─────
+    // ── 3. Command handler (background thread with its own tokio runtime) ─────
     let evt_tx_clone = evt_tx.clone();
     let bridge_for_cmds = Arc::clone(&bridge);
     let state_for_cmds = Arc::clone(&state);
@@ -174,16 +120,16 @@ pub fn start_bridge(
                         }
 
                         BridgeCommand::StartZeroMode { session_id, .. } => {
-                            log::warn!("StartZeroMode is deprecated — use agent_send_message instead (session: {})", session_id);
+                            log::warn!("StartZeroMode is deprecated (session: {})", session_id);
                             let _ = tx.send(BridgeEvent::OrchestrationFailed(
-                                format!("Zero mode is deprecated. Use agent_send_message for session {}.", session_id)
+                                format!("Zero mode is deprecated for session {}.", session_id)
                             )).await;
                         }
 
                         BridgeCommand::ContinueZeroMode { session_id, .. } => {
-                            log::warn!("ContinueZeroMode is deprecated — use agent_send_message instead (session: {})", session_id);
+                            log::warn!("ContinueZeroMode is deprecated (session: {})", session_id);
                             let _ = tx.send(BridgeEvent::OrchestrationFailed(
-                                format!("Zero mode is deprecated. Use agent_send_message for session {}.", session_id)
+                                format!("Zero mode is deprecated for session {}.", session_id)
                             )).await;
                         }
                     }

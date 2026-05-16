@@ -604,45 +604,6 @@
 </div><!-- /#app -->
 
 
-<!-- Agent startup modal -->
-<div id="agent-startup-modal" class="engine-modal hidden" aria-hidden="true">
-  <div class="engine-modal-backdrop"></div>
-  <div class="engine-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-startup-title">
-    <div class="engine-modal-head">
-      <div class="engine-modal-icon">
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-      </div>
-      <div>
-        <div class="engine-modal-title" id="agent-startup-title">Starting mowis-agent</div>
-        <div class="engine-modal-subtitle" id="agent-startup-subtitle">Connecting to the agent process...</div>
-      </div>
-    </div>
-    <div class="engine-modal-body">
-      <div class="agent-startup-spinner" id="agent-startup-spinner">
-        <div class="spinner-dot"></div>
-        <span id="agent-startup-spinner-text">Starting up...</span>
-      </div>
-      <div class="agent-startup-log" id="agent-startup-log">
-        <div class="agent-startup-terminal-header">
-          <span class="dot red"></span>
-          <span class="dot yellow"></span>
-          <span class="dot green"></span>
-          <span class="title">agent startup</span>
-        </div>
-        <div class="agent-startup-log-body" id="agent-startup-log-body"></div>
-      </div>
-      <div class="engine-error hidden" id="agent-startup-error">
-        <div class="engine-error-title">Agent failed to start</div>
-        <div class="engine-error-message" id="agent-startup-error-msg"></div>
-      </div>
-      <div class="agent-startup-actions hidden" id="agent-startup-actions">
-        <button class="wizard-btn wizard-btn-secondary" id="btn-agent-startup-cancel">Cancel</button>
-        <button class="wizard-btn wizard-btn-primary" id="btn-agent-startup-retry">Retry</button>
-      </div>
-    </div>
-  </div>
-</div>
-
 <!-- Provider quick-setup modal -->
 <div id="provider-modal" class="engine-modal hidden" aria-hidden="true">
   <div class="engine-modal-backdrop"></div>

@@ -41,8 +41,7 @@
     ],
     "resources": {
       "resources/agentd-linux-x86_64": "agentd-linux-x86_64",
-      "resources/alpine-minirootfs-x86_64.tar.gz": "alpine-minirootfs-x86_64.tar.gz",
-      "resources/mowis-agent.exe": "mowis-agent.exe"
+      "resources/alpine-minirootfs-x86_64.tar.gz": "alpine-minirootfs-x86_64.tar.gz"
     }
   },
   "plugins": {
