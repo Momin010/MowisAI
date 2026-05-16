@@ -79,6 +79,7 @@ fn main() {
             agent_list_messages,
             agent_start,
             open_url,
+            get_session_state,
         ])
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");

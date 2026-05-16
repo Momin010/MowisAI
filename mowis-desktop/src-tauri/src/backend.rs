@@ -330,6 +330,12 @@ impl BackendBridge {
         self.state_rx.borrow().connected
     }
 
+    /// Open a fresh connection to agentd independent of the active stream.
+    /// Used by the event subscription task to open a second connection.
+    pub async fn open_fresh_stream(&self) -> Result<crate::platform::connection::ConnectionStream> {
+        self.fresh_stream().await
+    }
+
     /// Retrieve diagnostic logs from the Linux environment.
     pub async fn read_logs(&self) -> String {
         self.launcher.read_logs().await

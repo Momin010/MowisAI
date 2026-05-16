@@ -997,6 +997,106 @@ export function renderDiffPanel() {
   detail.innerHTML = `${headerHtml}<div class="diff-panel-body">${linesHtml || '<div class="task-detail-empty">Empty file</div>'}</div>`;
 }
 
+// ── Stream event handlers (mowis: window CustomEvents from bridge.js) ─────────
+// These fire whenever agentd pushes an event through the subscribe_events stream.
+
+window.addEventListener('mowis:llm_chunk', (e) => {
+  const chunk = e.detail?.chunk ?? e.detail?.content ?? e.detail?.text ?? '';
+  if (chunk) appendAgentChunk(chunk);
+});
+
+window.addEventListener('mowis:llm_done', () => {
+  finalizeStreaming();
+});
+
+window.addEventListener('mowis:tool_call', (e) => {
+  const data = e.detail || {};
+  const container = $('chat-messages');
+  if (!container) return;
+  if (State.isStreaming) finalizeStreaming();
+
+  let toolGroup = container.querySelector('.tool-events-group:last-child');
+  if (!toolGroup || toolGroup.dataset.finalized === 'true') {
+    toolGroup = document.createElement('div');
+    toolGroup.className = 'tool-events-group';
+    container.appendChild(toolGroup);
+  }
+
+  const toolName = data.tool_name || data.name || '';
+  const agentId  = data.agent_id  || '';
+  const item = document.createElement('div');
+  item.className = 'tool-event tool-call';
+  item.dataset.toolName = toolName;
+  item.dataset.agentId  = agentId;
+
+  const icon = getToolIcon(toolName);
+  const agentLabel = agentId
+    ? `<span class="tool-agent">${escHtml(agentId.slice(0, 8))}</span>`
+    : '';
+  item.innerHTML = `
+    <span class="tool-icon">${icon}</span>
+    <span class="tool-name">${escHtml(toolName)}</span>
+    ${agentLabel}
+    <span class="tool-spinner"></span>
+  `;
+  toolGroup.appendChild(item);
+  scrollToBottom(container);
+});
+
+window.addEventListener('mowis:tool_result', (e) => {
+  const data = e.detail || {};
+  const container = $('chat-messages');
+  if (!container) return;
+
+  const toolName = data.tool_name || data.name || '';
+  const agentId  = data.agent_id  || '';
+  const success  = data.success !== false;
+  const duration = data.duration_ms != null ? `${data.duration_ms}ms` : '';
+
+  const toolGroup = container.querySelector('.tool-events-group:last-child');
+  if (toolGroup) {
+    const selector = agentId
+      ? `.tool-call[data-tool-name="${toolName}"][data-agent-id="${agentId}"]:not(.resolved)`
+      : `.tool-call[data-tool-name="${toolName}"]:not(.resolved)`;
+    const pending = toolGroup.querySelector(selector);
+    if (pending) {
+      pending.classList.add('resolved', success ? 'success' : 'failed');
+      const spinner = pending.querySelector('.tool-spinner');
+      if (spinner) {
+        spinner.className = success ? 'tool-status-ok' : 'tool-status-fail';
+        spinner.textContent = (success ? '✓' : '✗') + (duration ? ' ' + duration : '');
+      }
+      scrollToBottom(container);
+    }
+  }
+});
+
+window.addEventListener('mowis:agent_state', (e) => {
+  const data = e.detail || {};
+  const type  = data.type || '';
+  if (type === 'AgentStarted') {
+    appendAgentStatusBlock({
+      agent_id: data.agent_id || '',
+      task_id:  data.task_id  || '',
+      sandbox:  data.sandbox  || '',
+    });
+  } else if (type === 'AgentCompleted' || type === 'AgentFailed') {
+    updateAgentStatus({
+      agent_id: data.agent_id || '',
+      status: type === 'AgentCompleted' ? 'complete' : 'failed',
+    });
+  }
+});
+
+window.addEventListener('mowis:layer_progress', () => {
+  // Layer progress events are informational — the Tauri layer_progress event
+  // already handles any visual update needed via main.js
+});
+
+window.addEventListener('mowis:session_complete', () => {
+  finalizeStreaming();
+});
+
 function getFileActionIcon(action) {
   const icons = {
     created: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>`,

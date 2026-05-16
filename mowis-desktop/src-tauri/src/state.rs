@@ -40,6 +40,11 @@ pub struct AppState {
     pub workspace_path: Mutex<Option<String>>,
     // Changed file paths relative to workspace_path from last WorkspaceReady.
     pub workspace_files: Mutex<Vec<String>>,
+
+    // Sandbox IDs active in the current streaming session.
+    pub active_sandbox_ids: Mutex<Vec<String>>,
+    // Per-agent state keyed by agent_id (populated from subscribe_events stream).
+    pub agent_states: Mutex<HashMap<String, serde_json::Value>>,
 }
 
 impl AppState {
@@ -96,6 +101,8 @@ impl AppState {
             agent_manager: Mutex::new(None),
             workspace_path: Mutex::new(None),
             workspace_files: Mutex::new(Vec::new()),
+            active_sandbox_ids: Mutex::new(Vec::new()),
+            agent_states: Mutex::new(HashMap::new()),
         }
     }
 }
