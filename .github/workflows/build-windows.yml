@@ -31,36 +31,10 @@ jobs:
           path: target/x86_64-unknown-linux-musl/release/agentd
           retention-days: 1
 
-  # ── Job 2: compile mowis-agent for Windows (Go binary) ─────────────────────
-  build-mowis-agent:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-
-      - name: Build mowis-agent (Windows amd64)
-        working-directory: mowis-agent
-        env:
-          GOOS: windows
-          GOARCH: amd64
-          CGO_ENABLED: '0'
-        run: go build -tags headless -o mowis-agent.exe .
-
-      - name: Upload mowis-agent binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: mowis-agent-windows
-          path: mowis-agent/mowis-agent.exe
-          retention-days: 1
-
-  # ── Job 3: build the Tauri Windows installer ──────────────────────────────
+  # ── Job 2: build the Tauri Windows installer ──────────────────────────────
   build-windows:
     runs-on: windows-latest
-    needs: [build-agentd-linux, build-mowis-agent]
+    needs: [build-agentd-linux]
     defaults:
       run:
         working-directory: mowis-desktop
@@ -92,13 +66,6 @@ jobs:
           $src = "src-tauri\resources\agentd"
           $dst = "src-tauri\resources\agentd-linux-x86_64"
           if (Test-Path $src) { Move-Item $src $dst }
-
-      # Download the mowis-agent Windows binary
-      - name: Download mowis-agent binary
-        uses: actions/download-artifact@v4
-        with:
-          name: mowis-agent-windows
-          path: mowis-desktop/src-tauri/resources
 
       - name: Fetch Alpine rootfs
         shell: bash

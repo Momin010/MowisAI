@@ -25,6 +25,7 @@ use crate::orchestration::new_orchestrator::{
     NewOrchestrator, OrchestratorConfig, OrchestratorEvent,
 };
 use crate::orchestration::provider_client::LlmConfig;
+use crate::orchestration::streaming::global_stream_writer;
 
 const FAST_WORKERS: usize = 64;
 pub(crate) const SLOW_WORKERS: usize = 128;
@@ -141,6 +142,8 @@ pub struct SocketRequest {
     /// Conversation history from the desktop for context-aware responses.
     /// Each entry has "role" ("user"/"assistant") and "content".
     pub conversation_history: Option<Vec<Value>>,
+    /// Optional event stream session filter for subscribe_events requests.
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -387,7 +390,7 @@ enum RequestLane {
 fn validate_request(req: &SocketRequest) -> Result<(), String> {
     match req.request_type.as_str() {
         "create_sandbox" | "list" | "get_audit_stats" | "get_anomalies" | "agent_spawn"
-        | "orchestrate" | "chat" | "set_config" | "get_config" => Ok(()),
+        | "orchestrate" | "chat" | "subscribe_events" | "set_config" | "get_config" => Ok(()),
         "create_container" => {
             if req.sandbox.is_none() {
                 Err("create_container: missing sandbox id".to_string())
@@ -1749,8 +1752,22 @@ fn write_socket_json(stream: &mut UnixStream, value: &serde_json::Value) -> Resu
     Ok(())
 }
 
+fn handle_subscribe_events(stream: UnixStream, _req: SocketRequest) -> Result<()> {
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_write_timeout(None);
+    global_stream_writer().add_connection(stream);
+
+    loop {
+        std::thread::park();
+    }
+}
+
 fn process_job(job: WorkerJob) -> Result<()> {
     let WorkerJob { mut connection } = job;
+
+    if connection.request.request_type == "subscribe_events" {
+        return handle_subscribe_events(connection.stream, connection.request);
+    }
 
     // Orchestrate requests use streaming: keep connection open, send multiple JSON events
     if connection.request.request_type == "orchestrate" {

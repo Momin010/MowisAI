@@ -36,6 +36,7 @@ use super::merge_reviewer::{AgentContribution, ConflictDetector, MergeReviewerAg
 use super::planner::{plan_task, plan_task_standard, scan_directory_tree_pub};
 use super::provider_client::generate_text;
 use super::sandbox_topology::TopologyManager;
+use super::streaming::{global_stream_writer, StreamEvent};
 use super::verification::VerificationLoop;
 use agentd_protocol::{AgentResult, SandboxConfig, SandboxName, SandboxResult, Task, TaskId, VerificationStatus};
 use anyhow::{Context, Result};
@@ -94,6 +95,18 @@ pub struct OrchestratorConfig {
 struct AgentWorkResult {
     result: AgentResult,
     task_description: String,
+}
+
+fn emit_stream_event(event: StreamEvent) {
+    global_stream_writer().send_event(&event);
+}
+
+fn emit_layer_started(layer: u8) {
+    emit_stream_event(StreamEvent::LayerStarted { layer });
+}
+
+fn emit_layer_completed(layer: u8) {
+    emit_stream_event(StreamEvent::LayerCompleted { layer });
 }
 
 /// New 7-layer orchestrator
@@ -176,11 +189,13 @@ impl NewOrchestrator {
         }
 
         // â”€â”€ Full mode: Layer 1 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        emit_layer_started(1);
         send_event!(OrchestratorEvent::LayerProgress { layer: 1, message: "Planning tasks...".into() });
         log::info!("Layer 1: Planning tasks (full mode)...");
         let planner_output = plan_task(prompt, &self.config.project_root, &self.config.llm_config)
             .await
             .context("Fast planner failed")?;
+        emit_layer_completed(1);
 
         log::info!(
             "  â†’ Generated {} tasks across {} sandboxes",
@@ -189,6 +204,7 @@ impl NewOrchestrator {
         );
 
         // Layer 2: Overlayfs Topology
+        emit_layer_started(2);
         send_event!(OrchestratorEvent::LayerProgress { layer: 2, message: "Creating sandbox topology...".into() });
         log::info!("Layer 2: Creating sandbox topology...");
         let topology = TopologyManager::new(
@@ -201,7 +217,10 @@ impl NewOrchestrator {
             log::info!("  â†’ Created sandbox: {}", sandbox.name);
         }
 
+        emit_layer_completed(2);
+
         // Layer 3: Scheduler
+        emit_layer_started(3);
         send_event!(OrchestratorEvent::LayerProgress { layer: 3, message: "Initializing scheduler...".into() });
         log::info!("Layer 3: Initializing scheduler...");
         let scheduler = Arc::new(
@@ -213,7 +232,10 @@ impl NewOrchestrator {
 
         log::info!("  â†’ Scheduler ready with {} tasks", planner_output.task_graph.tasks.len());
 
+        emit_layer_completed(3);
+
         // Layer 4: Agent Execution (TRUE PARALLELISM)
+        emit_layer_started(4);
         send_event!(OrchestratorEvent::LayerProgress { layer: 4, message: "Executing tasks with agents...".into() });
         log::info!("Layer 4: Executing tasks with agents...");
         let execution_llm = self.config.execution_llm_config
@@ -516,9 +538,11 @@ impl NewOrchestrator {
 
         // Get scheduler stats
         let scheduler_stats = scheduler.get_stats().await;
+        emit_layer_completed(4);
         log::info!("  â†’ Completed: {}/{} tasks", scheduler_stats.completed, scheduler_stats.total_tasks);
 
         // Layer 5: Intelligent Merge Review (per sandbox)
+        emit_layer_started(5);
         log::info!("Layer 5: Reviewing and merging agent contributions per sandbox...");
         let reviewer = MergeReviewerAgent::new(self.config.llm_config.clone());
         let mut sandbox_results = HashMap::new();
@@ -613,7 +637,10 @@ impl NewOrchestrator {
             );
         }
 
+        emit_layer_completed(5);
+
         // Layer 6: Verification Loop
+        emit_layer_started(6);
         send_event!(OrchestratorEvent::LayerProgress { layer: 6, message: "Verifying sandbox results...".into() });
         log::info!("Layer 6: Verifying sandbox results...");
 
@@ -674,10 +701,26 @@ impl NewOrchestrator {
                                 sandbox_result.merged_diff = Some(updated_diff.clone());
                             }
                             sandbox_result.verification_status = vr.status.clone();
+                            emit_stream_event(StreamEvent::VerificationResult {
+                                round: vr.rounds_completed as u8,
+                                passed: matches!(vr.status, VerificationStatus::Passed),
+                                output: format!(
+                                    "{}: {:?} ({} passed, {} failed)",
+                                    sandbox_name,
+                                    vr.status,
+                                    vr.passed_tests.len(),
+                                    vr.failed_tests.len()
+                                ),
+                            });
                             verification_status.insert(sandbox_name.clone(), vr.status);
                         }
                         Ok(Err(e)) => {
                             log::warn!("  âš  Verification failed for {}: {}", sandbox_name, e);
+                            emit_stream_event(StreamEvent::VerificationResult {
+                                round: 0,
+                                passed: false,
+                                output: format!("{}: {}", sandbox_name, e),
+                            });
                             sandbox_result.verification_status = VerificationStatus::Failed;
                             verification_status.insert(sandbox_name.clone(), VerificationStatus::Failed);
                         }
@@ -687,6 +730,11 @@ impl NewOrchestrator {
                                 sandbox_name,
                                 verify_timeout.as_secs() / 60
                             );
+                            emit_stream_event(StreamEvent::VerificationResult {
+                                round: 0,
+                                passed: false,
+                                output: format!("{}: verification timed out", sandbox_name),
+                            });
                             sandbox_result.verification_status = VerificationStatus::TimedOut;
                             verification_status.insert(sandbox_name.clone(), VerificationStatus::TimedOut);
                         }
@@ -701,7 +749,10 @@ impl NewOrchestrator {
             }
         }
 
+        emit_layer_completed(6);
+
         // Layer 7: Cross-Sandbox Intelligent Merge
+        emit_layer_started(7);
         log::info!("Layer 7: Final cross-sandbox intelligent merge...");
         let sandbox_diffs: Vec<(SandboxName, String)> = sandbox_results
             .iter()
@@ -764,6 +815,7 @@ impl NewOrchestrator {
         } else {
             String::new()
         };
+        emit_layer_completed(7);
 
         // Collect failed tasks
         let failed_tasks: Vec<FailedTask> = scheduler
@@ -786,6 +838,11 @@ impl NewOrchestrator {
             log::info!("    {} circuit: {:?}", sandbox, state);
         }
 
+        let summary = generate_summary(&scheduler_stats, agent_count, duration);
+        emit_stream_event(StreamEvent::SessionComplete {
+            summary: summary.clone(),
+        });
+
         // Signal TUI that orchestration is complete
         if let Some(ref tx) = event_tx_clone {
             let changed = collect_changed_files(&self.config.project_root);
@@ -803,7 +860,7 @@ impl NewOrchestrator {
             verification_status,
             failed_tasks,
             known_issues,
-            summary: generate_summary(&scheduler_stats, agent_count, duration),
+            summary,
             total_agents_used: agent_count,
             total_duration_secs: duration,
             scheduler_stats,

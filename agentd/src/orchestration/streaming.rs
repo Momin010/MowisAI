@@ -3,8 +3,8 @@
 //! Provides a streaming protocol over the Unix socket that the desktop app
 //! can connect to for real-time updates during orchestration.
 
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
@@ -12,6 +12,53 @@ use std::sync::{Arc, Mutex};
 /// Events streamed to the desktop app
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamEvent {
+    LlmChunk {
+        agent_id: String,
+        text: String,
+    },
+    LlmDone {
+        agent_id: String,
+        tokens: u64,
+    },
+    ToolCall {
+        agent_id: String,
+        sandbox_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        agent_id: String,
+        tool_name: String,
+        duration_ms: u64,
+        success: bool,
+    },
+    AgentStarted {
+        agent_id: String,
+        sandbox_id: String,
+        task: String,
+    },
+    AgentCompleted {
+        agent_id: String,
+        sandbox_id: String,
+    },
+    AgentFailed {
+        agent_id: String,
+        error: String,
+    },
+    LayerStarted {
+        layer: u8,
+    },
+    LayerCompleted {
+        layer: u8,
+    },
+    VerificationResult {
+        round: u8,
+        passed: bool,
+        output: String,
+    },
+    SessionComplete {
+        summary: String,
+    },
     /// Orchestration started
     Started {
         session_id: String,
@@ -41,7 +88,7 @@ pub enum StreamEvent {
         timestamp: u64,
     },
     /// Agent completed task
-    AgentCompleted {
+    AgentFinished {
         agent_id: String,
         success: bool,
         duration_ms: u64,
@@ -107,6 +154,7 @@ pub enum StreamEvent {
 }
 
 /// Stream writer that sends events to connected desktop apps
+#[derive(Clone)]
 pub struct StreamWriter {
     connections: Arc<Mutex<Vec<UnixStream>>>,
 }
@@ -136,7 +184,9 @@ impl StreamWriter {
         line.push('\n');
 
         if let Ok(mut conns) = self.connections.lock() {
-            conns.retain_mut(|stream| stream.write_all(line.as_bytes()).is_ok());
+            conns.retain_mut(|stream| {
+                stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
+            });
         }
     }
 
@@ -144,6 +194,12 @@ impl StreamWriter {
     pub fn connection_count(&self) -> usize {
         self.connections.lock().map(|c| c.len()).unwrap_or(0)
     }
+}
+
+static GLOBAL_STREAM_WRITER: Lazy<StreamWriter> = Lazy::new(StreamWriter::new);
+
+pub fn global_stream_writer() -> StreamWriter {
+    GLOBAL_STREAM_WRITER.clone()
 }
 
 impl Default for StreamWriter {

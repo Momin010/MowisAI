@@ -8,6 +8,7 @@
 //! - `call_agent_round` — one round of the tool-calling loop (agent execution)
 
 use crate::config::AiProvider;
+use super::streaming::{StreamEvent, StreamWriter};
 use anyhow::{anyhow, Context, Result};
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
@@ -1340,6 +1341,8 @@ pub async fn call_agent_round_streaming<F>(
     conversation: &mut AgentConversation,
     allowed_tools: &[String],
     temperature: f64,
+    agent_id: &str,
+    stream_writer: Option<StreamWriter>,
     on_chunk: F,
 ) -> Result<AgentRoundResult>
 where
@@ -1349,20 +1352,49 @@ where
     match llm_config.provider {
         AiProvider::VertexAi | AiProvider::Gemini => {
             call_agent_round_gemini_streaming(
-                llm_config, system_prompt, conversation, allowed_tools, temperature, boxed,
+                llm_config, system_prompt, conversation, allowed_tools, temperature,
+                agent_id, stream_writer, boxed,
             ).await
         }
         AiProvider::OpenAi | AiProvider::Grok | AiProvider::Groq | AiProvider::Mimo => {
             call_agent_round_openai_streaming(
-                llm_config, system_prompt, conversation, allowed_tools, temperature, boxed,
+                llm_config, system_prompt, conversation, allowed_tools, temperature,
+                agent_id, stream_writer, boxed,
             ).await
         }
         AiProvider::Anthropic => {
             call_agent_round_anthropic_streaming(
-                llm_config, system_prompt, conversation, allowed_tools, temperature, boxed,
+                llm_config, system_prompt, conversation, allowed_tools, temperature,
+                agent_id, stream_writer, boxed,
             ).await
         }
     }
+}
+
+fn emit_llm_chunk(
+    stream_writer: &Option<StreamWriter>,
+    agent_id: &str,
+    text: &str,
+) {
+    if let Some(writer) = stream_writer {
+        writer.send_event(&StreamEvent::LlmChunk {
+            agent_id: agent_id.to_string(),
+            text: text.to_string(),
+        });
+    }
+}
+
+fn emit_llm_done(stream_writer: &Option<StreamWriter>, agent_id: &str, text: &str) {
+    if let Some(writer) = stream_writer {
+        writer.send_event(&StreamEvent::LlmDone {
+            agent_id: agent_id.to_string(),
+            tokens: estimate_tokens(text),
+        });
+    }
+}
+
+fn estimate_tokens(text: &str) -> u64 {
+    text.split_whitespace().count() as u64
 }
 
 // ── SSE helper ────────────────────────────────────────────────────────────────
@@ -1385,6 +1417,8 @@ async fn call_agent_round_gemini_streaming(
     conversation: &mut AgentConversation,
     allowed_tools: &[String],
     temperature: f64,
+    agent_id: &str,
+    stream_writer: Option<StreamWriter>,
     on_chunk: Box<dyn Fn(String) + Send>,
 ) -> Result<AgentRoundResult> {
     let (base_url, auth_header) = gemini_url_and_auth(llm_config)?;
@@ -1457,6 +1491,7 @@ async fn call_agent_round_gemini_streaming(
                         for part in parts {
                             if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
                                 if !t.is_empty() {
+                                    emit_llm_chunk(&stream_writer, agent_id, t);
                                     on_chunk(t.to_string());
                                     full_text.push_str(t);
                                 }
@@ -1484,6 +1519,7 @@ async fn call_agent_round_gemini_streaming(
     }
 
     let text = if full_text.is_empty() { None } else { Some(full_text) };
+    emit_llm_done(&stream_writer, agent_id, text.as_deref().unwrap_or(""));
     if latest_tool_calls.is_empty() {
         if let Some(ref t) = text {
             conversation
@@ -1506,6 +1542,8 @@ async fn call_agent_round_openai_streaming(
     conversation: &mut AgentConversation,
     allowed_tools: &[String],
     temperature: f64,
+    agent_id: &str,
+    stream_writer: Option<StreamWriter>,
     on_chunk: Box<dyn Fn(String) + Send>,
 ) -> Result<AgentRoundResult> {
     let url = openai_compat_url(llm_config);
@@ -1573,6 +1611,7 @@ async fn call_agent_round_openai_streaming(
                             delta.get("content").and_then(|c| c.as_str())
                         {
                             if !content.is_empty() {
+                                emit_llm_chunk(&stream_writer, agent_id, content);
                                 on_chunk(content.to_string());
                                 full_text.push_str(content);
                             }
@@ -1624,6 +1663,7 @@ async fn call_agent_round_openai_streaming(
     let tool_calls: Vec<ToolCall> = tool_call_list.into_iter().map(|(_, tc)| tc).collect();
 
     let text = if full_text.is_empty() { None } else { Some(full_text) };
+    emit_llm_done(&stream_writer, agent_id, text.as_deref().unwrap_or(""));
 
     if tool_calls.is_empty() {
         if let Some(ref t) = text {
@@ -1647,6 +1687,8 @@ async fn call_agent_round_anthropic_streaming(
     conversation: &mut AgentConversation,
     allowed_tools: &[String],
     temperature: f64,
+    agent_id: &str,
+    stream_writer: Option<StreamWriter>,
     on_chunk: Box<dyn Fn(String) + Send>,
 ) -> Result<AgentRoundResult> {
     let api_key = llm_config
@@ -1741,6 +1783,7 @@ async fn call_agent_round_anthropic_streaming(
                                             delta.get("text").and_then(|t| t.as_str())
                                         {
                                             if !text.is_empty() {
+                                                emit_llm_chunk(&stream_writer, agent_id, text);
                                                 on_chunk(text.to_string());
                                                 full_text.push_str(text);
                                             }
@@ -1778,6 +1821,7 @@ async fn call_agent_round_anthropic_streaming(
     let tool_calls: Vec<ToolCall> = tool_call_list.into_iter().map(|(_, tc)| tc).collect();
 
     let text = if full_text.is_empty() { None } else { Some(full_text) };
+    emit_llm_done(&stream_writer, agent_id, text.as_deref().unwrap_or(""));
 
     if tool_calls.is_empty() {
         if let Some(ref t) = text {

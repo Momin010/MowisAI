@@ -3,12 +3,14 @@
 use super::checkpoint::{CheckpointLog, CheckpointManager};
 use super::new_orchestrator::OrchestratorEvent;
 use super::provider_client::{AgentConversation, AgentRoundResult, LlmConfig, ToolCall};
+use super::streaming::{global_stream_writer, StreamEvent};
 use agentd_protocol::{AgentHandle, AgentResult, Checkpoint};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 /// Global flag for verbose output
 static VERBOSE_MODE: AtomicBool = AtomicBool::new(false);
@@ -57,6 +59,13 @@ impl AgentExecutor {
         event_tx: Option<&std::sync::mpsc::Sender<OrchestratorEvent>>,
         worker_id: usize,
     ) -> Result<AgentResult> {
+        let stream_writer = global_stream_writer();
+        stream_writer.send_event(&StreamEvent::AgentStarted {
+            agent_id: agent.agent_id.clone(),
+            sandbox_id: agent.sandbox_name.clone(),
+            task: task_description.to_string(),
+        });
+
         if is_verbose() {
             log::info!("\n┌─────────────────────────────────────────────────────────");
             log::info!("│ 🤖 AGENT: {}", &agent.agent_id[..8.min(agent.agent_id.len())]);
@@ -91,6 +100,20 @@ impl AgentExecutor {
                     self.checkpoint_manager
                         .cleanup_agent_checkpoints(&agent.agent_id)
                         .ok();
+                    if result.success {
+                        stream_writer.send_event(&StreamEvent::AgentCompleted {
+                            agent_id: agent.agent_id.clone(),
+                            sandbox_id: agent.sandbox_name.clone(),
+                        });
+                    } else {
+                        stream_writer.send_event(&StreamEvent::AgentFailed {
+                            agent_id: agent.agent_id.clone(),
+                            error: result
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "agent failed".to_string()),
+                        });
+                    }
                     return Ok(result);
                 }
                 Err(e) if tier2_attempt < self.max_tier2_retries => {
@@ -130,7 +153,7 @@ impl AgentExecutor {
                     }
                 }
                 Err(e) => {
-                    return Ok(AgentResult {
+                    let result = AgentResult {
                         task_id: agent.task_id.clone().unwrap_or_default(),
                         success: false,
                         git_diff: None,
@@ -141,19 +164,29 @@ impl AgentExecutor {
                         )),
                         checkpoint_log: checkpoint_log.checkpoints.clone(),
                         timestamp: current_timestamp(),
+                    };
+                    stream_writer.send_event(&StreamEvent::AgentFailed {
+                        agent_id: agent.agent_id.clone(),
+                        error: result.error.clone().unwrap_or_else(|| e.to_string()),
                     });
+                    return Ok(result);
                 }
             }
         }
 
-        Ok(AgentResult {
+        let result = AgentResult {
             task_id: agent.task_id.clone().unwrap_or_default(),
             success: false,
             git_diff: None,
             error: Some("Max retries exceeded".to_string()),
             checkpoint_log: checkpoint_log.checkpoints.clone(),
             timestamp: current_timestamp(),
-        })
+        };
+        stream_writer.send_event(&StreamEvent::AgentFailed {
+            agent_id: agent.agent_id.clone(),
+            error: result.error.clone().unwrap_or_else(|| "Max retries exceeded".to_string()),
+        });
+        Ok(result)
     }
 
     /// Execute with checkpoint support using the provider-agnostic tool loop.
@@ -280,6 +313,8 @@ impl AgentExecutor {
                 &mut conversation,
                 tools,
                 0.7,
+                &agent.agent_id,
+                Some(global_stream_writer()),
                 move |chunk| {
                     if let Some(ref tx) = chunk_tx {
                         let _ = tx.send(OrchestratorEvent::LlmChunk {
@@ -360,16 +395,42 @@ impl AgentExecutor {
                         args_preview,
                     });
                 }
+                global_stream_writer().send_event(&StreamEvent::ToolCall {
+                    agent_id: agent.agent_id.clone(),
+                    sandbox_id: agent.sandbox_name.clone(),
+                    tool_name: tool_call.name.clone(),
+                    input: tool_call.args.clone(),
+                });
 
-                let tool_result = self
+                let tool_started = Instant::now();
+                let tool_result = match self
                     .execute_tool_with_retry(
                         &agent.sandbox_name,
                         &agent.container_id,
                         &tool_call.name,
                         &tool_call.args,
                     )
-                    .await?;
-
+                    .await
+                {
+                    Ok(result) => {
+                        global_stream_writer().send_event(&StreamEvent::ToolResult {
+                            agent_id: agent.agent_id.clone(),
+                            tool_name: tool_call.name.clone(),
+                            duration_ms: tool_started.elapsed().as_millis() as u64,
+                            success: result.get("error").is_none(),
+                        });
+                        result
+                    }
+                    Err(err) => {
+                        global_stream_writer().send_event(&StreamEvent::ToolResult {
+                            agent_id: agent.agent_id.clone(),
+                            tool_name: tool_call.name.clone(),
+                            duration_ms: tool_started.elapsed().as_millis() as u64,
+                            success: false,
+                        });
+                        return Err(err);
+                    }
+                };
                 // Emit ToolResult event after execution
                 if let Some(tx) = event_tx {
                     let result_str = serde_json::to_string(&tool_result).unwrap_or_default();

@@ -440,7 +440,7 @@ impl App {
         }
     }
 
-    fn start_chat(&mut self, message: String) {
+    fn start_chat(&mut self, _message: String) {
         self.is_loading = true;
 
         let tx = match &self.event_tx {
@@ -456,6 +456,21 @@ impl App {
         };
 
         let config = self.config.clone();
+        let history: Vec<serde_json::Value> = self
+            .messages
+            .iter()
+            .filter_map(|msg| match msg.role {
+                MessageRole::User => Some(serde_json::json!({
+                    "role": "user",
+                    "content": msg.content.clone(),
+                })),
+                MessageRole::Assistant => Some(serde_json::json!({
+                    "role": "assistant",
+                    "content": msg.content.clone(),
+                })),
+                MessageRole::System => None,
+            })
+            .collect();
 
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Runtime::new() {
@@ -479,13 +494,11 @@ impl App {
 
                 let system_prompt = "You are MowisAI, an AI coding assistant. Answer the user's question helpfully and concisely.";
 
-                match crate::orchestration::provider_client::generate_text_with_limit(
+                match crate::orchestration::provider_client::generate_chat(
                     &llm_config,
                     system_prompt,
-                    &message,
-                    false,
+                    &history,
                     0.7,
-                    2048,
                 )
                 .await
                 {
