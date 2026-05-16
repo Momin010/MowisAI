@@ -988,6 +988,19 @@ pub async fn agent_list_messages(
     client.list_messages(&session_id).await.map_err(|e| e.to_string())
 }
 
+/// Return current session streaming state: sandbox IDs, per-agent states, and session ID.
+#[tauri::command]
+pub async fn get_session_state(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let session_id = state.current_session_id.lock().unwrap().clone();
+    let sandbox_ids = state.active_sandbox_ids.lock().unwrap().clone();
+    let agent_states = state.agent_states.lock().unwrap().clone();
+    Ok(serde_json::json!({
+        "session_id": session_id,
+        "active_sandbox_ids": sandbox_ids,
+        "agent_states": agent_states,
+    }))
+}
+
 /// Explicitly start (or connect to) the mowis-agent subprocess.
 /// Emits `agent_startup_log` events with `{ text, level }` as it progresses
 /// so the frontend can display live logs in the startup modal.

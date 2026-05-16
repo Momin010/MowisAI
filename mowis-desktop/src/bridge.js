@@ -17,6 +17,34 @@ export async function loadTauri() {
     _invoke = invoke;
     _listen = listen;
     _openDialog = open;
+
+    // Bridge: subscribe to stream_event from Rust and fan out as window CustomEvents.
+    // This is the live-streaming pipeline: agentd → Rust → Tauri → JS CustomEvent → chat.js
+    _listen('stream_event', (e) => {
+      let ev;
+      try {
+        ev = typeof e.payload === 'string' ? JSON.parse(e.payload) : e.payload;
+      } catch { return; }
+      const type = ev && (ev.type || ev.event_type || '');
+      if (!type) return;
+      const detail = ev;
+      if (type === 'LlmChunk') {
+        window.dispatchEvent(new CustomEvent('mowis:llm_chunk', { detail }));
+      } else if (type === 'LlmDone') {
+        window.dispatchEvent(new CustomEvent('mowis:llm_done', { detail }));
+      } else if (type === 'ToolCall') {
+        window.dispatchEvent(new CustomEvent('mowis:tool_call', { detail }));
+      } else if (type === 'ToolResult') {
+        window.dispatchEvent(new CustomEvent('mowis:tool_result', { detail }));
+      } else if (type === 'AgentStarted' || type === 'AgentCompleted' || type === 'AgentFailed') {
+        window.dispatchEvent(new CustomEvent('mowis:agent_state', { detail }));
+      } else if (type === 'LayerStarted' || type === 'LayerCompleted') {
+        window.dispatchEvent(new CustomEvent('mowis:layer_progress', { detail }));
+      } else if (type === 'SessionComplete') {
+        window.dispatchEvent(new CustomEvent('mowis:session_complete', { detail }));
+      }
+    }).catch(() => {});
+
     return true;
   } catch { return false; }
 }

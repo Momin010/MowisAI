@@ -133,6 +133,8 @@ pub fn start_bridge(
     // ── 4. Command handler (background thread with its own tokio runtime) ─────
     let evt_tx_clone = evt_tx.clone();
     let bridge_for_cmds = Arc::clone(&bridge);
+    let state_for_cmds = Arc::clone(&state);
+    let app_for_cmds = app.clone();
     std::thread::Builder::new()
         .name("mowisai-bridge".into())
         .spawn(move || {
@@ -141,6 +143,8 @@ pub fn start_bridge(
                 while let Some(cmd) = cmd_rx.recv().await {
                     let tx = evt_tx_clone.clone();
                     let b = Arc::clone(&bridge_for_cmds);
+                    let st = Arc::clone(&state_for_cmds);
+                    let app_cmd = app_for_cmds.clone();
                     match cmd {
                         BridgeCommand::CheckSocket => {
                             let evt = if b.is_connected() {
@@ -158,8 +162,14 @@ pub fn start_bridge(
                         }
 
                         BridgeCommand::StartOrchestration { session_id, prompt, max_agents, mode, repo_context, config, conversation_history } => {
+                            let b_sub = Arc::clone(&b);
+                            let st_sub = Arc::clone(&st);
+                            let app_sub = app_cmd.clone();
                             tokio::spawn(async move {
                                 run_orchestration(session_id, prompt, max_agents, mode, repo_context, config, b, tx, conversation_history).await;
+                            });
+                            tokio::spawn(async move {
+                                run_event_subscription(b_sub, app_sub, st_sub).await;
                             });
                         }
 
@@ -659,3 +669,88 @@ pub async fn run_orchestration(
 // If you see a simulation running, the binary is STALE — rebuild with:
 //   cd mowis-desktop && cargo tauri build
 // The compiler will error if any code path tries to call simulate_session.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Event subscription (second socket connection for live streaming)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Opens a dedicated socket connection to agentd, subscribes to the event
+/// stream, and re-emits every event as a Tauri "stream_event" event with the
+/// raw JSON payload. Runs until the connection closes or SessionComplete arrives.
+pub async fn run_event_subscription(
+    bridge: Arc<crate::backend::BackendBridge>,
+    app: tauri::AppHandle,
+    state: Arc<crate::state::AppState>,
+) {
+    let mut stream = match bridge.open_fresh_stream().await {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("[bridge] Event subscription: could not open stream: {}", e);
+            return;
+        }
+    };
+
+    let subscribe_msg = serde_json::json!({"request_type": "subscribe_events"});
+    if let Err(e) = stream.send_json(&subscribe_msg).await {
+        log::warn!("[bridge] Event subscription: send subscribe_events failed: {}", e);
+        return;
+    }
+
+    log::info!("[bridge] Event subscription stream active");
+
+    loop {
+        match stream.recv_json().await {
+            Ok(Some(v)) => {
+                let raw = v.to_string();
+                let _ = app.emit("stream_event", &raw);
+
+                let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match event_type {
+                    "AgentStarted" => {
+                        let agent_id = v.get("agent_id")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let sandbox = v.get("sandbox")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !agent_id.is_empty() {
+                            state.agent_states.lock().unwrap().insert(agent_id, v.clone());
+                        }
+                        if !sandbox.is_empty() {
+                            let mut ids = state.active_sandbox_ids.lock().unwrap();
+                            if !ids.contains(&sandbox) {
+                                ids.push(sandbox);
+                            }
+                        }
+                    }
+                    "AgentCompleted" | "AgentFailed" => {
+                        let agent_id = v.get("agent_id")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !agent_id.is_empty() {
+                            state.agent_states.lock().unwrap().insert(agent_id, v.clone());
+                        }
+                    }
+                    "SessionComplete" => {
+                        state.active_sandbox_ids.lock().unwrap().clear();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(None) => {
+                log::info!("[bridge] Event subscription: stream EOF");
+                break;
+            }
+            Err(e) => {
+                log::warn!("[bridge] Event subscription: stream error: {}", e);
+                break;
+            }
+        }
+    }
+
+    log::info!("[bridge] Event subscription ended");
+}
