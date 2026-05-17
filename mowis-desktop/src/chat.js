@@ -920,7 +920,7 @@ export function renderDiffPanel() {
 // These fire whenever agentd pushes an event through the subscribe_events stream.
 
 window.addEventListener('mowis:llm_chunk', (e) => {
-  const chunk = e.detail?.chunk ?? e.detail?.content ?? e.detail?.text ?? '';
+  const chunk = e.detail?.text ?? e.detail?.chunk ?? e.detail?.content ?? '';
   if (chunk) appendAgentChunk(chunk);
 });
 
@@ -943,6 +943,9 @@ window.addEventListener('mowis:tool_call', (e) => {
 
   const toolName = data.tool_name || data.name || '';
   const agentId  = data.agent_id  || '';
+  const input    = data.input && typeof data.input === 'object' ? data.input : {};
+  const inputStr = String(input.path ?? input.command ?? input.pattern ?? '').slice(0, 80);
+
   const item = document.createElement('div');
   item.className = 'tool-event tool-call';
   item.dataset.toolName = toolName;
@@ -952,10 +955,14 @@ window.addEventListener('mowis:tool_call', (e) => {
   const agentLabel = agentId
     ? `<span class="tool-agent">${escHtml(agentId.slice(0, 8))}</span>`
     : '';
+  const inputHint = inputStr
+    ? `<span class="tool-args">${escHtml(inputStr)}</span>`
+    : '';
   item.innerHTML = `
     <span class="tool-icon">${icon}</span>
     <span class="tool-name">${escHtml(toolName)}</span>
     ${agentLabel}
+    ${inputHint}
     <span class="tool-spinner"></span>
   `;
   toolGroup.appendChild(item);
