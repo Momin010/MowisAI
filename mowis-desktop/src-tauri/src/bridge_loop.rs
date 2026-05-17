@@ -401,19 +401,6 @@ pub fn socket_value_to_bridge_event(v: &serde_json::Value) -> Option<BridgeEvent
         "error"         => Some(BridgeEvent::OrchestrationFailed(
             v["message"].as_str().unwrap_or("unknown error").to_owned(),
         )),
-        "tool_call"     => {
-            let worker_id = v["worker_id"].as_u64().unwrap_or(0) as usize;
-            let tool_name = v["tool_name"].as_str().unwrap_or("").to_owned();
-            let args_preview = v["args_preview"].as_str().unwrap_or("").to_owned();
-            Some(BridgeEvent::ToolCall { worker_id, tool_name, args_preview })
-        }
-        "tool_result"   => {
-            let worker_id = v["worker_id"].as_u64().unwrap_or(0) as usize;
-            let tool_name = v["tool_name"].as_str().unwrap_or("").to_owned();
-            let success = v["success"].as_bool().unwrap_or(false);
-            let preview = v["preview"].as_str().unwrap_or("").to_owned();
-            Some(BridgeEvent::ToolResult { worker_id, tool_name, success, preview })
-        }
         "stats"         => {
             // Stats events from the orchestrator — emit as a simulation tick
             let completed = v["completed"].as_u64().unwrap_or(0) as usize;
@@ -566,15 +553,33 @@ pub async fn run_orchestration(
         });
         match bridge.send(payload).await {
             Ok(()) => {
-                // Stream JSON events until the daemon closes the connection.
+                // Wait only for the terminal complete or error response.
+                // All live events (tool_call, llm_chunk, agent_status, etc.) come exclusively
+                // from run_event_subscription on the second socket to avoid duplicate firing.
                 loop {
                     match bridge.recv_next().await {
                         Ok(Some(v)) => {
-                            log::debug!("[bridge] recv: {}", v);
-                            if let Some(evt) = socket_value_to_bridge_event_lenient(&v) {
-                                let is_done = matches!(&evt, BridgeEvent::OrchestrationComplete | BridgeEvent::OrchestrationFailed(_));
-                                if event_tx.send(evt).await.is_err() { return; }
-                                if is_done { return; }
+                            log::debug!("[bridge] recv (main): {}", v);
+                            let t = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match t {
+                                "complete" => {
+                                    let _ = event_tx.send(BridgeEvent::OrchestrationComplete).await;
+                                    return;
+                                }
+                                "error" => {
+                                    let msg = v["message"].as_str().unwrap_or("unknown error").to_owned();
+                                    let _ = event_tx.send(BridgeEvent::OrchestrationFailed(msg)).await;
+                                    return;
+                                }
+                                _ => {
+                                    // Socket server error format fallback
+                                    if v.get("status").and_then(|s| s.as_str()) == Some("error") {
+                                        let msg = v["error"].as_str().unwrap_or("unknown agentd error").to_owned();
+                                        let _ = event_tx.send(BridgeEvent::OrchestrationFailed(msg)).await;
+                                        return;
+                                    }
+                                    // All other events are ignored here; they arrive via run_event_subscription.
+                                }
                             }
                         }
                         Ok(None) => {
