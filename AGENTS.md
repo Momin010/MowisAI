@@ -1,309 +1,376 @@
-# MowisAI — agentd
+# MowisAI — Developer Reference
 
-## What this is
-OS-level AI agent execution engine. Single Rust binary. Runs thousands of isolated agents in parallel using overlayfs/chroot sandboxing. Targeting European regulated enterprise (GDPR, DORA). Competitive gap: E2B/Daytona are cloud-only, CrewAI/LangGraph have no execution layer.
+## What Is MowisAI?
 
-## ⚠️ CRITICAL: NEW ARCHITECTURE TO BUILD
+MowisAI is an **OS-level AI agent execution engine** targeting European regulated enterprise
+(GDPR, DORA compliance). The core differentiator: competitors like E2B and Daytona are
+cloud-only SaaS; CrewAI and LangGraph have no execution layer. MowisAI runs thousands of
+isolated AI agents in parallel on-premises using overlayfs/chroot/cgroups sandboxing — no
+cloud dependency, no data leaving the building.
 
-**This document describes the NEW 7-layer orchestration system that REPLACES the old 5-layer pipeline.**
+The system consists of two products sharing this repository:
 
-The old 5-layer system (Context Gatherer → Architect → Sandbox Owner → Sandbox Manager → Workers) is **DEPRECATED** and should be **DELETED**.
-
-The new system is described below in "Architecture: new orchestration system".
-
-## Workspace structure
-```
-MowisAI/
-├── agentd/           # Main daemon, library, orchestration
-├── agentd-protocol/  # Shared protocol types (separate crate, no circular deps)
-└── runtime/          # Control plane — state management, delegates to agentd
-```
-
-## 🎯 Codex MISSION: BUILD THE NEW ORCHESTRATION SYSTEM
-
-**Environment Context:**
-- You are working on **Windows** locally
-- **No Cargo available locally** — you cannot run `cargo build` or `cargo test`
-- Your job is to **WRITE THE CODE** — the user will test and debug later on their Linux environment
-- Focus on **correct Rust code** that follows the architecture below
-- The user will handle compilation, testing, and debugging
-
-**What You Need to Build:**
-
-### Phase 1: Foundation (Start Here)
-1. **Delete old orchestration files** (see "Files to Delete" below)
-2. **Create new types** in `agentd-protocol/src/lib.rs` for task graph, sandbox topology, scheduler messages
-3. **Implement Layer 2** (Overlayfs Topology) — 3-level CoW filesystem management
-4. **Implement Layer 3** (Scheduler) — Event-driven task dispatcher with tokio
-
-### Phase 2: Agent Execution
-5. **Implement Layer 4** (Agent Execution with Checkpoints) — Tool-calling loop with checkpoint system
-6. **Implement Layer 1** (Fast Planner) — Shell scan + single Gemini call
-
-### Phase 3: Merge & Verify
-7. **Implement Layer 5** (Parallel Merge) — Tree-pattern merge workers
-8. **Implement Layer 6** (Verification Loop) — Test task injection
-
-### Phase 4: Integration
-9. **Implement Layer 7** (Cross-Sandbox Merge) — Final integration
-10. **Wire everything together** in `orchestration/mod.rs`
+| Crate | Binary | Role |
+|---|---|---|
+| `agentd` | `agentd` | Core daemon + CLI. Orchestration engine, socket server, TUI. |
+| `runtime` | `runtime` | Control plane. State management, delegates to agentd via socket. |
+| `agentd-protocol` | (library) | Shared types — no circular deps. |
+| `mowis-desktop` | (Tauri app) | Desktop GUI wrapping agentd. Separate product. |
 
 ---
 
-## Architecture: new orchestration system (replacing 5-layer pipeline)
+## agentd — Core Daemon
 
-### Layer 1 — Fast planner
-- Shell scan (`find`/`tree`) — no LLM, ~10ms
-- ONE Gemini call: prompt + dir tree string → task graph JSON + sandbox topology
-- Task graph: `{ id, description, deps[], hint }` per task
-- Topology: decides how many sandboxes, which type, how many agents per sandbox
-- Small project → 1 sandbox, up to 50 agents
-- Large project → N sandboxes (frontend/backend/infra/etc), up to 100 agents each
-- NO file reading at planning stage — workers read files themselves
+`agentd` is a single Rust binary. It does everything:
 
-**Output:**
-```json
-{
-  "tasks": [
-    { "id": "t1", "description": "implement auth", "deps": [], "hint": "backend" },
-    { "id": "t2", "description": "implement API", "deps": ["t1"], "hint": "backend" },
-    { "id": "t3", "description": "build UI", "deps": [], "hint": "frontend" }
-  ],
-  "topology": [
-    { "name": "backend", "scope": "src/backend/", "tools": ["read_file", "write_file", "run_command"], "max_agents": 50 },
-    { "name": "frontend", "scope": "src/frontend/", "tools": ["read_file", "write_file", "npm_install"], "max_agents": 50 }
-  ]
-}
+- Hosts a Unix socket server (`agentd socket`) that agents communicate with
+- Runs the 7-layer orchestration pipeline (`agentd orchestrate`)
+- Provides a terminal UI for interactive use (`agentd` with no subcommand)
+- Exposes 160+ tools to agents across 14 categories + 10 integration platforms
+- Loads and injects `.skill` files into every agent's LLM system prompt
+
+### CLI Commands
+
+```
+agentd                          # Launch interactive TUI
+agentd orchestrate              # Run full orchestration pipeline
+agentd simulate                 # Simulation mode (no LLM calls, zero cost)
+agentd socket                   # Start Unix socket server
+agentd skills list              # List installed skills
+agentd skills show <name>       # Print skill content
+agentd skills create            # Launch LLM-powered skill creator (terminal)
+agentd skills load <path>       # Install a .skill file
+agentd skills remove <name>     # Uninstall a skill
+agentd skills dir               # Print skills directory path
+agentd --version                # Print version + build number
 ```
 
-### Layer 2 — Overlayfs topology (3 levels)
-- Level 0: base layer — full repo, read-only, shared by ALL sandboxes (zero duplication)
-- Level 1: sandbox layer — copy-on-write per sandbox, scoped filesystem view (frontend sandbox sees src/frontend only, etc — configurable)
-- Level 2: agent layer — copy-on-write per agent on top of sandbox layer, fully isolated writes
-- On task complete: agent layer produces clean git diff, layer is discarded
-- Checkpoint = snapshot of agent's CoW layer after each tool call (`cp -al` upper dir or btrfs snapshot)
+### Running Locally
 
-**Key Implementation:**
-- Use `mount -t overlay` with proper lowerdir/upperdir/workdir
-- Scoped sandboxes use bind mounts or overlayfs options to limit visibility
-- Agent layers are ephemeral — created on task start, diffed on completion, discarded
-
-### Layer 3 — Scheduler
-- Maintains `HashMap<TaskId, AtomicUsize>` dep counters per task
-- On task complete: decrements counter of all dependent tasks
-- Any task whose counter hits 0 → immediately dispatched to idle agent in correct sandbox
-- NO batching, NO group boundaries — pure event-driven dispatch
-- tokio::sync::mpsc ready queue
-- Sandbox-aware: frontend task → frontend agent only
-
-**Key Implementation:**
-```rust
-// Pseudocode structure
-struct Scheduler {
-    task_graph: HashMap<TaskId, Task>,
-    dep_counter: DashMap<TaskId, AtomicUsize>,  // DashMap for concurrent access
-    ready_queue: mpsc::Sender<TaskId>,
-    running: HashMap<TaskId, AgentHandle>,
-    completed: HashSet<TaskId>,
-    sandbox_queues: HashMap<SandboxName, VecDeque<IdleAgent>>,
-}
-```
-
-### Layer 4 — Agent execution with checkpoints
-- Agent = Gemini tool-calling loop inside isolated container via agentd socket
-- Checkpoint saved after EVERY tool call (write_file, run_command, git_commit, etc.)
-- On tool failure → rollback to last checkpoint, retry from there
-- On agent crash → kill agent, spawn fresh agent, hand it checkpoint log, continue from last checkpoint
-- On 3x repeated failure on same task → escalate to human with full checkpoint log
-- Agents are sandbox-specialists: frontend agents have frontend tools + system prompt, backend agents have backend tools + system prompt
-- Agents emit git diff on completion
-
-**Checkpoint Format:**
-```rust
-struct Checkpoint {
-    id: u64,  // monotonic counter
-    tool_call: String,
-    tool_args: serde_json::Value,
-    tool_result: String,
-    timestamp: u64,
-    layer_snapshot_path: String,  // path to CoW layer snapshot
-}
-```
-
-**Three-Tier Error Handling:**
-- Tier 1 (Tool failure): Rollback to checkpoint, retry same tool (max 3 retries)
-- Tier 2 (Agent crash): Spawn fresh agent, restore from checkpoint, continue
-- Tier 3 (Repeated failure): Escalate to human with full checkpoint log
-
-### Layer 5 — Parallel merge (per sandbox)
-- Merge workers spin up dynamically when two branches need combining
-- Tree-pattern merge: pairs of diffs merged in parallel, not serial queue
-- LLM-assisted conflict repair on git apply failure
-- Each sandbox produces one clean merged diff independently
-
-**Merge Algorithm:**
-```
-Round 1: N diffs → N/2 merge workers (parallel)
-Round 2: N/2 results → N/4 merge workers (parallel)
-...
-Until 1 result remains
-Total rounds: log₂(N)
-```
-
-### Layer 6 — Verification loop (per sandbox)
-- After sandbox work completes: verification planner generates test task graph
-- Test agents run in same sandbox against merged result
-- Test failures → new fix tasks injected back into scheduler
-- Loop continues until all tests pass or max retries exceeded
-
-**Verification Flow:**
-1. Generate test task graph from merged diff
-2. Inject test tasks into scheduler
-3. Run tests in same sandbox (warm containers)
-4. On failure: create fix tasks, inject into scheduler
-5. After fix: re-run tests
-6. Max 3 verification rounds, then mark PARTIALLY_VERIFIED
-
-### Layer 7 — Cross-sandbox merge + final output
-- All verified sandbox diffs merged by one cross-sandbox merge worker
-- Integration conflicts (frontend calling changed backend endpoint) caught here
-- LLM repair for integration conflicts
-- Final output: clean tested merged codebase
-
----
-
-## 📁 Files to Create (New Architecture)
-
-Create these new files in `agentd/src/orchestration/`:
-
-| File | Purpose |
-|------|---------|
-| `planner.rs` | Layer 1: Fast planner (shell scan + Gemini call) |
-| `scheduler.rs` | Layer 3: Event-driven task dispatcher |
-| `sandbox_topology.rs` | Layer 2: CoW layer management, agent spawning |
-| `checkpoint.rs` | Layer 4: Checkpoint save/restore logic |
-| `merge_worker.rs` | Layer 5: Parallel tree-pattern merge |
-| `verification.rs` | Layer 6: Verification planner and test loop |
-| `types.rs` | New types for task graph, topology, scheduler |
-| `mod.rs` | New module exports |
-
-## 🗑️ Files to Delete (Old Architecture)
-
-**DELETE these files** — they are replaced by the new system:
-
-- `agentd/src/orchestration/context_gatherer.rs` — replaced by planner.rs
-- `agentd/src/orchestration/architect.rs` — replaced by planner.rs
-- `agentd/src/orchestration/sandbox_owner.rs` — replaced by sandbox_topology.rs
-- `agentd/src/orchestration/sandbox_manager.rs` — replaced by merge_worker.rs
-- `agentd/src/orchestration/worker.rs` — replaced by sandbox_topology.rs (agent execution)
-- `agentd/src/orchestration/planner.rs` (old) — replaced
-- `agentd/src/orchestration/coordinator.rs` — no longer needed
-- `agentd/src/orchestration/executor.rs` — replaced by scheduler.rs
-- `agentd/src/orchestration/agent_runner.rs` — replaced
-
-**KEEP these files** — they are still needed:
-
-- `agentd/src/orchestration/session_store.rs` — for interactive sessions
-- `agentd/src/orchestration/sandbox_profiles.rs` — for package/tool presets
-
----
-
-## 🔌 agentd core (DO NOT CHANGE)
-
-**CRITICAL:** The agentd binary and socket API are NOT modified by orchestration work. Orchestration communicates through the socket ONLY.
-
-- Unix socket server at `/tmp/agentd.sock`
-- overlayfs + chroot + cgroups sandboxing
-- 75 tools across 14 categories
-- Socket API: create_sandbox, create_container, invoke_tool, pause_container, resume_container, destroy_sandbox
-
-## Hard invariants — never violate
-- Orchestrator-mediated coordination ONLY. No direct agent-to-agent communication.
-- Sandbox/container IDs always returned as String in JSON, never u64.
-- Never delete or modify tests to make them pass. Fix the actual implementation.
-- Never stub or fake tool implementations.
-- All tools execute within container context via chroot.
-- 67 tests must always pass — never regress.
-
-## AI backend
-- Vertex AI Gemini 2.5 Pro
-- GCP project: `company-internal-tools-490516`
-- Auth via gcloud — must be present in environment
-
-## Running locally (User will do this, not Codex)
-
-**Note:** Codex writes the code. The user will build and test on their Linux environment.
+Requires two terminals. Socket server requires root for overlayfs.
 
 ```bash
-# User runs this on their Linux machine:
-cargo build
+# Terminal 1 — start socket server
+sudo ./target/release/agentd socket --path /tmp/agentd.sock
 
-# Terminal 1 (requires root for overlayfs)
-sudo ./target/debug/agentd socket --path /tmp/agentd.sock
+# Terminal 2 — run orchestration
+./target/release/agentd orchestrate \
+    --prompt "Implement JWT authentication for the REST API" \
+    --project company-internal-tools-490516 \
+    --socket /tmp/agentd.sock \
+    --max-agents 1000
 
-# Terminal 2
-cargo run -- orchestrate --prompt "..." --project company-internal-tools-490516 --socket /tmp/agentd.sock --max-agents 1000
+# Simulation mode (no LLM calls, no cost)
+./target/release/agentd simulate \
+    --socket /tmp/agentd.sock \
+    --project-root /path/to/project \
+    --max-agents 100 \
+    --tasks 200 \
+    --verify
 ```
-
-## Code conventions
-- Rust stable, async via tokio, errors via anyhow
-- No unwrap() in production paths
-- JSON serialization via serde
-- IDs always String, never u64 in JSON responses
-- Full updated code when making changes — never partial without request
-- When tests fail: read actual source before suggesting fix. Never guess.
-
-## 🚀 Implementation Order for Codex
-
-### Step 1: Setup
-1. Read existing code to understand current structure
-2. Delete old orchestration files listed above
-3. Update `agentd-protocol/src/lib.rs` with new types
-
-### Step 2: Core Types
-Define in `agentd-protocol/src/lib.rs`:
-- `TaskGraph`, `Task`, `TaskId`
-- `SandboxTopology`, `SandboxConfig`
-- `SchedulerMessage`, `TaskCompletion`
-- `Checkpoint`, `CheckpointLog`
-- `AgentResult`, `SandboxResult`
-
-### Step 3: Layer 2 + Layer 3 (Foundation)
-- Implement `sandbox_topology.rs` — CoW layer management
-- Implement `scheduler.rs` — event-driven dispatch
-- These two layers are the foundation — get them right first
-
-### Step 4: Layer 4 (Agent Execution)
-- Implement checkpoint system in `checkpoint.rs`
-- Integrate with agent execution loop
-
-### Step 5: Layer 1 (Fast Planner)
-- Implement `planner.rs` — shell scan + Gemini call
-
-### Step 6: Layers 5-7 (Merge & Verify)
-- Implement `merge_worker.rs` — tree-pattern merge
-- Implement `verification.rs` — test loop
-- Implement cross-sandbox merge
-
-### Step 7: Integration
-- Wire everything in `orchestration/mod.rs`
-- Update `main.rs` CLI to use new orchestration
-- Ensure all 67 tests still pass (user will verify)
 
 ---
 
-## 📋 Summary Checklist for Codex
+## 7-Layer Orchestration System
 
-- [ ] Delete old orchestration files
-- [ ] Create new types in agentd-protocol
-- [ ] Implement Layer 2 (Overlayfs Topology)
-- [ ] Implement Layer 3 (Scheduler)
-- [ ] Implement Layer 4 (Agent Execution with Checkpoints)
-- [ ] Implement Layer 1 (Fast Planner)
-- [ ] Implement Layer 5 (Parallel Merge)
-- [ ] Implement Layer 6 (Verification Loop)
-- [ ] Implement Layer 7 (Cross-Sandbox Merge)
-- [ ] Wire everything together
-- [ ] Ensure no unwrap() in production paths
-- [ ] Use String for all IDs in JSON
-- [ ] Follow Rust stable + tokio + anyhow conventions
+Each layer has a single responsibility. Files are in `agentd/src/orchestration/`.
+
+### Layer 1 — Fast Planner (`planner.rs`)
+Shell scan (`find`/`tree`) takes ~10ms. A single Gemini call produces the full task graph
+and sandbox topology JSON. No file reading at planning time — workers read files themselves.
+
+### Layer 2 — Overlayfs Topology (`sandbox_topology.rs`)
+Three-level copy-on-write filesystem:
+- **Level 0:** Base layer — full repo, read-only, shared by ALL sandboxes (zero duplication)
+- **Level 1:** Sandbox layer — CoW per sandbox, scoped filesystem view
+- **Level 2:** Agent layer — CoW per agent, fully isolated writes
+
+On task completion the agent layer produces a clean git diff and is discarded.
+Checkpoints are snapshots of the agent CoW layer after each tool call.
+
+### Layer 3 — Scheduler (`scheduler.rs`)
+Event-driven task dispatcher. Maintains dependency counters (`DashMap<TaskId, AtomicUsize>`).
+When a task completes, counters on all dependents decrement. Any task hitting zero is
+immediately dispatched to an idle agent in the correct sandbox. No batching.
+
+### Layer 4 — Agent Execution with Checkpoints (`agent_execution.rs`, `checkpoint.rs`)
+Each agent is a Gemini tool-calling loop running inside an isolated container via the agentd
+socket. Checkpoint saved after **every** tool call. Three-tier error handling:
+- **Tier 1** (tool failure): Rollback to checkpoint, retry (max 3)
+- **Tier 2** (agent crash): Spawn fresh agent, restore from checkpoint, continue
+- **Tier 3** (repeated failure): Escalate to human with full log
+
+### Layer 5 — Parallel Merge (`merge_worker.rs`)
+Tree-pattern merge within each sandbox: N diffs → N/2 merge workers in parallel, repeat
+until one result remains. Total rounds: log₂(N). LLM-assisted conflict repair on failure.
+
+### Layer 6 — Verification Loop (`verification.rs`)
+After sandbox work completes, a verification planner generates a test task graph (planned
+once, not regenerated each round). Test agents run against the merged result. Failures inject
+fix tasks back into the scheduler. Maximum 3 rounds, then sandbox is marked `PARTIALLY_VERIFIED`.
+
+### Layer 7 — Cross-Sandbox Merge (`new_orchestrator.rs`)
+All verified sandbox diffs are merged by one worker. Integration conflicts (frontend calling
+a changed backend endpoint) are caught and LLM-repaired here. Final output: clean, tested,
+merged codebase.
+
+---
+
+## Skills System
+
+Skills are domain-specific knowledge files (`.skill`) stored in `~/.mowisai/skills/`.
+On every orchestration run, all installed skills are loaded and injected into every agent's
+LLM system instruction — giving agents persistent institutional knowledge without re-prompting.
+
+### Skill File Format
+
+Skills are TOML files with a `[meta]` section and `[content]` section:
+
+```toml
+[meta]
+name = "our-api-conventions"
+display_name = "Our API Conventions"
+version = "1.0.0"
+description = "REST API patterns and naming rules used across all services"
+created = "2026-05-18"
+author = "engineering-team"
+tags = ["api", "conventions", "rest"]
+always_load = true
+
+[content]
+knowledge = """
+All REST endpoints follow snake_case naming.
+Auth uses Bearer JWT tokens — never API keys in query params.
+Error responses always include { "error": string, "code": string }.
+Pagination uses cursor-based pagination with `next_cursor` field.
+"""
+```
+
+### Creating Skills — LLM-Powered Creator
+
+Skills are **not** written by hand. The LLM writes them for you via natural conversation.
+
+**In the TUI** (interactive terminal):
+```
+/skill create
+```
+The LLM opens a conversation, asks questions about what you want to encode, then generates
+and saves the `.skill` file automatically. When it's ready, it emits a `<skill>...</skill>`
+TOML block in its response — the system detects this, parses it, saves it to disk, and
+confirms with a status message. You never write TOML manually.
+
+**From the terminal** (non-TUI):
+```bash
+agentd skills create
+```
+Launches the same LLM conversation in your terminal via stdin/stdout.
+
+### TUI Commands
+
+| Command | Action |
+|---|---|
+| `/skill create` or `/skill new` | Start LLM skill creator |
+| `/skill cancel` | Exit skill creator mode |
+| `/skill list` | List installed skills |
+| `/skill remove <name>` | Remove a skill |
+
+### Skills Directory
+```bash
+agentd skills dir       # e.g. /home/user/.mowisai/skills/
+```
+
+---
+
+## Integration Plugins (80 Tools)
+
+80 native tools across 10 external platforms, available to every agent via the socket API.
+All credentials are read from environment variables — never hardcoded.
+
+### GitHub (16 tools) — `GITHUB_TOKEN`
+`github_list_repos`, `github_get_repo`, `github_list_issues`, `github_get_issue`,
+`github_create_issue`, `github_update_issue`, `github_add_issue_comment`,
+`github_list_pull_requests`, `github_get_pull_request`, `github_create_pull_request`,
+`github_merge_pull_request`, `github_search_code`, `github_search_issues`,
+`github_get_file_contents`, `github_list_workflow_runs`, `github_get_commit`
+
+### Linear (8 tools) — `LINEAR_API_KEY`
+`linear_list_teams`, `linear_list_issues`, `linear_get_issue`, `linear_create_issue`,
+`linear_update_issue`, `linear_add_comment`, `linear_list_projects`, `linear_list_workflow_states`
+
+### Slack (8 tools) — `SLACK_BOT_TOKEN`
+`slack_list_channels`, `slack_post_message`, `slack_get_channel_history`,
+`slack_get_thread_replies`, `slack_add_reaction`, `slack_list_users`,
+`slack_set_channel_topic`, `slack_upload_file`
+
+### Jira (8 tools) — `JIRA_BASE_URL` + `JIRA_API_TOKEN` + `JIRA_EMAIL`
+`jira_list_projects`, `jira_search_issues`, `jira_get_issue`, `jira_create_issue`,
+`jira_update_issue`, `jira_add_comment`, `jira_get_transitions`, `jira_transition_issue`
+
+### Notion (6 tools) — `NOTION_TOKEN`
+`notion_search`, `notion_get_page`, `notion_create_page`, `notion_update_page`,
+`notion_list_databases`, `notion_query_database`
+
+### Sentry (7 tools) — `SENTRY_AUTH_TOKEN` + `SENTRY_ORG` (+ optional `SENTRY_BASE_URL`)
+`sentry_list_projects`, `sentry_list_issues`, `sentry_get_issue`, `sentry_update_issue`,
+`sentry_list_events`, `sentry_get_event`, `sentry_list_releases`
+
+### Stripe (8 tools) — `STRIPE_SECRET_KEY`
+`stripe_list_customers`, `stripe_get_customer`, `stripe_create_customer`,
+`stripe_list_charges`, `stripe_get_charge`, `stripe_list_subscriptions`,
+`stripe_list_invoices`, `stripe_list_products`
+
+### Vercel (9 tools) — `VERCEL_TOKEN` (+ optional `team_id` parameter)
+`vercel_list_projects`, `vercel_get_project`, `vercel_list_deployments`,
+`vercel_get_deployment`, `vercel_get_deployment_events`, `vercel_list_domains`,
+`vercel_get_domain`, `vercel_cancel_deployment`, `vercel_list_env_vars`
+
+### PagerDuty (7 tools) — `PAGERDUTY_TOKEN`
+`pagerduty_list_services`, `pagerduty_list_incidents`, `pagerduty_get_incident`,
+`pagerduty_create_incident`, `pagerduty_update_incident`, `pagerduty_list_escalation_policies`,
+`pagerduty_list_oncalls`
+
+### Datadog (7 tools) — `DATADOG_API_KEY` + `DATADOG_APP_KEY` (+ optional `DATADOG_SITE` for EU)
+`datadog_query_metrics`, `datadog_list_monitors`, `datadog_get_monitor`,
+`datadog_create_monitor`, `datadog_mute_monitor`, `datadog_list_dashboards`,
+`datadog_search_logs`
+
+---
+
+## mowis-desktop — Desktop Application
+
+`mowis-desktop/` is a **Tauri-based desktop application** — a separate product that wraps
+`agentd` with a native GUI. It lives as its own workspace crate and has its own build process.
+
+- **Rust backend:** `mowis-desktop/src-tauri/`
+- **Frontend:** Web-based UI served by Tauri
+- **Relationship to agentd:** mowis-desktop spawns and communicates with agentd; it does
+  not share a process. Think of agentd as the engine and mowis-desktop as the dashboard.
+
+The desktop app is a **separate product** from the agentd CLI/daemon. Development of the two
+is independent. Do not add mowis-desktop dependencies into agentd, and vice versa.
+
+---
+
+## Build and Test
+
+```bash
+# Build everything
+cargo build --release
+
+# Run all tests (must stay at 67+, never regress)
+cargo test
+
+# Run a specific test
+cargo test --package agentd test_socket_pool_bounded
+
+# Performance gate: 2000 tasks, 1000 agents, <420s
+bash scripts/perf-gate.sh
+
+# Override budget
+BUDGET_MS=300000 bash scripts/perf-gate.sh
+```
+
+---
+
+## AI Backend
+
+- **Model:** Vertex AI Gemini 2.5 Pro
+- **GCP Project:** `company-internal-tools-490516`
+- **Auth:** `gcloud auth application-default login`
+
+---
+
+## Hard Invariants
+
+These are never negotiable:
+
+- **No direct agent-to-agent communication** — orchestrator-mediated coordination only
+- **IDs are always `String` in JSON** — never `u64`
+- **Never delete or modify tests** — fix the implementation, not the test
+- **Never stub tool implementations** — all tools execute in container via chroot
+- **67+ tests must always pass** — never regress the test suite
+- **No `unwrap()` in production code paths** — use `?` or proper error handling
+- **agentd socket API is immutable** — orchestration talks to agentd via socket only
+- **Always read stdout/stderr concurrently** — sequential pipe reading causes deadlock
+- **Bump `BUILD_NUMBER` before every push to main** — see `agentd/src/version.rs`
+
+---
+
+## Version Tracking
+
+`agentd/src/version.rs` is the single source of truth for which binary is running:
+
+```rust
+pub const BUILD_NUMBER: &str = "YYYYMMDD.N";
+```
+
+Format: date + Nth push of the day (e.g. `20260518.3`). Exposed via:
+- CLI: `agentd --version`
+- Socket API: `get_config` response includes `version` and `build_number` fields
+- Printed on socket server startup
+
+**Bump this before every push to main. Failure = impossible to verify deployments.**
+
+---
+
+## Project Layout
+
+```
+MowisAI/
+├── agentd/
+│   └── src/
+│       ├── main.rs               # CLI entry point
+│       ├── lib.rs                # Crate root, module declarations
+│       ├── version.rs            # BUILD_NUMBER — bump before every push
+│       ├── socket_server.rs      # Unix socket server + worker thread pools
+│       ├── sandbox.rs            # Sandbox primitives, cgroup/chroot
+│       ├── vertex_agent.rs       # Gemini/Vertex AI client, tool-calling loop
+│       ├── persistence.rs        # WAL, checkpointing, recovery journal
+│       ├── orchestration/        # 7-layer orchestration system
+│       ├── tools/                # 160+ tools across 14 categories + 10 platforms
+│       │   ├── mod.rs            # Registry + factory functions
+│       │   ├── discover_tools.rs # Tool catalog for agent discovery
+│       │   ├── github_api.rs     # GitHub (16 tools)
+│       │   ├── linear_api.rs     # Linear (8 tools)
+│       │   ├── slack_api.rs      # Slack (8 tools)
+│       │   ├── jira_api.rs       # Jira (8 tools)
+│       │   ├── notion_api.rs     # Notion (6 tools)
+│       │   ├── sentry_api.rs     # Sentry (7 tools)
+│       │   ├── stripe_api.rs     # Stripe (8 tools)
+│       │   ├── vercel_api.rs     # Vercel (9 tools)
+│       │   ├── pagerduty_api.rs  # PagerDuty (7 tools)
+│       │   └── datadog_api.rs    # Datadog (7 tools)
+│       ├── skills/               # Skills system
+│       │   ├── mod.rs            # SkillManager, Skill types, build_skills_context()
+│       │   └── creator.rs        # LLM-powered skill creator
+│       └── tui/                  # Interactive terminal UI
+│           ├── mod.rs            # TUI entry point, event loop
+│           ├── app.rs            # App state, key handlers, skill creator TUI flow
+│           ├── ui.rs             # Rendering
+│           ├── event.rs          # TuiEvent enum, event thread
+│           └── widgets/          # Custom ratatui widgets
+├── agentd-protocol/
+│   └── src/lib.rs                # Shared types: TaskGraph, SandboxTopology, Checkpoint
+├── runtime/
+│   └── src/
+│       ├── main.rs               # Control plane entry point
+│       └── agentd_client.rs      # Typed client for agentd socket API
+├── mowis-desktop/                # Tauri desktop application (separate product)
+│   └── src-tauri/                # Rust backend for desktop app
+└── scripts/
+    └── perf-gate.sh              # Performance gate (2000 tasks, 1000 agents, 420s)
+```
+
+---
+
+## Cross-Crate Dependencies
+
+```
+agentd        → agentd-protocol
+agentd        → runtime
+runtime       → agentd-protocol
+mowis-desktop → (agentd via process/socket, not Cargo dependency)
+```
+
+`agentd-protocol` is the shared types crate. It has no dependencies on the other crates —
+this prevents circular dependencies.
