@@ -90,6 +90,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                 Ok(TuiEvent::LogEntry { level, message, timestamp }) => {
                     app.on_log_entry(level, message, timestamp);
                 }
+                Ok(TuiEvent::SkillSaved(path)) => {
+                    app.on_skill_saved(path);
+                }
                 _ => break,
             }
         }
