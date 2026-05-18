@@ -72,6 +72,9 @@ enum Commands {
 
     /// Run performance benchmarks
     Benchmark(BenchmarkArgs),
+
+    /// Skill management (list, create, load, remove, show)
+    Skills(SkillsArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +346,46 @@ pub enum PluginsAction {
 }
 
 // ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+#[derive(Args, Debug)]
+pub struct SkillsArgs {
+    #[command(subcommand)]
+    pub action: SkillsAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillsAction {
+    /// List all installed skills
+    List,
+
+    /// Show the full content of a skill
+    Show {
+        /// Skill ID (e.g. ui-ux)
+        name: String,
+    },
+
+    /// Interactively create a new skill
+    Create,
+
+    /// Load (install) a .skill file into the skills directory
+    Load {
+        /// Path to the .skill file
+        path: String,
+    },
+
+    /// Remove a skill
+    Remove {
+        /// Skill ID
+        name: String,
+    },
+
+    /// Print the skills directory path
+    Dir,
+}
+
+// ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
 
@@ -549,6 +592,8 @@ fn main() -> Result<()> {
         Commands::History(args) => cmd_history(args),
 
         Commands::Benchmark(args) => cmd_benchmark(args),
+
+        Commands::Skills(args) => cmd_skills(args),
     }
 }
 
@@ -693,10 +738,31 @@ fn cmd_orchestrate(args: OrchestrateArgs) -> Result<()> {
         mode_override,
     };
 
+    // Load skills and log them
+    let skill_manager = libagent::skills::SkillManager::new();
+    let loaded_skills = skill_manager.load_all();
+    if loaded_skills.is_empty() {
+        log::info!("No skills loaded (add skills with 'agentd skills create')");
+    } else {
+        log::info!("Loaded {} skill(s): {}",
+            loaded_skills.len(),
+            loaded_skills.iter().map(|s| s.meta.name.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    let skills_context = libagent::skills::build_skills_context(&loaded_skills);
+
     let orchestrator = libagent::orchestration::new_orchestrator::NewOrchestrator::new(config);
 
+    // Attach skills context to the prompt so the orchestration LLM sees it
+    let augmented_prompt = if skills_context.is_empty() {
+        args.prompt.clone()
+    } else {
+        format!("{}\n\n[Skills loaded: {}]", args.prompt,
+            loaded_skills.iter().map(|s| s.meta.name.as_str()).collect::<Vec<_>>().join(", "))
+    };
+
     let rt = tokio::runtime::Runtime::new()?;
-    match rt.block_on(orchestrator.run(&args.prompt)) {
+    match rt.block_on(orchestrator.run(&augmented_prompt)) {
         Ok(output) => {
             println!("\nOrchestration complete!");
             println!("Summary: {}", output.summary);
@@ -963,6 +1029,99 @@ fn cmd_plugins(args: PluginsArgs) -> Result<()> {
                 Some(name) => println!("Updating plugin '{}'...", name),
                 None => println!("Updating all plugins..."),
             }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_skills(args: SkillsArgs) -> Result<()> {
+    use libagent::skills::{SkillManager, skills_dir};
+
+    let manager = SkillManager::new();
+
+    match args.action {
+        SkillsAction::List => {
+            let skills = manager.load_all();
+            if skills.is_empty() {
+                println!("No skills installed.");
+                println!("  Skills directory: {}", skills_dir().display());
+                println!("  Create one with:  agentd skills create");
+                println!("  Load a file with: agentd skills load <path>");
+                return Ok(());
+            }
+            println!("=== Installed Skills ({}) ===\n", skills.len());
+            println!("  {:<20} {:<8} {}", "NAME", "VERSION", "DESCRIPTION");
+            println!("  {}", "─".repeat(70));
+            for s in &skills {
+                println!(
+                    "  {:<20} {:<8} {}",
+                    s.meta.name, s.meta.version, s.meta.description
+                );
+            }
+            println!("\n  Skills dir: {}", skills_dir().display());
+            println!("  These skills are injected into every agent's system prompt.");
+        }
+
+        SkillsAction::Show { name } => {
+            match manager.get(&name) {
+                Some(skill) => {
+                    println!("=== {} (v{}) ===", skill.meta.display_name, skill.meta.version);
+                    println!("  ID:          {}", skill.meta.name);
+                    println!("  Description: {}", skill.meta.description);
+                    println!("  Author:      {}", skill.meta.author);
+                    println!("  Created:     {}", skill.meta.created);
+                    if !skill.meta.tags.is_empty() {
+                        println!("  Tags:        {}", skill.meta.tags.join(", "));
+                    }
+                    println!("\n--- Content ---\n");
+                    println!("{}", skill.content.text);
+                }
+                None => {
+                    eprintln!("Skill '{}' not found. Run 'agentd skills list' to see installed skills.", name);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        SkillsAction::Create => {
+            match libagent::skills::creator::run_creator() {
+                Ok(path) => {
+                    println!("Skill saved to: {}", path.display());
+                }
+                Err(e) => {
+                    eprintln!("Skill creation failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        SkillsAction::Load { path } => {
+            let source = std::path::Path::new(&path);
+            if !source.exists() {
+                eprintln!("File not found: {}", path);
+                std::process::exit(1);
+            }
+            match manager.install(source) {
+                Ok(dest) => println!("✓ Skill installed to: {}", dest.display()),
+                Err(e) => {
+                    eprintln!("Failed to install skill: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        SkillsAction::Remove { name } => {
+            match manager.remove(&name) {
+                Ok(()) => println!("✓ Skill '{}' removed.", name),
+                Err(e) => {
+                    eprintln!("Failed to remove skill: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        SkillsAction::Dir => {
+            println!("{}", skills_dir().display());
         }
     }
     Ok(())

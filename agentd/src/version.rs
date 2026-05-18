@@ -9,7 +9,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Build number — MUST be bumped before every push.
 /// Format: YYYYMMDD.N where N is the Nth push of the day.
 /// This is the single source of truth for "which code is running".
-pub const BUILD_NUMBER: &str = "20260518.1";
+pub const BUILD_NUMBER: &str = "20260518.2";
 
 /// Get full version string with build info
 pub fn get_version() -> String {
