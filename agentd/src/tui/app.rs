@@ -657,9 +657,9 @@ impl App {
                 };
 
                 let project_root = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                let overlay_root = project_root.join(".mowisai/overlay");
-                let checkpoint_root = project_root.join(".mowisai/checkpoints");
-                let merge_work_dir = project_root.join(".mowisai/merge");
+                let overlay_root = std::env::temp_dir().join("mowisai-overlay");
+                let checkpoint_root = std::env::temp_dir().join("mowisai-checkpoints");
+                let merge_work_dir = std::env::temp_dir().join("mowisai-merge");
 
                 let orch_config = crate::orchestration::OrchestratorConfig {
                     llm_config,
@@ -984,6 +984,12 @@ Skills:\n\
             return;
         }
 
+        // Initialize a git repo so git apply can create new files
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&target_path)
+            .output();
+
         // Try git apply
         let result = std::process::Command::new("git")
             .args(["apply", "--whitespace=nowarn", "-"])
@@ -1006,6 +1012,31 @@ Skills:\n\
                     role: MessageRole::System,
                     content: format!("Code saved to {} via git apply.", target_path.display()),
                 });
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // Fall back to writing as raw patch
+                let patch_path = target_path.join("mowisai_output.patch");
+                match std::fs::write(&patch_path, diff.as_bytes()) {
+                    Ok(_) => {
+                        self.messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: format!(
+                                "git apply failed ({}): {}\nDiff saved to {}\nTo apply manually: cd {} && git apply mowisai_output.patch",
+                                output.status.code().unwrap_or(-1),
+                                stderr.trim(),
+                                patch_path.display(),
+                                target_path.display(),
+                            ),
+                        });
+                    }
+                    Err(e) => {
+                        self.messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: format!("Failed to write patch file: {}", e),
+                        });
+                    }
+                }
             }
             _ => {
                 // Fall back to writing as raw patch

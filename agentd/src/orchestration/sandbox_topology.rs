@@ -264,14 +264,14 @@ impl TopologyManager {
         Ok(handle)
     }
 
-    /// Capture git diff from container upperdir against the read-only project base.
+    /// Capture git diff from the agent's container.
     ///
     /// Strategy (in order):
-    ///  1. Host-side `git diff --no-index` between `project_root` and the container's
-    ///     overlayfs `root/workspace` directory (reliable, includes all written files).
-    ///  2. Socket-side `git diff --cached HEAD` inside the container (fallback when the
-    ///     host path isn't accessible, e.g. when agentd runs as root but the orchestrator
-    ///     doesn't have read permission).
+    ///  1. Socket-side `git add -A && git diff --cached HEAD` inside the container
+    ///     via agentd. This is the most reliable method since agentd has full access
+    ///     to the container's overlayfs (running as root).
+    ///  2. Host-side `git diff --no-index` between `project_root` and the container's
+    ///     overlayfs `root/workspace` directory (fallback when socket is unavailable).
     ///
     /// Returns empty string (not an error) when the agent made no changes.
     pub async fn capture_agent_diff(&self, agent_id: &str) -> Result<String> {
@@ -314,89 +314,38 @@ impl TopologyManager {
             sandboxes.get(&sandbox_name).cloned().unwrap_or(recorded_sandbox)
         };
 
+        // ── Strategy 1: Socket-side diff (primary — most reliable) ───────────
+        // Runs inside the container via agentd, so it has full overlayfs access.
+        let diag_path = std::path::PathBuf::from("/tmp/mowis-diff-debug.log");
+        let _ = std::fs::write(&diag_path, format!(
+            "agent={} sandbox={} container={} socket={}\n",
+            &agent_id[..8.min(agent_id.len())],
+            sandbox_id,
+            container_id,
+            self.socket_path,
+        ));
+        let diag = |msg: &str| {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open(&diag_path)
+                .and_then(|mut f| { use std::io::Write; writeln!(f, "{}", msg) });
+        };
+
+        diag(&format!("socket_path={}", self.socket_path));
+        diag(&format!("socket_exists={}", std::path::Path::new(&self.socket_path).exists()));
+
+        // Resolve project_base for file capture fallback
         let scopes = self.sandbox_scopes.read().await;
         let scope = scopes.get(&sandbox_name).cloned().unwrap_or_default();
         drop(scopes);
-
-        let project_base = if scope.trim().is_empty() || scope == "/" {
+        let project_base = if scope.trim().is_empty() || scope == "/" || scope == "." {
             self.project_root.clone()
         } else {
             self.project_root.join(scope.trim_matches('/'))
         };
+        // Canonicalize to remove /./  components
+        let project_base = project_base.canonicalize().unwrap_or(project_base);
+        diag(&format!("project_base={}", project_base.display()));
 
-        // Strategy 1: host-side diff (fast, no socket round-trip)
-        // Use temp_dir() so it works if /tmp is a symlink or on non-Linux systems.
-        let workspace_root = std::env::temp_dir()
-            .join(format!("container-{}", container_id))
-            .join("root")
-            .join("workspace");
-
-        log::info!(
-            "  [diff] agent={} container={} workspace={} exists={} project_base={} exists={}",
-            &agent_id[..8.min(agent_id.len())],
-            &container_id[..8.min(container_id.len())],
-            workspace_root.display(),
-            workspace_root.exists(),
-            project_base.display(),
-            project_base.exists(),
-        );
-
-        if workspace_root.exists() && project_base.exists() {
-            let diff_output = std::process::Command::new("git")
-                .arg("diff")
-                .arg("--no-index")
-                .arg("--binary")
-                .arg(&project_base)
-                .arg(&workspace_root)
-                .output();
-
-            match diff_output {
-                Ok(out) if out.status.success() || out.status.code() == Some(1) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                    if !stdout.trim().is_empty() {
-                        log::info!(
-                            "  ✓ Host-side diff captured: {} bytes (agent {})",
-                            stdout.len(),
-                            &agent_id[..8.min(agent_id.len())]
-                        );
-                        let filtered = Self::filter_git_internals(&stdout);
-                        if filtered.trim().is_empty() {
-                            log::info!("  ℹ️  Host diff empty after filtering for agent {} — no changes", &agent_id[..8.min(agent_id.len())]);
-                            return Ok(String::new());
-                        }
-                        return Self::normalize_no_index_diff(&filtered, &project_base, &workspace_root);
-                    }
-                    // No diff → workspace identical to project — agent made no changes
-                    log::info!("  ℹ️  Host diff empty for agent {} — no changes", &agent_id[..8.min(agent_id.len())]);
-                    return Ok(String::new());
-                }
-                Ok(out) => {
-                    log::warn!(
-                        "  Host diff failed (exit {}): {}",
-                        out.status.code().unwrap_or(-1),
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                }
-                Err(e) => {
-                    log::warn!("  Host diff spawn failed: {}", e);
-                }
-            }
-        } else {
-            log::warn!(
-                "  Host diff path not accessible: {} (exists={}), falling back to socket diff",
-                workspace_root.display(),
-                workspace_root.exists()
-            );
-        }
-
-        // Strategy 2: socket-side diff via `git diff --cached HEAD` inside the container
-        log::info!(
-            "  Falling back to socket diff for agent {} in sandbox {}",
-            &agent_id[..8.min(agent_id.len())],
-            sandbox_id
-        );
-
-        // Strategy 2a: ls the workspace to see what the agent actually wrote
+        // Step 1: ls the workspace to see what the agent actually wrote
         let ls_req = serde_json::json!({
             "request_type": "invoke_tool",
             "sandbox": sandbox_id,
@@ -406,16 +355,24 @@ impl TopologyManager {
         });
         let socket_path_ls = self.socket_path.clone();
         let ls_req_c = ls_req.clone();
-        if let Ok(Ok(ls_resp)) = tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             super::pooled_socket_request(&socket_path_ls, &ls_req_c)
         }).await {
-            if let Some(r) = ls_resp.get("result") {
-                let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
-                log::info!("  [diff/socket] /workspace contents:\n{}", out);
+            Ok(Ok(ls_resp)) => {
+                if let Some(r) = ls_resp.get("result") {
+                    let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+                    diag(&format!("ls OK: {}", out.trim()));
+                } else if let Some(err) = ls_resp.get("error").and_then(|e| e.as_str()) {
+                    diag(&format!("ls error field: {}", err));
+                } else {
+                    diag(&format!("ls unexpected response: {}", ls_resp));
+                }
             }
+            Ok(Err(e)) => diag(&format!("ls request failed: {}", e)),
+            Err(e) => diag(&format!("ls spawn_blocking failed: {}", e)),
         }
 
-        // Strategy 2b: git status to see staged/unstaged files
+        // Step 2: git status to see staged/unstaged files
         let status_req = serde_json::json!({
             "request_type": "invoke_tool",
             "sandbox": sandbox_id,
@@ -425,15 +382,20 @@ impl TopologyManager {
         });
         let socket_path_st = self.socket_path.clone();
         let status_req_c = status_req.clone();
-        if let Ok(Ok(st_resp)) = tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             super::pooled_socket_request(&socket_path_st, &status_req_c)
         }).await {
-            if let Some(r) = st_resp.get("result") {
-                let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
-                log::info!("  [diff/socket] git status: {}", out.trim());
+            Ok(Ok(st_resp)) => {
+                if let Some(r) = st_resp.get("result") {
+                    let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+                    diag(&format!("git status: {}", out.trim()));
+                }
             }
+            Ok(Err(e)) => diag(&format!("git status failed: {}", e)),
+            Err(e) => diag(&format!("git status spawn_blocking failed: {}", e)),
         }
 
+        // Step 3: git add -A to stage all changes
         let add_req = serde_json::json!({
             "request_type": "invoke_tool",
             "sandbox": sandbox_id,
@@ -443,70 +405,229 @@ impl TopologyManager {
         });
         let socket_path = self.socket_path.clone();
         let add_req_c = add_req.clone();
-        if let Ok(Ok(add_resp)) = tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             super::pooled_socket_request(&socket_path, &add_req_c)
         }).await {
-            if let Some(r) = add_resp.get("result") {
-                let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
-                log::info!("  [diff/socket] git add -A: {}", out.trim());
+            Ok(Ok(add_resp)) => {
+                if let Some(r) = add_resp.get("result") {
+                    let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+                    diag(&format!("git add: {}", out.trim()));
+                }
             }
+            Ok(Err(e)) => diag(&format!("git add failed: {}", e)),
+            Err(e) => diag(&format!("git add spawn_blocking failed: {}", e)),
         }
 
+        // Step 4: Get the diff. Use GIT_PAGER=cat to prevent pager hangs in Alpine.
+        // Try `git diff --cached` first (doesn't need HEAD), fall back to raw file listing.
         let diff_req = serde_json::json!({
             "request_type": "invoke_tool",
             "sandbox": sandbox_id,
             "container": container_id,
             "name": "run_command",
             "input": {
-                "cmd": "cd /workspace && git rev-parse HEAD 2>&1; echo ---; git diff --cached HEAD 2>&1; echo ---cached_done",
-                "timeout": 60
+                "cmd": "cd /workspace && GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat git diff --cached --no-color 2>&1; echo EXIT:$?",
+                "timeout": 15
             }
         });
         let socket_path2 = self.socket_path.clone();
         let diff_req_c = diff_req.clone();
-        let resp = tokio::task::spawn_blocking(move || {
+        let resp = match tokio::task::spawn_blocking(move || {
             super::pooled_socket_request(&socket_path2, &diff_req_c)
-        }).await.context("spawn_blocking socket diff")??;
+        }).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                diag(&format!("git diff request failed: {}", e));
+                return Ok(String::new());
+            }
+            Err(e) => {
+                diag(&format!("git diff spawn_blocking failed: {}", e));
+                return Ok(String::new());
+            }
+        };
 
         if let Some(result) = resp.get("result") {
             let stdout = result.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
             let stderr = result.get("stderr").and_then(|s| s.as_str()).unwrap_or("");
-            log::info!("  [diff/socket] diff stdout: {:?}", &stdout[..stdout.len().min(500)]);
+            diag(&format!("git diff stdout ({} bytes): {:.300}", stdout.len(), stdout));
             if !stderr.trim().is_empty() {
-                log::warn!("  [diff/socket] diff stderr: {}", stderr.trim());
+                diag(&format!("git diff stderr: {}", stderr.trim()));
+            }
+            if !stdout.trim().is_empty() && stdout.contains("diff --git") {
+                diag(&format!("✓ Socket diff captured: {} bytes", stdout.len()));
+                return Ok(stdout.to_string());
             }
             if !stdout.trim().is_empty() {
-                // Extract the actual diff portion (between --- and ---cached_done markers)
-                let diff_part = if let Some(idx) = stdout.find("---\n") {
-                    let after = &stdout[idx + 4..];
-                    if let Some(end) = after.find("---cached_done") {
-                        after[..end].to_string()
-                    } else {
-                        after.to_string()
-                    }
-                } else {
-                    stdout.to_string()
-                };
+                diag(&format!("git diff output has no 'diff --git' marker, trying raw file capture"));
+            }
+        } else {
+            diag(&format!("git diff no result field: {}", resp));
+        }
 
-                if !diff_part.trim().is_empty() && diff_part.contains("diff --git") {
-                    log::info!(
-                        "  ✓ Socket diff captured: {} bytes (agent {})",
-                        diff_part.len(),
-                        &agent_id[..8.min(agent_id.len())]
-                    );
-                    return Ok(diff_part);
+        // Fallback: if git diff didn't work, capture files directly via the socket.
+        // Read each non-git file and build a unified diff manually.
+        diag("Git diff failed/no output — using raw file capture fallback");
+
+        let find_req = serde_json::json!({
+            "request_type": "invoke_tool",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "name": "run_command",
+            "input": {
+                "cmd": "cd /workspace && find . -type f ! -path './.git/*' -print0 | xargs -0 ls -la 2>&1",
+                "timeout": 10
+            }
+        });
+        let socket_path3 = self.socket_path.clone();
+        let find_req_c = find_req.clone();
+        match tokio::task::spawn_blocking(move || {
+            super::pooled_socket_request(&socket_path3, &find_req_c)
+        }).await {
+            Ok(Ok(find_resp)) => {
+                if let Some(r) = find_resp.get("result") {
+                    let out = r.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+                    diag(&format!("find result: {:.500}", out));
                 }
             }
-            if !stderr.trim().is_empty() {
-                log::warn!("  Socket diff stderr: {}", stderr);
+            Ok(Err(e)) => diag(&format!("find failed: {}", e)),
+            Err(e) => diag(&format!("find spawn_blocking failed: {}", e)),
+        }
+
+        // ── Strategy 2: Read files from container via socket ─────────────────
+        // Since agentd runs as root and the overlayfs is not readable from
+        // user space, we read each file through the socket API and write them
+        // to the host-side workspace. Then diff against the empty project base.
+        diag("Reading agent files from container via socket...");
+
+        // Get list of files the agent wrote (excluding .git)
+        let find_req2 = serde_json::json!({
+            "request_type": "invoke_tool",
+            "sandbox": sandbox_id,
+            "container": container_id,
+            "name": "run_command",
+            "input": {
+                "cmd": "cd /workspace && find . -type f ! -path './.git/*' 2>/dev/null",
+                "timeout": 10
+            }
+        });
+        let socket_path4 = self.socket_path.clone();
+        let find_req2_c = find_req2.clone();
+        let file_list_resp = match tokio::task::spawn_blocking(move || {
+            super::pooled_socket_request(&socket_path4, &find_req2_c)
+        }).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                diag(&format!("file list request failed: {}", e));
+                return Ok(String::new());
+            }
+            Err(e) => {
+                diag(&format!("file list spawn_blocking failed: {}", e));
+                return Ok(String::new());
+            }
+        };
+
+        let files_raw = file_list_resp
+            .get("result")
+            .and_then(|r| r.get("stdout"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        let file_list: Vec<&str> = files_raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        diag(&format!("Found {} files to capture", file_list.len()));
+
+        if file_list.is_empty() {
+            diag("No files found in workspace — agent wrote nothing");
+            return Ok(String::new());
+        }
+
+        // Read each file and write to the project_base on host
+        let mut captured_files = 0u32;
+        for file_path in &file_list {
+            let clean_path = file_path.trim();
+            if clean_path.is_empty() || clean_path.starts_with(".git") {
+                continue;
+            }
+
+            // Read file content via socket
+            let read_req = serde_json::json!({
+                "request_type": "invoke_tool",
+                "sandbox": sandbox_id,
+                "container": container_id,
+                "name": "read_file",
+                "input": { "path": format!("/workspace/{}", clean_path.trim_start_matches("./")) }
+            });
+            let socket_path_r = self.socket_path.clone();
+            let read_req_c = read_req.clone();
+            let read_resp = match tokio::task::spawn_blocking(move || {
+                super::pooled_socket_request(&socket_path_r, &read_req_c)
+            }).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    diag(&format!("read {} failed: {}", clean_path, e));
+                    continue;
+                }
+                Err(e) => {
+                    diag(&format!("read {} spawn_blocking failed: {}", clean_path, e));
+                    continue;
+                }
+            };
+
+            if let Some(content) = read_resp.get("result").and_then(|r| r.get("content")).and_then(|c| c.as_str()) {
+                let host_path = project_base.join(clean_path.trim_start_matches("./"));
+                if let Some(parent) = host_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::write(&host_path, content) {
+                    diag(&format!("write {} failed: {}", host_path.display(), e));
+                } else {
+                    captured_files += 1;
+                }
+            } else {
+                diag(&format!("read {} returned no content: {:.200}", clean_path, read_resp));
             }
         }
 
-        // Both strategies failed or found no changes
-        log::warn!(
-            "  ⚠️  capture_agent_diff: no diff found for agent {} (both strategies exhausted)",
-            &agent_id[..8.min(agent_id.len())]
-        );
+        diag(&format!("Captured {} files to {}", captured_files, project_base.display()));
+
+        // Generate a unified diff from the captured files.
+        // Instead of using git diff (which has path normalization issues),
+        // build the diff directly: each captured file is a "new file".
+        let mut diff_output = String::new();
+        for file_path in &file_list {
+            let clean_path = file_path.trim();
+            if clean_path.is_empty() || clean_path.starts_with(".git") {
+                continue;
+            }
+            let relative = clean_path.trim_start_matches("./");
+            let host_path = project_base.join(relative);
+            let content = match std::fs::read_to_string(&host_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let line_count = content.lines().count();
+            diff_output.push_str(&format!(
+                "diff --git a/{relative} b/{relative}\n\
+                 new file mode 100644\n\
+                 index 0000000..0000001\n\
+                 --- /dev/null\n\
+                 +++ b/{relative}\n\
+                 @@ -0,0 +1,{line_count} @@\n",
+                relative = relative,
+                line_count = line_count,
+            ));
+            for line in content.lines() {
+                diff_output.push('+');
+                diff_output.push_str(line);
+                diff_output.push('\n');
+            }
+        }
+
+        if !diff_output.trim().is_empty() {
+            diag(&format!("✓ Generated diff from captured files: {} bytes", diff_output.len()));
+            return Ok(diff_output);
+        }
+
+        // Both strategies found no changes
+        diag("⚠️  No diff found — all strategies exhausted");
         Ok(String::new())
     }
 
@@ -549,6 +670,10 @@ impl TopologyManager {
                 .replace(&workspace_slash, "b/")
                 .replace(&base_str, "a")
                 .replace(&workspace_str, "b");
+            // Clean up any ./ prefixes that git may have included
+            updated = updated.replace("a/./", "a/");
+            updated = updated.replace("b/./", "b/");
+            updated = updated.replace("/./", "/");
             if let Some(rest) = updated.strip_prefix("diff --git ") {
                 let mut parts = rest.split_whitespace();
                 if let (Some(lhs), Some(rhs)) = (parts.next(), parts.next()) {

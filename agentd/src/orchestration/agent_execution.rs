@@ -535,7 +535,12 @@ impl AgentExecutor {
         Err(anyhow!("Tool execution failed after retries"))
     }
 
-    /// Execute single tool via agentd socket
+    /// Execute single tool via agentd socket.
+    ///
+    /// Tool-level errors (e.g. "file not found", "is a directory") are returned
+    /// as `Ok(result)` with an `"error"` field so the agent loop can feed them
+    /// back to the LLM for recovery — NOT as `Err` which would kill the loop.
+    /// Only transport/socket failures return `Err`.
     async fn execute_tool(
         &self,
         sandbox_name: &str,
@@ -551,8 +556,11 @@ impl AgentExecutor {
             tool_args,
         )?;
 
-        if let Some(error) = result.get("error") {
-            return Err(anyhow!("Tool error: {}", error));
+        // Tool-level errors are returned as Ok with an "error" field.
+        // The agent loop will feed this back to the LLM so it can retry
+        // with a different approach (e.g. use list_files instead of read_file).
+        if result.get("error").is_some() {
+            return Ok(result);
         }
 
         Ok(result)
@@ -591,18 +599,19 @@ impl AgentExecutor {
             "container": container_id,
             "name": "run_command",
             "input": {
-                "cmd": "cd /workspace && (git rev-parse HEAD 2>/dev/null && git diff --cached HEAD || git diff --cached)",
-                "timeout": 60
+                "cmd": "cd /workspace && GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat git diff --cached --no-color 2>&1",
+                "timeout": 30
             }
         });
         let diff_response = super::socket_roundtrip(&self.socket_path, &diff_request)?;
         if let Some(result) = diff_response.get("result") {
             if let Some(stdout) = result.get("stdout").and_then(|o| o.as_str()) {
-                if !stdout.trim().is_empty() {
+                let trimmed = stdout.trim();
+                if !trimmed.is_empty() && trimmed.contains("diff --git") {
                     if is_verbose() {
-                        log::info!("  ✅ Captured {} bytes of diff", stdout.len());
+                        log::info!("  ✅ Captured {} bytes of diff", trimmed.len());
                     }
-                    return Ok(stdout.to_string());
+                    return Ok(trimmed.to_string());
                 }
             }
             if let Some(stderr) = result.get("stderr").and_then(|s| s.as_str()) {

@@ -890,10 +890,25 @@ impl NewOrchestrator {
             message: "Creating single sandbox (simple mode)...".into(),
         });
 
-        // Layer 2: create one minimal sandbox
+        // For simple mode, use a fresh temp directory as the workspace.
+        // The agent builds from scratch — it should NOT see the host project files.
+        // This prevents the agent from drowning in unrelated code and avoids
+        // massive git diffs that time out.
+        let simple_workspace = std::env::temp_dir().join(format!(
+            "mowis-simple-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ));
+        std::fs::create_dir_all(&simple_workspace)
+            .context("Failed to create simple mode workspace")?;
+        log::info!("  Simple mode workspace: {}", simple_workspace.display());
+
+        // Layer 2: create one minimal sandbox with the clean workspace
         let topology = Arc::new(
             TopologyManager::new(
-                self.config.project_root.clone(),
+                simple_workspace.clone(),
                 self.config.socket_path.clone(),
             )?
         );
@@ -934,10 +949,15 @@ impl NewOrchestrator {
             .context("Simple mode: failed to create agent layer")?;
 
         let system_prompt = format!(
-            "You are an expert software engineer. \
-             WORKING DIRECTORY: /workspace. ALL file paths must use /workspace prefix.\n\n\
+            "You are an expert software engineer working in a CLEAN, EMPTY workspace.\n\
+             WORKING DIRECTORY: /workspace (empty — you are building from scratch)\n\
+             ALL file paths must use /workspace prefix.\n\n\
              TASK: {}\n\n\
-             Write complete, production-quality code. No placeholders. No stubs.",
+             IMPORTANT:\n\
+             - The workspace is EMPTY. There are NO existing files. Do NOT try to read existing files.\n\
+             - Create ALL files needed for the project from scratch.\n\
+             - Write complete, production-quality code. No placeholders. No stubs.\n\
+             - After creating files, verify they work (e.g. run a syntax check).",
             prompt
         );
 

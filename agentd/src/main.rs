@@ -18,7 +18,7 @@ use libagent::setup::SetupWizard;
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -75,6 +75,9 @@ enum Commands {
 
     /// Skill management (list, create, load, remove, show)
     Skills(SkillsArgs),
+
+    /// Run the first-time setup wizard (configure AI provider, API key, model)
+    Setup,
 }
 
 // ---------------------------------------------------------------------------
@@ -562,38 +565,42 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Socket {
+        Some(Commands::Socket {
             path,
             log_level,
             max_sandboxes,
             cgroup,
             memory_limit,
-        } => cmd_socket(&path, &log_level, max_sandboxes, cgroup, memory_limit),
+        }) => cmd_socket(&path, &log_level, max_sandboxes, cgroup, memory_limit),
 
-        Commands::Orchestrate(args) => cmd_orchestrate(args),
+        Some(Commands::Orchestrate(args)) => cmd_orchestrate(args),
 
-        Commands::Simulate(cmd) => {
+        Some(Commands::Simulate(cmd)) => {
             init_logging("info");
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(cmd.run())?;
             Ok(())
         }
 
-        Commands::Chat(args) => cmd_chat(args),
+        Some(Commands::Chat(args)) => cmd_chat(args),
 
-        Commands::Status(args) => cmd_status(args),
+        Some(Commands::Status(args)) => cmd_status(args),
 
-        Commands::Templates(args) => cmd_templates(args),
+        Some(Commands::Templates(args)) => cmd_templates(args),
 
-        Commands::Plugins(args) => cmd_plugins(args),
+        Some(Commands::Plugins(args)) => cmd_plugins(args),
 
-        Commands::Health(args) => cmd_health(args),
+        Some(Commands::Health(args)) => cmd_health(args),
 
-        Commands::History(args) => cmd_history(args),
+        Some(Commands::History(args)) => cmd_history(args),
 
-        Commands::Benchmark(args) => cmd_benchmark(args),
+        Some(Commands::Benchmark(args)) => cmd_benchmark(args),
 
-        Commands::Skills(args) => cmd_skills(args),
+        Some(Commands::Skills(args)) => cmd_skills(args),
+
+        Some(Commands::Setup) => cmd_setup(),
+
+        None => cmd_tui(),
     }
 }
 
@@ -622,6 +629,42 @@ fn cmd_socket(
     }
     libagent::socket_server::run(path)?;
     Ok(())
+}
+
+fn cmd_setup() -> Result<()> {
+    let config = SetupWizard::run()?;
+    println!("Setup complete. Provider: {}, Model: {}", config.provider, config.model);
+    Ok(())
+}
+
+fn cmd_tui() -> Result<()> {
+    // Initialize logging (file-based, suppressed in TUI mode)
+    let log_path = MowisConfig::config_dir().join("agentd.log");
+    if let Err(e) = libagent::logging::init(&log_path) {
+        eprintln!("Warning: could not initialize logging: {}", e);
+    }
+
+    // Check if setup is needed — if so, run the wizard first
+    let config = if SetupWizard::needs_setup() {
+        SetupWizard::run()?
+    } else {
+        MowisConfig::load()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| MowisConfig::default())
+    };
+
+    // Set up signal handlers for clean TUI shutdown
+    setup_signal_handlers();
+
+    // Try to ensure socket server is running (non-blocking best-effort)
+    let socket_pid = match ensure_socket_server(&config.socket_path) {
+        Ok(()) => libagent::read_socket_pid().ok(),
+        Err(_) => None,
+    };
+
+    // Launch the interactive TUI
+    libagent::tui::run_interactive(config, socket_pid)
 }
 
 fn cmd_orchestrate(args: OrchestrateArgs) -> Result<()> {

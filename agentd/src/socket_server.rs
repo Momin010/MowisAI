@@ -482,6 +482,34 @@ fn validate_request(req: &SocketRequest) -> Result<(), String> {
     }
 }
 
+fn summarize_request(req: &SocketRequest) -> String {
+    let mut parts = Vec::new();
+    if let Some(ref s) = req.sandbox {
+        parts.push(format!("sandbox={}", s));
+    }
+    if let Some(ref c) = req.container {
+        parts.push(format!("container={}", c));
+    }
+    if let Some(ref n) = req.name {
+        parts.push(format!("tool={}", n));
+    }
+    if let Some(ref img) = req.image {
+        parts.push(format!("image={}", img));
+    }
+    if let Some(ref p) = req.project_root {
+        parts.push(format!("project={}", p));
+    }
+    if let Some(ref prompt) = req.prompt {
+        let preview: String = prompt.chars().take(60).collect();
+        parts.push(format!("prompt=\"{}{}\"", preview, if prompt.len() > 60 { "..." } else { "" }));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("({})", parts.join(" "))
+    }
+}
+
 fn classify_request(req: &SocketRequest) -> RequestLane {
     match req.request_type.as_str() {
         "list" | "list_containers" | "get_policy" | "get_audit_stats" | "get_anomalies"
@@ -1272,6 +1300,7 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
 struct ParsedConnection {
     stream: UnixStream,
     request: SocketRequest,
+    req_id: u64,
 }
 
 struct WorkerJob {
@@ -1304,7 +1333,7 @@ fn read_connection_request(mut stream: UnixStream) -> Result<Option<ParsedConnec
         return Ok(None);
     }
 
-    let request = match serde_json::from_str(&buffer) {
+    let request: SocketRequest = match serde_json::from_str(&buffer) {
         Ok(r) => r,
         Err(e) => {
             write_socket_response(
@@ -1315,7 +1344,12 @@ fn read_connection_request(mut stream: UnixStream) -> Result<Option<ParsedConnec
         }
     };
 
-    Ok(Some(ParsedConnection { stream, request }))
+    // ── Real-time request log ───────────────────────────────────────────────
+    let req_id = fastrand::u64(..);
+    let summary = summarize_request(&request);
+    eprintln!("[{:08x}] ▸ {} {}", req_id, request.request_type, summary);
+
+    Ok(Some(ParsedConnection { stream, request, req_id }))
 }
 
 fn write_socket_response(stream: &mut UnixStream, response: &SocketResponse) -> Result<()> {
@@ -1764,22 +1798,50 @@ fn handle_subscribe_events(stream: UnixStream, _req: SocketRequest) -> Result<()
 
 fn process_job(job: WorkerJob) -> Result<()> {
     let WorkerJob { mut connection } = job;
+    let req_id = connection.req_id;
 
     if connection.request.request_type == "subscribe_events" {
+        eprintln!("[{:08x}] ▸ subscribe_events (streaming)", req_id);
         return handle_subscribe_events(connection.stream, connection.request);
     }
 
     // Orchestrate requests use streaming: keep connection open, send multiple JSON events
     if connection.request.request_type == "orchestrate" {
-        return handle_orchestrate_streaming(connection.stream, connection.request);
+        let summary = summarize_request(&connection.request);
+        eprintln!("[{:08x}] ▸ orchestrate {} (streaming)", req_id, summary);
+        let start = std::time::Instant::now();
+        let result = handle_orchestrate_streaming(connection.stream, connection.request);
+        eprintln!("[{:08x}] ✓ orchestrate done {:.1?}", req_id, start.elapsed());
+        return result;
     }
 
     // Chat requests: direct LLM call, no orchestration
     if connection.request.request_type == "chat" {
-        return handle_chat_streaming(connection.stream, connection.request);
+        eprintln!("[{:08x}] ▸ chat (streaming)", req_id);
+        let start = std::time::Instant::now();
+        let result = handle_chat_streaming(connection.stream, connection.request);
+        eprintln!("[{:08x}] ✓ chat done {:.1?}", req_id, start.elapsed());
+        return result;
     }
 
+    let req_type = connection.request.request_type.clone();
+
+    let start = std::time::Instant::now();
     let response = handle_request(connection.request);
+    let elapsed = start.elapsed();
+
+    let status_icon = if response.status == "ok" { "✓" } else { "✗" };
+    let detail = if response.status != "ok" {
+        response.error.as_deref().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+    if detail.is_empty() {
+        eprintln!("[{:08x}] ▸ {} {} {:.1?}", req_id, status_icon, req_type, elapsed);
+    } else {
+        eprintln!("[{:08x}] ▸ {} {} {:.1?} — {}", req_id, status_icon, req_type, elapsed, detail);
+    }
+
     let result = write_socket_response(&mut connection.stream, &response);
     let _ = connection.stream.shutdown(std::net::Shutdown::Both);
     result

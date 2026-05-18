@@ -15,6 +15,14 @@ impl Tool for ReadFileTool {
 
         // Enforce file size limit to prevent OOM
         let meta = fs::metadata(&path)?;
+        if meta.is_dir() {
+            return Ok(json!({
+                "error": "This is a directory, not a file. Use the 'list_files' tool to list directory contents.",
+                "path": path_str,
+                "is_directory": true,
+                "success": false
+            }));
+        }
         if meta.len() > MAX_READ_SIZE {
             return Err(anyhow::anyhow!(
                 "File size {} bytes exceeds maximum read size {} bytes",
