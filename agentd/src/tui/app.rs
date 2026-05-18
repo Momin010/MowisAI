@@ -88,6 +88,9 @@ pub struct App {
     // Complexity mode override
     pub mode_override: Option<ComplexityMode>,
 
+    // Skill creator mode
+    pub skill_creator_active: bool,
+
     // Misc
     pub should_quit: bool,
     pub cwd: String,
@@ -121,6 +124,7 @@ impl App {
             pending_diff: None,
             save_selector: None,
             mode_override: None,
+            skill_creator_active: false,
             should_quit: false,
             cwd,
         };
@@ -171,6 +175,19 @@ impl App {
 
     pub fn on_gemini_done(&mut self) {
         self.is_loading = false;
+    }
+
+    pub fn on_skill_saved(&mut self, path: String) {
+        self.skill_creator_active = false;
+        self.messages.push(ChatMessage {
+            role: MessageRole::System,
+            content: format!(
+                "✓ Skill saved to: {}\n\
+                 It will be auto-injected into every agent from now on.\n\
+                 Run /skill list to see all installed skills.",
+                path
+            ),
+        });
     }
 
     pub fn on_gemini_error(&mut self, err: String) {
@@ -456,6 +473,7 @@ impl App {
         };
 
         let config = self.config.clone();
+        let skill_mode = self.skill_creator_active;
         let history: Vec<serde_json::Value> = self
             .messages
             .iter()
@@ -492,18 +510,97 @@ impl App {
                     }
                 };
 
-                let system_prompt = "You are MowisAI, an AI coding assistant. Answer the user's question helpfully and concisely.";
+                let system_prompt = if skill_mode {
+                    crate::skills::creator::SKILL_CREATOR_SYSTEM_PROMPT.to_string()
+                } else {
+                    "You are MowisAI, an AI coding assistant. Answer the user's question helpfully and concisely.".to_string()
+                };
 
                 match crate::orchestration::provider_client::generate_chat(
                     &llm_config,
-                    system_prompt,
+                    &system_prompt,
                     &history,
                     0.7,
                 )
                 .await
                 {
                     Ok(response) => {
-                        let _ = tx.send(TuiEvent::GeminiChunk(response));
+                        // In skill creator mode, detect and save the skill block,
+                        // then send a clean version of the response to the chat.
+                        if skill_mode {
+                            if let Some(result) = crate::skills::creator::try_save_skill_from_response(&response) {
+                                let save_msg = match result {
+                                    Ok(path) => TuiEvent::SkillSaved(path.display().to_string()),
+                                    Err(e) => TuiEvent::GeminiError(
+                                        format!("Skill block found but failed to save: {}", e)
+                                    ),
+                                };
+                                let _ = tx.send(save_msg);
+                            }
+                            // Strip the raw <skill>…</skill> block from the visible chat message
+                            let display = strip_skill_block(&response);
+                            let _ = tx.send(TuiEvent::GeminiChunk(display));
+                        } else {
+                            let _ = tx.send(TuiEvent::GeminiChunk(response));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                    }
+                }
+                let _ = tx.send(TuiEvent::GeminiDone);
+            });
+        });
+    }
+
+    /// Kick off the skill creator conversation: LLM sends the first question.
+    fn start_skill_creator_intro(&mut self) {
+        self.is_loading = true;
+
+        let tx = match &self.event_tx {
+            Some(t) => t.clone(),
+            None => {
+                self.is_loading = false;
+                return;
+            }
+        };
+
+        let config = self.config.clone();
+
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                    let _ = tx.send(TuiEvent::GeminiDone);
+                    return;
+                }
+            };
+
+            rt.block_on(async move {
+                let llm_config = match crate::orchestration::provider_client::LlmConfig::from_config(&config) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
+                        let _ = tx.send(TuiEvent::GeminiDone);
+                        return;
+                    }
+                };
+
+                // Seed message: tell LLM the user wants to start creating a skill
+                let seed = [serde_json::json!({
+                    "role": "user",
+                    "content": "I want to create a skill."
+                })];
+
+                match crate::orchestration::provider_client::generate_chat(
+                    &llm_config,
+                    crate::skills::creator::SKILL_CREATOR_SYSTEM_PROMPT,
+                    &seed,
+                    0.7,
+                ).await {
+                    Ok(response) => {
+                        let _ = tx.send(TuiEvent::GeminiChunk(strip_skill_block(&response)));
                     }
                     Err(e) => {
                         let _ = tx.send(TuiEvent::GeminiError(e.to_string()));
@@ -630,6 +727,13 @@ Commands:\n\
   /development       Toggle development log view\n\
   /discard           Discard pending diff\n\
   /save [path]       Save pending diff to path\n\
+\n\
+Skills:\n\
+  /skill create      Create a skill with AI guidance\n\
+  /skill list        List installed skills\n\
+  /skill remove <n>  Remove a skill by name\n\
+  /skill cancel      Exit skill creator mode\n\
+\n\
   Tab                Cycle views (Chat / Orchestration / Dev)\n\
   Ctrl+C             Quit".to_string(),
                 });
@@ -786,6 +890,60 @@ Commands:\n\
                     });
                 }
             }
+            "/skill create" | "/skill new" | "/skills create" | "/skills new" => {
+                self.skill_creator_active = true;
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "🎯 Skill Creator activated.\n\
+                        The AI will guide you through creating a .skill file.\n\
+                        Skills are domain-specific rules injected into every agent's context.\n\
+                        Type /skill cancel at any time to exit.".to_string(),
+                });
+                // Trigger the LLM to open the conversation
+                self.start_skill_creator_intro();
+            }
+            "/skill cancel" | "/skills cancel" => {
+                self.skill_creator_active = false;
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "Skill creator cancelled.".to_string(),
+                });
+            }
+            "/skill list" | "/skills list" | "/skills" => {
+                let skills = crate::skills::SkillManager::new().load_all();
+                if skills.is_empty() {
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: "No skills installed.\n\
+                            Type /skill create to create one with the AI.".to_string(),
+                    });
+                } else {
+                    let lines: Vec<String> = skills.iter()
+                        .map(|s| format!("  {:<20} v{}  {}", s.meta.name, s.meta.version, s.meta.description))
+                        .collect();
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: format!(
+                            "Installed skills ({}):\n{}\n\nThese are injected into every agent's context.",
+                            skills.len(),
+                            lines.join("\n")
+                        ),
+                    });
+                }
+            }
+            other if other.starts_with("/skill remove ") || other.starts_with("/skills remove ") => {
+                let name = other.trim_start_matches("/skills remove ").trim_start_matches("/skill remove ").trim();
+                match crate::skills::SkillManager::new().remove(name) {
+                    Ok(()) => self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: format!("✓ Skill '{}' removed.", name),
+                    }),
+                    Err(e) => self.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: format!("Failed to remove skill '{}': {}", name, e),
+                    }),
+                }
+            }
             other => {
                 if other.starts_with("/save") {
                     let path_arg = other.trim_start_matches("/save").trim();
@@ -881,4 +1039,26 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Remove the raw `<skill>…</skill>` TOML block from an LLM response before
+/// showing it in the chat UI. The LLM's surrounding explanation is kept.
+fn strip_skill_block(text: &str) -> String {
+    if let (Some(start), Some(end)) = (text.find("<skill>"), text.find("</skill>")) {
+        let before = text[..start].trim_end();
+        let after = text[end + 8..].trim_start();
+        let result = match (before.is_empty(), after.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => after.to_string(),
+            (false, true) => before.to_string(),
+            (false, false) => format!("{}\n\n{}", before, after),
+        };
+        if result.is_empty() {
+            "✓ Skill generated and saved.".to_string()
+        } else {
+            result
+        }
+    } else {
+        text.to_string()
+    }
 }

@@ -1084,12 +1084,25 @@ fn cmd_skills(args: SkillsArgs) -> Result<()> {
         }
 
         SkillsAction::Create => {
-            match libagent::skills::creator::run_creator() {
-                Ok(path) => {
-                    println!("Skill saved to: {}", path.display());
+            // Resolve LLM config — needs a configured provider
+            let llm_config = MowisConfig::load()
+                .ok()
+                .flatten()
+                .and_then(|cfg| libagent::orchestration::provider_client::LlmConfig::from_config(&cfg).ok());
+
+            match llm_config {
+                Some(cfg) => {
+                    match libagent::skills::creator::run_llm_creator(&cfg) {
+                        Ok(path) => println!("Skill saved to: {}", path.display()),
+                        Err(e) => {
+                            eprintln!("Skill creation failed: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Skill creation failed: {}", e);
+                None => {
+                    eprintln!("No LLM configuration found.");
+                    eprintln!("Run `agentd` setup first, or provide --project <GCP_PROJECT_ID>.");
                     std::process::exit(1);
                 }
             }

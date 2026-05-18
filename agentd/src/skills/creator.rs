@@ -1,222 +1,172 @@
-//! Interactive skill creator.
+//! LLM-driven skill creator.
 //!
-//! Walks the user through a series of questions and produces a `.skill` file.
-//! Runs entirely on the host (no sandbox, no LLM API calls needed).
+//! The LLM asks the user questions through natural conversation, then generates
+//! a complete .skill TOML block wrapped in <skill>...</skill> tags.
+//! The system detects those tags, parses the TOML, and saves the file.
+//!
+//! Works in two modes:
+//!   - Terminal (run_llm_creator): blocking stdin/stdout loop
+//!   - TUI (system prompt + tag detection in app.rs): embedded in chat
 
-use super::{Skill, SkillContent, SkillMeta, SkillManager};
+use super::{Skill, SkillManager};
 use anyhow::Result;
-use std::io::{self, BufRead, Write};
+use serde_json::{json, Value};
+use std::io::{self, Write};
+use std::path::PathBuf;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── System prompt given to the LLM when in skill-creator mode ────────────────
 
-fn prompt(question: &str) -> String {
-    print!("{}: ", question);
-    io::stdout().flush().ok();
-    let stdin = io::stdin();
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line).ok();
-    line.trim().to_string()
+pub const SKILL_CREATOR_SYSTEM_PROMPT: &str = r#"You are MowisAI Skill Creator — an expert at capturing domain knowledge into concise, actionable skill files.
+
+A .skill file is injected into every AI agent's system prompt as the authoritative source of truth for a domain. Good skills contain SPECIFIC, ACTIONABLE rules — not vague platitudes.
+
+Your job:
+1. Ask the user what domain their skill covers (UI/UX, Python conventions, database design, API standards, etc.)
+2. Ask focused follow-up questions (3-5 total) to understand their SPECIFIC preferences
+3. When you have enough information, generate the complete skill
+
+Rules for good skill content:
+- Specific beats vague ("Use Tailwind CSS" not "Write clean styles")
+- Include library/framework preferences ("shadcn/ui", "Zod for validation")
+- Capture non-negotiables and hard constraints
+- Cover naming, structure, error handling, testing patterns where relevant
+
+When you have enough information, output the TOML block wrapped EXACTLY like this (no extra text before or after the tags on those lines):
+
+<skill>
+[meta]
+name = "slug-here"
+display_name = "Human Readable Name"
+version = "1"
+description = "One-line description of what this skill governs"
+created = "2026-05-18"
+always_load = true
+author = "user"
+tags = ["tag1", "tag2"]
+
+[content]
+text = """
+## Domain Name
+
+Clear rules agents must follow:
+
+1. First specific rule
+2. Second specific rule
+"""
+</skill>
+
+After generating the skill block, write one short sentence confirming what was captured.
+Ask one or two questions at a time — not a long list. Be conversational."#;
+
+// ── Tag extraction ────────────────────────────────────────────────────────────
+
+/// Extract TOML content from `<skill>…</skill>` tags in an LLM response.
+pub fn extract_skill_toml(text: &str) -> Option<String> {
+    let start = text.find("<skill>")?;
+    let end = text.find("</skill>")?;
+    if end <= start { return None; }
+    let inner = text[start + 7..end].trim().to_string();
+    if inner.is_empty() { None } else { Some(inner) }
 }
 
-fn prompt_default(question: &str, default: &str) -> String {
-    print!("{} [{}]: ", question, default);
-    io::stdout().flush().ok();
-    let stdin = io::stdin();
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line).ok();
-    let trimmed = line.trim().to_string();
-    if trimmed.is_empty() { default.to_string() } else { trimmed }
+/// Try to parse a TOML string into a Skill.
+pub fn parse_skill_from_toml(toml_str: &str) -> Result<Skill> {
+    toml::from_str(toml_str).map_err(|e| anyhow::anyhow!("Failed to parse skill TOML: {}", e))
 }
 
-fn prompt_multiline(instruction: &str) -> String {
-    println!("{}", instruction);
-    println!("(Enter each rule on its own line. Type a blank line when done.)");
-    let stdin = io::stdin();
-    let mut lines = Vec::new();
-    for raw in stdin.lock().lines() {
-        let line = raw.unwrap_or_default();
-        if line.trim().is_empty() { break; }
-        lines.push(line);
-    }
-    lines.join("\n")
+/// Detect, parse, and save a skill embedded in an LLM response.
+/// Returns the saved path if a skill was found and saved successfully.
+pub fn try_save_skill_from_response(response: &str) -> Option<Result<PathBuf>> {
+    let toml_str = extract_skill_toml(response)?;
+    let result = parse_skill_from_toml(&toml_str)
+        .and_then(|skill| SkillManager::new().save(&skill));
+    Some(result)
 }
 
-fn separator() {
-    println!("\n{}", "─".repeat(60));
-}
+// ── Terminal (blocking) creator ───────────────────────────────────────────────
 
-// ── Main creator flow ─────────────────────────────────────────────────────────
-
-/// Run the interactive skill creation wizard.
-/// Returns the path where the skill was saved.
-pub fn run_creator() -> Result<std::path::PathBuf> {
+/// Run a full LLM-driven skill creation session in the terminal.
+/// Requires an `LlmConfig` — reads from environment or config file.
+pub fn run_llm_creator(
+    llm_config: &crate::orchestration::provider_client::LlmConfig,
+) -> Result<PathBuf> {
     println!("\n╔══════════════════════════════════════════╗");
-    println!("║         MowisAI  Skill  Creator          ║");
+    println!("║   MowisAI Skill Creator  (LLM-powered)   ║");
     println!("╚══════════════════════════════════════════╝");
-    println!("\nThis wizard will help you create a .skill file.");
-    println!("Skills are injected into every agent's context and act as the");
-    println!("authoritative source of truth for a specific domain.\n");
+    println!("\nThe AI will guide you through creating a .skill file.");
+    println!("Type your answers naturally. Type /done when finished, /quit to cancel.\n");
 
-    separator();
-    println!("STEP 1 — Basic information");
-    separator();
+    let rt = tokio::runtime::Runtime::new()?;
+    let mut history: Vec<Value> = Vec::new();
 
-    let display_name = prompt("Skill name (e.g. UI/UX Style Guide, Python Conventions)");
-    if display_name.is_empty() {
-        anyhow::bail!("Skill name cannot be empty.");
-    }
+    // Seed: ask the LLM to open the conversation
+    history.push(json!({
+        "role": "user",
+        "content": "Let's create a skill."
+    }));
 
-    // Auto-generate slug from display name
-    let suggested_slug = display_name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-
-    let name = prompt_default("Skill ID (used as filename)", &suggested_slug);
-
-    let description = prompt("One-line description");
-
-    let author = prompt_default("Author name", &whoami());
-
-    let tags_raw = prompt("Tags (comma-separated, e.g. frontend,react,typescript)");
-    let tags: Vec<String> = tags_raw
-        .split(',')
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .collect();
-
-    separator();
-    println!("STEP 2 — What should agents know?");
-    separator();
-    println!("\nDescribe the rules, preferences, and patterns agents must follow");
-    println!("in this domain. Be specific — vague rules are ignored.\n");
-    println!("Examples:");
-    println!("  • Always use Tailwind CSS, never plain CSS");
-    println!("  • Follow PEP 8 for Python code");
-    println!("  • Every API response must include a 'request_id' field\n");
-
-    let content_raw = prompt_multiline("Enter your skill rules:");
-
-    if content_raw.trim().is_empty() {
-        anyhow::bail!("Skill content cannot be empty.");
-    }
-
-    // Format the content nicely
-    let formatted_content = format_content(&content_raw);
-
-    separator();
-    println!("STEP 3 — Review");
-    separator();
-
-    println!("\n  ID:          {}", name);
-    println!("  Name:        {}", display_name);
-    println!("  Description: {}", description);
-    println!("  Author:      {}", author);
-    if !tags.is_empty() {
-        println!("  Tags:        {}", tags.join(", "));
-    }
-    println!("\n  Content preview:");
-    for line in formatted_content.lines().take(8) {
-        println!("    {}", line);
-    }
-    if formatted_content.lines().count() > 8 {
-        println!("    ... ({} more lines)", formatted_content.lines().count() - 8);
-    }
-
-    println!();
-    let confirm = prompt_default("Save this skill? (yes/no)", "yes");
-    if !confirm.to_lowercase().starts_with('y') {
-        anyhow::bail!("Skill creation cancelled.");
-    }
-
-    let created = chrono_now();
-
-    let skill = Skill {
-        meta: SkillMeta {
-            name: name.clone(),
-            display_name,
-            version: "1".to_string(),
-            description,
-            created,
-            author,
-            tags,
-            always_load: true,
-        },
-        content: SkillContent {
-            text: formatted_content,
-        },
-    };
-
-    let manager = SkillManager::new();
-    let path = manager.save(&skill)?;
-
-    println!("\n✓ Skill '{}' saved to: {}", name, path.display());
-    println!("\nTo verify it's loaded, run:  agentd skills list");
-    println!("The skill will be auto-injected into every agent from now on.\n");
-
-    Ok(path)
-}
-
-/// Automatically number bare lines and format content as a clean list.
-fn format_content(raw: &str) -> String {
-    let lines: Vec<&str> = raw.lines().collect();
-
-    // If user already used bullets/numbers, keep their formatting
-    let already_formatted = lines.iter().any(|l| {
-        let t = l.trim();
-        t.starts_with('-') || t.starts_with('*') || t.starts_with('#')
-            || (t.len() > 2 && t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
-    });
-
-    if already_formatted {
-        return raw.trim().to_string();
-    }
-
-    // Otherwise auto-number
-    lines
-        .iter()
-        .enumerate()
-        .map(|(i, l)| format!("{}. {}", i + 1, l.trim()))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn whoami() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "unknown".to_string())
-}
-
-fn chrono_now() -> String {
-    // Simple ISO date without a date library dependency
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // Rough yyyy-mm-dd calculation (close enough for metadata)
-    let days = secs / 86400;
-    let mut year = 1970u32;
-    let mut remaining_days = days as u32;
     loop {
-        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
-        if remaining_days < days_in_year { break; }
-        remaining_days -= days_in_year;
-        year += 1;
+        // Send to LLM
+        let response = rt.block_on(crate::orchestration::provider_client::generate_chat(
+            llm_config,
+            SKILL_CREATOR_SYSTEM_PROMPT,
+            &history,
+            0.7,
+        ))?;
+
+        // Record assistant turn
+        history.push(json!({
+            "role": "assistant",
+            "content": response.clone()
+        }));
+
+        // Print the LLM's message (strip the <skill>…</skill> block for display)
+        let display = if response.contains("<skill>") {
+            let before = response.find("<skill>").map(|i| &response[..i]).unwrap_or("");
+            let after = response.find("</skill>")
+                .map(|i| response.get(i + 8..).unwrap_or(""))
+                .unwrap_or("");
+            format!("{}{}", before.trim_end(), after.trim_start()).trim().to_string()
+        } else {
+            response.clone()
+        };
+
+        println!("\nAI: {}\n", display);
+
+        // Did the LLM produce a skill?
+        if let Some(result) = try_save_skill_from_response(&response) {
+            match result {
+                Ok(path) => {
+                    println!("✓ Skill saved to: {}", path.display());
+                    println!("\nRun `agentd skills list` to confirm, or `/skill list` in the TUI.");
+                    return Ok(path);
+                }
+                Err(e) => {
+                    eprintln!("Warning: skill block found but failed to save: {}", e);
+                    eprintln!("The LLM may have generated invalid TOML. Try again or fix manually.\n");
+                }
+            }
+        }
+
+        // Read user input
+        print!("You: ");
+        io::stdout().flush().ok();
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(0) | Err(_) => break,
+            _ => {}
+        }
+        let trimmed = input.trim();
+        if trimmed.is_empty() { continue; }
+        if trimmed == "/quit" || trimmed == "/cancel" {
+            anyhow::bail!("Skill creation cancelled.");
+        }
+
+        history.push(json!({
+            "role": "user",
+            "content": trimmed
+        }));
     }
-    let month_days = [31u32, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut month = 1u32;
-    for &md in &month_days {
-        let md = if month == 2 && year % 4 == 0 { 29 } else { md };
-        if remaining_days < md { break; }
-        remaining_days -= md;
-        month += 1;
-    }
-    let day = remaining_days + 1;
-    format!("{}-{:02}-{:02}", year, month, day)
+
+    anyhow::bail!("Skill creation ended without producing a skill.")
 }

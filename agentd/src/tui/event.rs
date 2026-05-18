@@ -26,6 +26,8 @@ pub enum TuiEvent {
     OrchComplete { diff: String, summary: String },
     OrchDone,
     LogEntry { level: String, message: String, timestamp: u64 },
+    /// Fired when the skill creator successfully saves a .skill file.
+    SkillSaved(String),
 }
 
 pub fn spawn_event_thread(tx: mpsc::Sender<TuiEvent>, tick_rate: Duration) -> thread::JoinHandle<()> {
