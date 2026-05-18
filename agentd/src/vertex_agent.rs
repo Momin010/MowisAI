@@ -26,8 +26,39 @@ pub fn run(prompt: &str, project_id: &str, socket_path: &str) -> Result<()> {
     }
 }
 
+/// Same as `run` but with an explicit skills context string injected into the
+/// system instruction. Call this when skills are loaded at orchestration time.
+pub fn run_with_skills(
+    prompt: &str,
+    project_id: &str,
+    socket_path: &str,
+    skills_context: &str,
+) -> Result<()> {
+    #[cfg(unix)]
+    {
+        run_inner_with_skills(prompt, project_id, socket_path, skills_context)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (prompt, project_id, socket_path, skills_context);
+        Err(anyhow!(
+            "vertex_agent requires Unix (agentd uses Unix domain sockets)"
+        ))
+    }
+}
+
 #[cfg(unix)]
 fn run_inner(prompt: &str, project_id: &str, socket_path: &str) -> Result<()> {
+    run_inner_with_skills(prompt, project_id, socket_path, "")
+}
+
+#[cfg(unix)]
+fn run_inner_with_skills(
+    prompt: &str,
+    project_id: &str,
+    socket_path: &str,
+    skills_context: &str,
+) -> Result<()> {
     log::info!("[vertex] creating sandbox via {} …", socket_path);
     let create_sb = json!({
         "request_type": "create_sandbox",
@@ -56,8 +87,14 @@ fn run_inner(prompt: &str, project_id: &str, socket_path: &str) -> Result<()> {
         .build()
         .context("reqwest client")?;
 
+    let base_instruction = "You control a Linux sandbox (Alpine) via tools. Use paths under /workspace when writing files unless the user specifies otherwise. Prefer listing directories before assuming files exist.";
+    let system_text = if skills_context.is_empty() {
+        base_instruction.to_string()
+    } else {
+        format!("{}{}", base_instruction, skills_context)
+    };
     let system_instruction = json!({
-        "parts": [{ "text": "You control a Linux sandbox (Alpine) via tools. Use paths under /workspace when writing files unless the user specifies otherwise. Prefer listing directories before assuming files exist." }]
+        "parts": [{ "text": system_text }]
     });
 
     let mut contents: Vec<Value> = vec![json!({
