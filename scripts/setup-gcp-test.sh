@@ -53,9 +53,23 @@ chmod 600 /home/mowis/.ssh/authorized_keys
 chown mowis:mowis /home/mowis/.ssh/authorized_keys
 
 echo "=== sshd on port 443 ==="
-grep -q "^Port 443" /etc/ssh/sshd_config || echo "Port 443" >> /etc/ssh/sshd_config
-grep -q "^Port 22"  /etc/ssh/sshd_config || echo "Port 22"  >> /etc/ssh/sshd_config
-systemctl restart ssh
+# Ubuntu 24.04 ships sshd behind ssh.socket (systemd socket activation), which
+# overrides the `Port` directive in sshd_config. Configure the socket directly.
+mkdir -p /etc/systemd/system/ssh.socket.d
+cat > /etc/systemd/system/ssh.socket.d/listen.conf <<'SOCKET'
+[Socket]
+ListenStream=
+ListenStream=22
+ListenStream=443
+SOCKET
+systemctl daemon-reload
+if systemctl list-unit-files ssh.socket >/dev/null 2>&1; then
+    systemctl restart ssh.socket
+else
+    grep -q "^Port 443" /etc/ssh/sshd_config || echo "Port 443" >> /etc/ssh/sshd_config
+    grep -q "^Port 22"  /etc/ssh/sshd_config || echo "Port 22"  >> /etc/ssh/sshd_config
+    systemctl restart ssh
+fi
 
 echo "=== installing rust as mowis ==="
 sudo -u mowis bash -c '
