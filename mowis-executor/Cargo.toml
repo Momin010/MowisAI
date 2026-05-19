@@ -1,0 +1,26 @@
+[package]
+name = "mowis-executor"
+version = "0.1.0"
+edition = "2021"
+description = "Guest-side executor: runs inside the Linux VM, owns sandbox primitives and tool execution"
+
+[[bin]]
+name = "mowis-executor"
+path = "src/main.rs"
+
+[dependencies]
+mowis-protocol = { path = "../mowis-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+dashmap = "5"
+
+# Guest is Linux-only — vsock + namespace/mount primitives.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.5"
+nix = { version = "0.27", features = ["mount", "sched", "user", "fs"] }
+tempfile = "3"

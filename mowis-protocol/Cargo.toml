@@ -1,0 +1,10 @@
+[package]
+name = "mowis-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Wire protocol for host<->guest RPC over vsock (new architecture)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
