@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use mowis_host::protocol::{ExecRequest, Payload, SandboxSpec};
-use mowis_host::{image, transport, vmm};
+use mowis_host::{image, initrd, transport, vmm};
 
 #[derive(Debug, Parser)]
 #[command(name = "mowisd", version, about = "MowisAI host-side daemon (new architecture)")]
@@ -34,10 +34,21 @@ enum Cmd {
         #[arg(long, default_value = ".mowis-cache")]
         cache: PathBuf,
     },
+    /// Build a bootable initramfs (cpio.gz) that runs mowis-executor as PID 1.
+    BuildInitrd {
+        /// Path to the mowis-executor binary to embed.
+        #[arg(long)]
+        executor: PathBuf,
+        /// Where to write the initramfs.
+        #[arg(long, default_value = "mowis-initrd.cpio.gz")]
+        output: PathBuf,
+    },
     /// Boot a VM with mowis-executor inside. Stays in foreground until killed.
     Boot {
+        /// Linux kernel image. Defaults to the host's running kernel
+        /// (/boot/vmlinuz-$(uname -r)) when not specified.
         #[arg(long)]
-        kernel: PathBuf,
+        kernel: Option<PathBuf>,
         #[arg(long)]
         initrd: PathBuf,
         #[arg(long)]
@@ -88,20 +99,27 @@ async fn main() -> Result<()> {
             let path = image::pull_rootfs(&image, &cache).await?;
             println!("{}", path.display());
         }
+        Cmd::BuildInitrd { executor, output } => {
+            initrd::build(&executor, &output).await?;
+            println!("{}", output.display());
+        }
         Cmd::Boot {
             kernel,
-            initrd,
+            initrd: initrd_path,
             rootfs,
             memory_mb,
             vcpus,
             cid,
             port,
         } => {
+            let kernel = kernel
+                .or_else(initrd::default_kernel)
+                .context("no --kernel provided and no /boot/vmlinuz-* found")?;
             let backend = vmm::default_backend()?;
             let handle = backend
                 .boot(vmm::VmConfig {
                     kernel,
-                    initrd,
+                    initrd: initrd_path,
                     rootfs,
                     memory_mb,
                     vcpus,
