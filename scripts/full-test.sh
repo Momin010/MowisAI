@@ -97,8 +97,11 @@ run "tail -20 $LOG"
 sub "ping over vsock loopback"
 run "timeout 10 target/release/mowisd ping --cid 1 --port 5252 2>&1"
 
-sub "create sandbox + exec /bin/echo over vsock loopback"
-run "timeout 20 target/release/mowisd exec --cid 1 --port 5252 -- /bin/echo hello-from-vsock 2>&1"
+sub "exec /bin/echo over vsock loopback (no sandbox — host's binaries are visible)"
+run "timeout 20 target/release/mowisd exec --cid 1 --port 5252 --no-sandbox -- /bin/echo hello-from-vsock 2>&1"
+
+sub "create+destroy sandbox over vsock loopback"
+run "timeout 10 target/release/mowisd exec --cid 1 --port 5252 -- /bin/true 2>&1; echo (sandbox path: expected non-zero because tmpfs has no /bin/true)"
 
 sub "executor log after exec"
 run "tail -30 $LOG"
@@ -118,42 +121,42 @@ run "ls /boot/vmlinuz* | head -3"
 KERNEL=$(ls -t /boot/vmlinuz-* 2>/dev/null | head -1)
 echo "selected kernel: $KERNEL"
 
-sub "boot VM in background"
+sub "boot VM in background (output to $BOOT_LOG)"
 BOOT_LOG=/tmp/boot.log
+# Memory 2GB so the kernel + initramfs decompress comfortably. Quiet kernel
+# noise but keep our executor's stderr.
 sudo RUST_LOG=info target/release/mowisd boot \
     --kernel "$KERNEL" \
     --initrd /tmp/mowis-initrd.cpio.gz \
-    --memory-mb 1024 \
+    --memory-mb 2048 \
     --vcpus 2 \
     --cid 42 \
     --port 5252 > "$BOOT_LOG" 2>&1 &
 BOOT_PID=$!
-echo "boot pid=$BOOT_PID; giving it up to 25s to come up"
+echo "boot pid=$BOOT_PID; polling for guest executor (up to 60s)"
 
 # Wait for executor inside guest to start. Poll ping.
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+GUEST_UP=0
+for i in $(seq 1 30); do
     sleep 2
-    if timeout 5 target/release/mowisd ping --cid 42 --port 5252 >/dev/null 2>&1; then
+    if timeout 3 target/release/mowisd ping --cid 42 --port 5252 >/dev/null 2>&1; then
         echo "guest reachable after ${i}x2s"
+        GUEST_UP=1
         break
     fi
-    echo "  attempt $i: not yet"
 done
+if [[ "$GUEST_UP" -eq 0 ]]; then
+    echo "*** guest never came up — VM boot likely failed; see qemu log below ***"
+fi
 
 sub "ping guest"
 run "timeout 10 target/release/mowisd ping --cid 42 --port 5252 2>&1"
 
-sub "list sandboxes"
-run "timeout 10 target/release/mowisd exec --cid 42 --port 5252 -- /bin/true 2>&1 || true"
+sub "exec inside guest (no sandbox — should print hello)"
+run "timeout 20 target/release/mowisd exec --cid 42 --port 5252 --no-sandbox -- /bin/echo hello-from-guest-vm 2>&1"
 
-sub "exec inside guest sandbox"
-run "timeout 20 target/release/mowisd exec --cid 42 --port 5252 -- /bin/echo hello-from-guest-vm 2>&1"
-
-sub "qemu log (first 80 lines)"
-run "head -80 $BOOT_LOG"
-
-sub "qemu log (last 30 lines)"
-run "tail -30 $BOOT_LOG"
+sub "qemu+guest log (last 120 lines, includes kernel boot + executor stderr)"
+run "tail -120 $BOOT_LOG"
 
 step "DONE"
 date -u

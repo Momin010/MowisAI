@@ -78,6 +78,11 @@ enum Cmd {
         /// Optional rootfs path (inside the guest) to use as overlay lower layer.
         #[arg(long)]
         guest_rootfs: Option<String>,
+        /// Skip sandbox creation; run directly in the executor's own
+        /// namespace. Useful for loopback tests where the sandbox would be an
+        /// empty tmpfs with no binaries.
+        #[arg(long)]
+        no_sandbox: bool,
         /// Command and args. Use `--` to separate flags from the command.
         #[arg(last = true)]
         argv: Vec<String>,
@@ -143,6 +148,7 @@ async fn main() -> Result<()> {
             cid,
             port,
             guest_rootfs,
+            no_sandbox,
             argv,
         } => {
             if argv.is_empty() {
@@ -150,24 +156,29 @@ async fn main() -> Result<()> {
             }
             let conn = transport::connect(cid, port).await?;
 
-            let sandbox_id = match conn
-                .call(Payload::CreateSandbox(SandboxSpec {
-                    sandbox_id: None,
-                    image_rootfs: guest_rootfs,
-                    limits: Default::default(),
-                }))
-                .await?
-            {
-                Payload::SandboxCreated { sandbox_id } => sandbox_id,
-                Payload::Error { message } => anyhow::bail!("create_sandbox: {message}"),
-                other => anyhow::bail!("unexpected response: {other:?}"),
+            let sandbox_id = if no_sandbox {
+                None
+            } else {
+                let id = match conn
+                    .call(Payload::CreateSandbox(SandboxSpec {
+                        sandbox_id: None,
+                        image_rootfs: guest_rootfs,
+                        limits: Default::default(),
+                    }))
+                    .await?
+                {
+                    Payload::SandboxCreated { sandbox_id } => sandbox_id,
+                    Payload::Error { message } => anyhow::bail!("create_sandbox: {message}"),
+                    other => anyhow::bail!("unexpected response: {other:?}"),
+                };
+                tracing::info!(sandbox_id = %id, "created sandbox");
+                Some(id)
             };
-            tracing::info!(%sandbox_id, "created sandbox");
 
             let (cmd, args) = argv.split_first().context("empty argv")?;
             let mut rx = conn
                 .call_streaming(Payload::Exec(ExecRequest {
-                    sandbox_id: Some(sandbox_id.clone()),
+                    sandbox_id: sandbox_id.clone(),
                     cmd: cmd.clone(),
                     args: args.to_vec(),
                     env: vec![],
@@ -192,7 +203,9 @@ async fn main() -> Result<()> {
             }
 
             // Best-effort cleanup; ignore errors.
-            let _ = conn.call(Payload::DestroySandbox { sandbox_id }).await;
+            if let Some(id) = sandbox_id {
+                let _ = conn.call(Payload::DestroySandbox { sandbox_id: id }).await;
+            }
             std::process::exit(exit);
         }
     }

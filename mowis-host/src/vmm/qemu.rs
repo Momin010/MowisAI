@@ -102,11 +102,16 @@ impl Vmm for QemuVmm {
             "spawning qemu"
         );
 
+        // Inherit stdout/stderr so kernel boot messages and the guest
+        // executor's tracing output (which goes to the serial console via
+        // `-nographic` + `console=ttyS0`) show up in our log. `Stdio::piped`
+        // without a reader caused QEMU to block once buffers filled and made
+        // every guest-side failure invisible.
         let child = Command::new(&self.qemu_bin)
             .args(&args)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("spawn {} {:?}", self.qemu_bin, args))?;
