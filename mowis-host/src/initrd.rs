@@ -74,6 +74,11 @@ pub async fn build(executor_bin: &Path, output: &Path) -> Result<()> {
     // has no /lib/modules to modprobe from.
     bundle_vsock_modules(root).await?;
 
+    // Bundle busybox + symlinks so the guest has a usable userspace. Without
+    // this, `mowisd exec -- /bin/ls /` fails because the initramfs is just
+    // /init, libs, and vsock modules — no /bin, no /usr.
+    bundle_busybox(root)?;
+
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -235,6 +240,41 @@ async fn decompress_to(src: &Path, dest: &Path, ext: &str) -> Result<()> {
     if !status.success() {
         anyhow::bail!("{cmd} -d failed: exit {status}");
     }
+    Ok(())
+}
+
+/// Copy a static `busybox` binary into the initramfs and symlink common
+/// command names to it. Lets the guest run `/bin/ls`, `/bin/echo`, `/bin/sh`
+/// etc. without bundling all of coreutils.
+fn bundle_busybox(staging_root: &Path) -> Result<()> {
+    let candidates = ["/bin/busybox", "/usr/bin/busybox"];
+    let src = candidates.iter().map(Path::new).find(|p| p.exists());
+    let Some(src) = src else {
+        tracing::warn!("busybox not found on PATH; guest will have no userspace tools");
+        return Ok(());
+    };
+
+    let bin_dir = staging_root.join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+    let dest = bin_dir.join("busybox");
+    std::fs::copy(src, &dest)
+        .with_context(|| format!("copy busybox {} -> {}", src.display(), dest.display()))?;
+    chmod_exec(&dest)?;
+
+    let applets = [
+        "sh", "ash", "echo", "ls", "cat", "mkdir", "rm", "rmdir", "mv", "cp",
+        "ln", "mount", "umount", "ps", "kill", "ip", "ifconfig", "true",
+        "false", "sleep", "env", "id", "uname", "head", "tail", "grep",
+        "find", "touch", "stat", "df", "free",
+    ];
+    for name in applets {
+        let link = bin_dir.join(name);
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("busybox", &link).with_context(|| {
+            format!("symlink {} -> busybox", link.display())
+        })?;
+    }
+    tracing::info!(src = %src.display(), applets = applets.len(), "bundled busybox");
     Ok(())
 }
 

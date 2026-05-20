@@ -47,13 +47,13 @@ iptables -P OUTPUT ACCEPT 2>/dev/null || true
 iptables -F 2>/dev/null || true
 
 echo "=== installing deps ==="
-if ! command -v cargo >/dev/null 2>&1 || ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v zstd >/dev/null 2>&1; then
+if ! command -v cargo >/dev/null 2>&1 || ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v zstd >/dev/null 2>&1 || ! [[ -x /bin/busybox || -x /usr/bin/busybox ]]; then
     apt-get update -qq
     apt-get install -y -qq \
         qemu-system-x86 qemu-kvm qemu-utils ovmf \
         skopeo cpio tar wget curl git \
         build-essential pkg-config libssl-dev \
-        iproute2 zstd xz-utils
+        iproute2 zstd xz-utils busybox-static
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then

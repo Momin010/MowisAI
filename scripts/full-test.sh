@@ -152,11 +152,20 @@ fi
 sub "ping guest"
 run "timeout 10 target/release/mowisd ping --cid 42 --port 5252 2>&1"
 
-sub "exec inside guest (no sandbox — should print hello)"
+sub "exec /bin/echo inside guest (validates stdout streaming over vsock)"
 run "timeout 20 target/release/mowisd exec --cid 42 --port 5252 --no-sandbox -- /bin/echo hello-from-guest-vm 2>&1"
 
-sub "qemu+guest log (last 120 lines, includes kernel boot + executor stderr)"
-run "tail -120 $BOOT_LOG"
+sub "exec /bin/ls / inside guest (validates real userspace tools work)"
+run "timeout 20 target/release/mowisd exec --cid 42 --port 5252 --no-sandbox -- /bin/ls / 2>&1"
+
+sub "exec /bin/uname -a inside guest"
+run "timeout 20 target/release/mowisd exec --cid 42 --port 5252 --no-sandbox -- /bin/uname -a 2>&1"
+
+sub "exec /bin/cat /proc/self/status (verifies /proc mounted and pid namespace)"
+run "timeout 20 target/release/mowisd exec --cid 42 --port 5252 --no-sandbox -- /bin/cat /proc/self/status 2>&1 | head -10"
+
+sub "qemu+guest log (last 80 lines, includes kernel boot + executor stderr)"
+run "tail -80 $BOOT_LOG"
 
 step "DONE"
 date -u
