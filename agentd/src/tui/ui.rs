@@ -41,6 +41,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         MainView::Orchestration if app.orchestrating => {
             draw_orchestration_dashboard(f, app, chunks[1])
         }
+        MainView::Shell => draw_shell(f, app, chunks[1]),
         _ => draw_chat(f, app, chunks[1]),
     }
     draw_input(f, app, chunks[2]);
@@ -61,7 +62,8 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
         let view_hint = match app.view_mode {
             MainView::Chat => "[Tab: dashboard]",
             MainView::Orchestration => "[Tab: dev logs]",
-            MainView::Development => "[Tab: chat]",
+            MainView::Development => "[Tab: shell]",
+            MainView::Shell => "[Tab: chat]",
         };
         format!(
             " MowisAI  \u{b7}  {}  \u{b7}  {}  \u{b7}  \u{1f528} Orchestrating \u{2014} {} agent{} active  {}",
@@ -438,8 +440,48 @@ fn draw_orch_agent_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, inner);
 }
 
+fn draw_shell(f: &mut Frame, app: &App, area: Rect) {
+    let border_color = if app.shell_focused { Color::Cyan } else { Color::DarkGray };
+    let focus_label = if app.shell_focused { " [FOCUSED - Tab to unfocus]" } else { " [Tab to focus]" };
+    let title = format!("Shell{}", focus_label);
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.shell_output.is_empty() {
+        let empty = Paragraph::new("No shell output yet...")
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(empty, inner);
+        return;
+    }
+
+    // Show shell output, scrolling from bottom
+    let visible_height = inner.height as usize;
+    let total_lines = app.shell_output.len();
+    let scroll = app.shell_scroll_offset.min(total_lines.saturating_sub(visible_height));
+    let start = total_lines.saturating_sub(visible_height + scroll);
+    let end = (start + visible_height).min(total_lines);
+
+    let lines: Vec<Line> = app.shell_output[start..end]
+        .iter()
+        .map(|l| Line::raw(l.as_str()))
+        .collect();
+
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(Color::White));
+
+    f.render_widget(paragraph, inner);
+}
+
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    let border_color = if app.is_loading {
+    let border_color = if app.shell_focused {
+        Color::Cyan
+    } else if app.is_loading {
         Color::DarkGray
     } else {
         GREEN
@@ -452,7 +494,9 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let display_text = if app.is_loading {
+    let display_text = if app.shell_focused {
+        "\u{2588} Shell focused \u{2014} typing goes to terminal. Tab to unfocus.".to_string()
+    } else if app.is_loading {
         "(waiting for response...)".to_string()
     } else {
         // Use char-aware slicing for cursor display
@@ -461,7 +505,9 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         format!("> {}\u{2588}{}", before, after)
     };
 
-    let style = if app.is_loading {
+    let style = if app.shell_focused {
+        Style::default().fg(Color::Cyan)
+    } else if app.is_loading {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default().fg(WHITE)
@@ -471,7 +517,16 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let status = if app.orchestrating {
+    let status = if app.view_mode == MainView::Shell {
+        let shell_status = if app.shell_focused {
+            "FOCUSED - typing goes to shell. Tab to unfocus."
+        } else if app.shell_input_tx.is_some() {
+            "Shell active. Tab to focus and type."
+        } else {
+            "Shell not running. /shell to restart."
+        };
+        format!(" {}  \u{b7}  {}  \u{b7}  Ctrl+C quit", app.cwd, shell_status)
+    } else if app.orchestrating {
         format!(
             " {}  \u{b7}  Tab: switch view  \u{b7}  Ctrl+C quit  \u{b7}  /help",
             app.cwd

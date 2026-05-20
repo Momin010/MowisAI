@@ -8,6 +8,7 @@ pub mod config;
 pub mod setup;
 pub mod logging;
 pub mod tui;
+pub mod api_server;
 pub mod agent;
 pub mod agent_loop;
 pub mod hub_agent_client;

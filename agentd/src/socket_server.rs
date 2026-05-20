@@ -69,6 +69,15 @@ lazy_static! {
 
 }
 
+/// Global channel for sending input to the currently running command.
+/// When a `run_command` is executing, it registers its stdin writer here.
+/// The API server (or socket `send_input` request) can then send data to it.
+pub static INTERACTIVE_STDIN: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>> = Mutex::new(None);
+/// Set to true when a command is waiting for interactive input.
+pub static INTERACTIVE_WAITING: AtomicBool = AtomicBool::new(false);
+/// The last prompt detected from command output.
+pub static INTERACTIVE_PROMPT: Mutex<String> = Mutex::new(String::new());
+
 // ── Wire types ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Default)]
@@ -484,25 +493,66 @@ fn validate_request(req: &SocketRequest) -> Result<(), String> {
 
 fn summarize_request(req: &SocketRequest) -> String {
     let mut parts = Vec::new();
-    if let Some(ref s) = req.sandbox {
-        parts.push(format!("sandbox={}", s));
+
+    match req.request_type.as_str() {
+        "invoke_tool" => {
+            if let Some(ref n) = req.name {
+                let tool_summary = match n.as_str() {
+                    "run_command" => {
+                        if let Some(ref input) = req.input {
+                            let cmd = input.get("cmd").and_then(|c| c.as_str()).unwrap_or("?");
+                            let preview: String = cmd.chars().take(80).collect();
+                            format!("run_command: {}{}", preview, if cmd.len() > 80 { "..." } else { "" })
+                        } else {
+                            "run_command".to_string()
+                        }
+                    }
+                    "write_file" => {
+                        if let Some(ref input) = req.input {
+                            let path = input.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+                            let size = input.get("content").and_then(|c| c.as_str()).map(|s| s.len()).unwrap_or(0);
+                            format!("write_file: {} ({} bytes)", path, size)
+                        } else {
+                            "write_file".to_string()
+                        }
+                    }
+                    "read_file" => {
+                        if let Some(ref input) = req.input {
+                            let path = input.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+                            format!("read_file: {}", path)
+                        } else {
+                            "read_file".to_string()
+                        }
+                    }
+                    other => other.to_string(),
+                };
+                parts.push(tool_summary);
+            }
+        }
+        "create_sandbox" => {
+            if let Some(ref img) = req.image {
+                parts.push(format!("image={}", img));
+            }
+            if let Some(ref p) = req.project_root {
+                parts.push(format!("project={}", p));
+            }
+        }
+        "orchestrate" => {
+            if let Some(ref prompt) = req.prompt {
+                let preview: String = prompt.chars().take(80).collect();
+                parts.push(format!("\"{}{}\"", preview, if prompt.len() > 80 { "..." } else { "" }));
+            }
+        }
+        _ => {
+            if let Some(ref s) = req.sandbox {
+                parts.push(format!("sandbox={}", s));
+            }
+            if let Some(ref c) = req.container {
+                parts.push(format!("container={}", c));
+            }
+        }
     }
-    if let Some(ref c) = req.container {
-        parts.push(format!("container={}", c));
-    }
-    if let Some(ref n) = req.name {
-        parts.push(format!("tool={}", n));
-    }
-    if let Some(ref img) = req.image {
-        parts.push(format!("image={}", img));
-    }
-    if let Some(ref p) = req.project_root {
-        parts.push(format!("project={}", p));
-    }
-    if let Some(ref prompt) = req.prompt {
-        let preview: String = prompt.chars().take(60).collect();
-        parts.push(format!("prompt=\"{}{}\"", preview, if prompt.len() > 60 { "..." } else { "" }));
-    }
+
     if parts.is_empty() {
         String::new()
     } else {
@@ -513,7 +563,8 @@ fn summarize_request(req: &SocketRequest) -> String {
 fn classify_request(req: &SocketRequest) -> RequestLane {
     match req.request_type.as_str() {
         "list" | "list_containers" | "get_policy" | "get_audit_stats" | "get_anomalies"
-        | "agent_status" | "bucket_get" | "memory_get" | "memory_load" | "read_messages" => {
+        | "agent_status" | "bucket_get" | "memory_get" | "memory_load" | "read_messages"
+        | "send_input" | "interactive_status" => {
             RequestLane::Fast
         }
         _ => RequestLane::Slow,
@@ -1291,6 +1342,37 @@ fn handle_request(req: SocketRequest) -> SocketResponse {
             }
         }
 
+        "send_input" => {
+            let data = req.input.as_ref()
+                .and_then(|i| i.get("data").and_then(|d| d.as_str()))
+                .unwrap_or("");
+            let bytes = data.as_bytes().to_vec();
+
+            let global_stdin = INTERACTIVE_STDIN.lock().unwrap();
+            match global_stdin.as_ref() {
+                Some(tx) => {
+                    if tx.send(bytes).is_ok() {
+                        eprintln!("  [interactive] Sent {} bytes to running command", data.len());
+                        SocketResponse::ok(Some(json!({"sent": data.len()})))
+                    } else {
+                        SocketResponse::err("failed to send input — channel closed".to_string())
+                    }
+                }
+                None => SocketResponse::err("no running command with open stdin".to_string()),
+            }
+        }
+
+        "interactive_status" => {
+            let waiting = INTERACTIVE_WAITING.load(std::sync::atomic::Ordering::SeqCst);
+            let prompt = INTERACTIVE_PROMPT.lock().unwrap().clone();
+            let has_stdin = INTERACTIVE_STDIN.lock().unwrap().is_some();
+            SocketResponse::ok(Some(json!({
+                "waiting_for_input": waiting,
+                "prompt": prompt,
+                "command_running": has_stdin,
+            })))
+        }
+
         other => SocketResponse::err(format!("unknown request type '{}'", other)),
     }
 }
@@ -1825,22 +1907,57 @@ fn process_job(job: WorkerJob) -> Result<()> {
     }
 
     let req_type = connection.request.request_type.clone();
+    let req_name = connection.request.name.clone();
+    let req_summary = summarize_request(&connection.request);
 
     let start = std::time::Instant::now();
     let response = handle_request(connection.request);
     let elapsed = start.elapsed();
 
     let status_icon = if response.status == "ok" { "✓" } else { "✗" };
-    let detail = if response.status != "ok" {
-        response.error.as_deref().unwrap_or("").to_string()
+
+    // Build detailed response summary for invoke_tool
+    let detail = if req_type == "invoke_tool" {
+        if response.status != "ok" {
+            format!("— {}", response.error.as_deref().unwrap_or("unknown error"))
+        } else if let Some(ref result) = response.result {
+            match req_name.as_deref() {
+                Some("run_command") => {
+                    let exit = result.get("exit_code").and_then(|e| e.as_i64()).unwrap_or(-1);
+                    let stdout = result.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+                    let stderr = result.get("stderr").and_then(|s| s.as_str()).unwrap_or("");
+                    let preview: String = stdout.chars().take(120).collect();
+                    let preview = preview.replace('\n', " ↵ ");
+                    if exit != 0 {
+                        format!("— exit={} stdout=\"{}\" stderr=\"{}\"", exit, preview, stderr.trim())
+                    } else if !preview.trim().is_empty() {
+                        format!("— exit=0 \"{}\"", preview)
+                    } else {
+                        String::new()
+                    }
+                }
+                Some("write_file") => {
+                    let success = result.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+                    let path = result.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    if success { format!("— ok {}", path) } else { "— failed".to_string() }
+                }
+                Some("read_file") => {
+                    let content = result.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    let preview: String = content.chars().take(80).collect();
+                    format!("— {} bytes \"{}\"", content.len(), preview.replace('\n', " "))
+                }
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        }
+    } else if response.status != "ok" {
+        format!("— {}", response.error.as_deref().unwrap_or(""))
     } else {
         String::new()
     };
-    if detail.is_empty() {
-        eprintln!("[{:08x}] ▸ {} {} {:.1?}", req_id, status_icon, req_type, elapsed);
-    } else {
-        eprintln!("[{:08x}] ▸ {} {} {:.1?} — {}", req_id, status_icon, req_type, elapsed, detail);
-    }
+
+    eprintln!("[{:08x}] ▸ {} {}{} {:.1?} {}", req_id, status_icon, req_type, req_summary, elapsed, detail);
 
     let result = write_socket_response(&mut connection.stream, &response);
     let _ = connection.stream.shutdown(std::net::Shutdown::Both);

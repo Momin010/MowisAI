@@ -28,6 +28,10 @@ pub enum TuiEvent {
     LogEntry { level: String, message: String, timestamp: u64 },
     /// Fired when the skill creator successfully saves a .skill file.
     SkillSaved(String),
+    /// Output from the PTY shell
+    ShellOutput(String),
+    /// Shell process exited
+    ShellExited(i32),
 }
 
 pub fn spawn_event_thread(tx: mpsc::Sender<TuiEvent>, tick_rate: Duration) -> thread::JoinHandle<()> {

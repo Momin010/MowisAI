@@ -29,7 +29,8 @@ const _: () = assert!(POOL_WORKERS < SLOW_WORKERS);
 const QUEUE_DEPTH: usize = 512;
 
 /// Per-connection read timeout. Must be longer than the slowest server operation.
-const READ_TIMEOUT_SECS: u64 = 60;
+/// run_command default timeout is 300s, so this must be at least that + buffer.
+const READ_TIMEOUT_SECS: u64 = 600;
 
 /// Per-connection write timeout.
 const WRITE_TIMEOUT_SECS: u64 = 10;

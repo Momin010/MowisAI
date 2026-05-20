@@ -78,6 +78,9 @@ enum Commands {
 
     /// Run the first-time setup wizard (configure AI provider, API key, model)
     Setup,
+
+    /// Start the HTTP API server for remote control by AI agents
+    Api(ApiArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +540,17 @@ pub enum BenchmarkAction {
     },
 }
 
+#[derive(Args, Debug)]
+pub struct ApiArgs {
+    /// Port to listen on
+    #[arg(long, default_value = "8443")]
+    pub port: u16,
+
+    /// Socket path for the agentd socket server
+    #[arg(long, default_value = "/tmp/agentd.sock")]
+    pub socket: String,
+}
+
 // ---------------------------------------------------------------------------
 // Shared arg types
 // ---------------------------------------------------------------------------
@@ -600,6 +614,8 @@ fn main() -> Result<()> {
 
         Some(Commands::Setup) => cmd_setup(),
 
+        Some(Commands::Api(args)) => cmd_api(args),
+
         None => cmd_tui(),
     }
 }
@@ -635,6 +651,34 @@ fn cmd_setup() -> Result<()> {
     let config = SetupWizard::run()?;
     println!("Setup complete. Provider: {}, Model: {}", config.provider, config.model);
     Ok(())
+}
+
+fn cmd_api(args: ApiArgs) -> Result<()> {
+    println!("{}", libagent::version::full_version());
+    println!("Starting MowisAI API server on port {}", args.port);
+    println!("  socket: {}", args.socket);
+    println!();
+    println!("Endpoints:");
+    println!("  GET  /api/health                      - Health check");
+    println!("  GET  /api/tasks                       - List all tasks");
+    println!("  POST /api/orchestrate                 - Start build {{prompt, mode?, output_dir?}}");
+    println!("  GET  /api/status/:task_id             - Get task status + logs");
+    println!("  GET  /api/diff/:task_id               - Get generated diff");
+    println!("  GET  /api/stream/:task_id             - SSE stream of task progress");
+    println!("  POST /api/input/:task_id              - Send input {{response}}");
+    println!();
+    println!("Example:");
+    println!("  curl -X POST http://localhost:{}/api/orchestrate \\", args.port);
+    println!("    -H 'Content-Type: application/json' \\");
+    println!("    -d '{{\"prompt\": \"Create a todo app with React\"}}'");
+    println!();
+
+    let _state = libagent::api_server::start_api_server(args.port, args.socket);
+
+    // Keep main thread alive
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }
 
 fn cmd_tui() -> Result<()> {

@@ -177,7 +177,7 @@ fn build_tool_catalog() -> Vec<Value> {
             json!({
                 "cmd": { "type": "string", "required": true, "description": "Command to execute" },
                 "cwd": { "type": "string", "required": false, "description": "Working directory (default: /workspace)" },
-                "timeout": { "type": "number", "required": false, "description": "Timeout in seconds (default: 30)" }
+                "timeout": { "type": "number", "required": false, "description": "Timeout in seconds (default: 300)" }
             }),
         ),
         tool_entry(
