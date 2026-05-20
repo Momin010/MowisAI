@@ -18,8 +18,12 @@ set -o pipefail
 shopt -s expand_aliases
 export DEBIAN_FRONTEND=noninteractive
 export RUST_LOG=info
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
 source "$HOME/.cargo/env" 2>/dev/null || true
+source "/root/.cargo/env" 2>/dev/null || true
+
+# Find repo root: prefer $REPO_ROOT env, else script's parent dir.
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 step() { printf "\n\n========== %s ==========\n" "$*"; }
 sub()  { printf "\n--- %s ---\n" "$*"; }
@@ -63,7 +67,8 @@ for t in qemu-system-x86_64 skopeo cpio gzip tar cargo rustc git; do
 done
 
 step "B. PULL + BUILD"
-cd "$HOME/mowisai" || { echo "REPO MISSING"; exit 1; }
+cd "$REPO_ROOT" || { echo "REPO MISSING at $REPO_ROOT"; exit 1; }
+echo "REPO_ROOT=$REPO_ROOT"
 run "git status --porcelain"
 run "git fetch origin"
 run "git checkout claude/refactor-agentd-mowis-zR6sh"
