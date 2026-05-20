@@ -13,6 +13,7 @@ pub enum MainView {
     Chat,
     Orchestration,
     Development,
+    Shell,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +92,12 @@ pub struct App {
     // Skill creator mode
     pub skill_creator_active: bool,
 
+    // PTY Shell
+    pub shell_input_tx: Option<mpsc::Sender<crate::tui::shell::ShellInput>>,
+    pub shell_output: Vec<String>,
+    pub shell_focused: bool,
+    pub shell_scroll_offset: usize,
+
     // Misc
     pub should_quit: bool,
     pub cwd: String,
@@ -125,9 +132,43 @@ impl App {
             save_selector: None,
             mode_override: None,
             skill_creator_active: false,
+            shell_input_tx: None,
+            shell_output: Vec::new(),
+            shell_focused: false,
+            shell_scroll_offset: 0,
             should_quit: false,
             cwd,
         };
+
+        // Auto-start PTY shell
+        match crate::tui::shell::PtyShell::spawn(&app.cwd) {
+            Ok(shell) => {
+                app.shell_input_tx = Some(shell.input_tx.clone());
+                app.shell_output.push("[MowisAI] Shell started. Press Tab to focus/unfocus.".to_string());
+                let event_tx = app.event_tx.clone();
+                // Forward shell events to TUI event loop
+                std::thread::spawn(move || {
+                    while let Ok(ev) = shell.event_rx.recv() {
+                        match ev {
+                            crate::tui::shell::ShellEvent::Output(text) => {
+                                if let Some(ref tx) = event_tx {
+                                    let _ = tx.send(TuiEvent::ShellOutput(text));
+                                }
+                            }
+                            crate::tui::shell::ShellEvent::Exited(code) => {
+                                if let Some(ref tx) = event_tx {
+                                    let _ = tx.send(TuiEvent::ShellExited(code));
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                app.shell_output.push(format!("[MowisAI] Shell failed to start: {}", e));
+                app.shell_output.push("[MowisAI] Run agentd with sudo for PTY support.".to_string());
+            }
+        }
 
         // Welcome message
         let socket_status = if socket_pid.is_some() {
@@ -279,6 +320,57 @@ impl App {
         }
     }
 
+    pub fn on_shell_output(&mut self, text: String) {
+        // Split into lines and add to shell output buffer
+        for line in text.split('\n') {
+            self.shell_output.push(line.to_string());
+        }
+        // Cap to 5000 lines
+        if self.shell_output.len() > 5000 {
+            self.shell_output.drain(0..1000);
+        }
+        // Auto-scroll to bottom when shell is focused
+        if self.shell_focused {
+            self.shell_scroll_offset = 0;
+        }
+    }
+
+    pub fn on_shell_exit(&mut self, code: i32) {
+        self.shell_output.push(format!("[MowisAI] Shell exited with code {}. Press 'r' to restart.", code));
+        self.shell_focused = false;
+        self.shell_input_tx = None;
+    }
+
+    pub fn restart_shell(&mut self) {
+        self.shell_output.clear();
+        match crate::tui::shell::PtyShell::spawn(&self.cwd) {
+            Ok(shell) => {
+                self.shell_input_tx = Some(shell.input_tx.clone());
+                self.shell_output.push("[MowisAI] Shell restarted. Press Tab to focus.".to_string());
+                let event_tx = self.event_tx.clone();
+                std::thread::spawn(move || {
+                    while let Ok(ev) = shell.event_rx.recv() {
+                        match ev {
+                            crate::tui::shell::ShellEvent::Output(text) => {
+                                if let Some(ref tx) = event_tx {
+                                    let _ = tx.send(TuiEvent::ShellOutput(text));
+                                }
+                            }
+                            crate::tui::shell::ShellEvent::Exited(code) => {
+                                if let Some(ref tx) = event_tx {
+                                    let _ = tx.send(TuiEvent::ShellExited(code));
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                self.shell_output.push(format!("[MowisAI] Shell failed to restart: {}", e));
+            }
+        }
+    }
+
     // ── Keyboard input ────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -288,18 +380,117 @@ impl App {
             return;
         }
 
+        // When shell is focused, forward ALL keyboard input to the PTY
+        if self.shell_focused && self.shell_input_tx.is_some() {
+            match key.code {
+                // Tab unfocuses the shell
+                KeyCode::Tab => {
+                    self.shell_focused = false;
+                    return;
+                }
+                // Ctrl+C sends SIGINT via the PTY (just send the byte)
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x03]) // ETX = Ctrl+C
+                    );
+                    return;
+                }
+                // Ctrl+D sends EOF
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x04]) // EOT = Ctrl+D
+                    );
+                    return;
+                }
+                // Ctrl+Z sends SIGTSTP
+                KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x1a]) // SUB = Ctrl+Z
+                    );
+                    return;
+                }
+                // Up arrow
+                KeyCode::Up => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x1b, 0x5b, 0x41]) // ESC [ A
+                    );
+                    return;
+                }
+                // Down arrow
+                KeyCode::Down => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x1b, 0x5b, 0x42]) // ESC [ B
+                    );
+                    return;
+                }
+                // Right arrow
+                KeyCode::Right => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x1b, 0x5b, 0x43]) // ESC [ C
+                    );
+                    return;
+                }
+                // Left arrow
+                KeyCode::Left => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x1b, 0x5b, 0x44]) // ESC [ D
+                    );
+                    return;
+                }
+                // Enter
+                KeyCode::Enter => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x0a]) // LF
+                    );
+                    return;
+                }
+                // Backspace
+                KeyCode::Backspace => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x7f]) // DEL
+                    );
+                    return;
+                }
+                // Tab character (literal)
+                KeyCode::Char('\t') => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(vec![0x09])
+                    );
+                    return;
+                }
+                // Any other character
+                KeyCode::Char(c) => {
+                    let _ = self.shell_input_tx.as_ref().unwrap().send(
+                        crate::tui::shell::ShellInput::Data(c.to_string().into_bytes())
+                    );
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
+            KeyCode::Char('r') if self.view_mode == MainView::Shell && !self.shell_focused && self.shell_input_tx.is_none() => {
+                self.restart_shell();
+            }
             KeyCode::Tab if !self.is_loading => {
                 self.view_mode = match self.view_mode {
                     MainView::Chat => {
-                        if self.dev_mode_active { MainView::Orchestration } else { MainView::Chat }
+                        if self.dev_mode_active { MainView::Orchestration } else { MainView::Shell }
                     }
                     MainView::Orchestration => MainView::Development,
-                    MainView::Development => MainView::Chat,
+                    MainView::Development => MainView::Shell,
+                    MainView::Shell => MainView::Chat,
                 };
+                // When entering Shell view, auto-focus the shell
+                if self.view_mode == MainView::Shell && self.shell_input_tx.is_some() {
+                    self.shell_focused = true;
+                } else {
+                    self.shell_focused = false;
+                }
             }
             KeyCode::Enter if !self.is_loading => {
                 let text = self.input_text.trim().to_string();
@@ -661,6 +852,55 @@ impl App {
                 let checkpoint_root = std::env::temp_dir().join("mowisai-checkpoints");
                 let merge_work_dir = std::env::temp_dir().join("mowisai-merge");
 
+                // Create event channel so orchestrator can send progress to TUI
+                let (orch_event_tx, orch_event_rx) = std::sync::mpsc::channel::<crate::orchestration::new_orchestrator::OrchestratorEvent>();
+
+                // Forward orchestrator events to TUI in a background thread
+                let tx_clone = tx.clone();
+                std::thread::spawn(move || {
+                    while let Ok(ev) = orch_event_rx.recv() {
+                        let tui_ev = match ev {
+                            crate::orchestration::new_orchestrator::OrchestratorEvent::TaskStarted { task_id, description, .. } => {
+                                Some(OrchActivityEvent::AgentStarted { agent_id: task_id, description })
+                            }
+                            crate::orchestration::new_orchestrator::OrchestratorEvent::ToolCall { tool_name, .. } => {
+                                Some(OrchActivityEvent::ToolCall { agent_id: String::new(), tool_name })
+                            }
+                            crate::orchestration::new_orchestrator::OrchestratorEvent::TaskCompleted { success, .. } => {
+                                Some(if success {
+                                    OrchActivityEvent::AgentCompleted { agent_id: String::new() }
+                                } else {
+                                    OrchActivityEvent::AgentFailed { agent_id: String::new(), error: "task failed".into() }
+                                })
+                            }
+                            crate::orchestration::new_orchestrator::OrchestratorEvent::TaskFailed { error, .. } => {
+                                Some(OrchActivityEvent::AgentFailed { agent_id: String::new(), error })
+                            }
+                            crate::orchestration::new_orchestrator::OrchestratorEvent::LayerProgress { layer, message } => {
+                                Some(OrchActivityEvent::LayerProgress { layer, message })
+                            }
+                            crate::orchestration::new_orchestrator::OrchestratorEvent::LlmThinking { agent_id, task_description } => {
+                                let _ = tx_clone.send(TuiEvent::OrchEvent(OrchActivityEvent::ToolCall {
+                                    agent_id,
+                                    tool_name: format!("thinking: {}", task_description),
+                                }));
+                                None
+                            }
+                            crate::orchestration::new_orchestrator::OrchestratorEvent::ToolResult { tool_name, success, preview, .. } => {
+                                let _ = tx_clone.send(TuiEvent::OrchEvent(OrchActivityEvent::ToolCall {
+                                    agent_id: String::new(),
+                                    tool_name: format!("{}: {} {}", tool_name, if success { "✓" } else { "✗" }, preview.chars().take(60).collect::<String>()),
+                                }));
+                                None
+                            }
+                            _ => None,
+                        };
+                        if let Some(ev) = tui_ev {
+                            let _ = tx_clone.send(TuiEvent::OrchEvent(ev));
+                        }
+                    }
+                });
+
                 let orch_config = crate::orchestration::OrchestratorConfig {
                     llm_config,
                     execution_llm_config: None,
@@ -672,7 +912,7 @@ impl App {
                     max_agents: 100,
                     max_verification_rounds: 3,
                     staging_dir: None,
-                    event_tx: None,
+                    event_tx: Some(orch_event_tx),
                     mode_override: mode,
                 };
 

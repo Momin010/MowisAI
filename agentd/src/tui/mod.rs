@@ -2,6 +2,7 @@ pub mod app;
 pub mod ui;
 pub mod event;
 pub mod widgets;
+pub mod shell;
 
 use crate::config::MowisConfig;
 use anyhow::Result;
@@ -92,6 +93,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                 }
                 Ok(TuiEvent::SkillSaved(path)) => {
                     app.on_skill_saved(path);
+                }
+                Ok(TuiEvent::ShellOutput(text)) => {
+                    app.on_shell_output(text);
+                }
+                Ok(TuiEvent::ShellExited(code)) => {
+                    app.on_shell_exit(code);
                 }
                 _ => break,
             }

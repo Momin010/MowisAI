@@ -953,11 +953,27 @@ impl NewOrchestrator {
              WORKING DIRECTORY: /workspace (empty — you are building from scratch)\n\
              ALL file paths must use /workspace prefix.\n\n\
              TASK: {}\n\n\
-             IMPORTANT:\n\
-             - The workspace is EMPTY. There are NO existing files. Do NOT try to read existing files.\n\
-             - Create ALL files needed for the project from scratch.\n\
-             - Write complete, production-quality code. No placeholders. No stubs.\n\
-             - After creating files, verify they work (e.g. run a syntax check).",
+             WORKFLOW — follow these steps IN ORDER:\n\n\
+             STEP 1 — PLAN:\n\
+             Use run_command to echo your plan: what framework you'll use, what files you'll create.\n\
+             Example: run_command(cmd='echo \"Plan: Using Vite+React. Files: package.json, src/App.tsx, ...\"')\n\n\
+             STEP 2 — SCAFFOLD:\n\
+             If the project needs a package manager or scaffolding tool, USE IT.\n\
+             - Node.js: run_command(cmd='cd /workspace && CI=true npm create vite@latest . -- --template react')\n\
+             - Python: run_command(cmd='cd /workspace && pip install flask')\n\
+             - ALWAYS prefix npm/npx commands with CI=true to prevent interactive prompts.\n\
+             Do NOT manually create boilerplate that a tool can generate.\n\n\
+             STEP 3 — BUILD:\n\
+             Write or edit ALL source files using write_file. Every file must contain REAL, COMPLETE code.\n\
+             No placeholders. No TODOs. No stubs. No empty files.\n\n\
+             STEP 4 — VERIFY:\n\
+             Run a quick check: syntax check, lint, or build.\n\
+             Example: run_command(cmd='cd /workspace && npx vite build 2>&1 | tail -5')\n\n\
+             RULES:\n\
+             - NEVER read files that don't exist (the workspace is EMPTY at start).\n\
+             - NEVER write empty or placeholder files.\n\
+             - If scaffolding creates files, you can edit them with write_file instead of recreating.\n\
+             - Always create ALL files the project needs — do not stop early.",
             prompt
         );
 
