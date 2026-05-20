@@ -111,6 +111,48 @@ impl Sandbox {
         self.root.path()
     }
 
+    /// Create a Level-2 agent overlay on top of a parent sandbox.
+    /// The overlay is a new Sandbox whose lower layer is the parent's merged view.
+    pub fn create_agent_overlay(
+        parent: &Sandbox,
+        agent_id: &str,
+        limits: ResourceLimits,
+    ) -> Result<Self> {
+        let overlay_id = format!("{}:{}", parent.id, agent_id);
+        let overlay_root = tempfile::tempdir().context("create agent overlay root")?;
+        let base = std::env::temp_dir().join(format!("mowis-agent-overlay-{}", agent_id));
+        let upper = base.join("upper");
+        let work = base.join("work");
+        std::fs::create_dir_all(&upper)?;
+        std::fs::create_dir_all(&work)?;
+
+        let opts = format!(
+            "lowerdir={},upperdir={},workdir={}",
+            parent.root_path().display(),
+            upper.display(),
+            work.display()
+        );
+        mount(
+            Some("overlay"),
+            overlay_root.path(),
+            Some("overlay"),
+            MsFlags::empty(),
+            Some(opts.as_str()),
+        )
+        .with_context(|| format!("mount overlayfs for agent overlay {agent_id}"))?;
+
+        tracing::info!(agent = %agent_id, parent = %parent.id, "agent overlay mounted");
+
+        let sb = Sandbox {
+            id: overlay_id,
+            root: overlay_root,
+            overlay_dirs: Some(OverlayDirs { upper, work }),
+            limits,
+        };
+        sb.apply_cgroup_limits();
+        Ok(sb)
+    }
+
     fn apply_cgroup_limits(&self) {
         let cgroup_base = Path::new("/sys/fs/cgroup/mowis");
         if !cgroup_base.exists() && std::fs::create_dir_all(cgroup_base).is_err() {
@@ -179,6 +221,42 @@ impl Sandbox {
             output.stderr,
         ))
     }
+}
+
+/// Merge an agent overlay into its parent sandbox.
+/// Copies all files from the overlay's upper directory into the parent's root.
+/// Returns the list of changed paths.
+pub fn merge_overlay(parent: &Sandbox, overlay: &Sandbox) -> Result<Vec<String>> {
+    let upper = overlay
+        .overlay_dirs
+        .as_ref()
+        .map(|d| d.upper.clone())
+        .ok_or_else(|| anyhow::anyhow!("overlay has no upper directory"))?;
+
+    let mut changed = Vec::new();
+    copy_dir_recursive(&upper, parent.root_path(), &mut changed)?;
+    Ok(changed)
+}
+
+fn copy_dir_recursive(src: &Path, dst_base: &Path, changed: &mut Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let rel = src_path.strip_prefix(src).unwrap();
+        let dst_path = dst_base.join(rel);
+
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&dst_path)?;
+            copy_dir_recursive(&src_path, dst_base, changed)?;
+        } else {
+            if let Some(parent) = dst_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src_path, &dst_path)?;
+            changed.push(rel.to_string_lossy().to_string());
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Sandbox {

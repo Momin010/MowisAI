@@ -17,6 +17,12 @@ use clap::{Parser, Subcommand};
 
 use mowis_host::protocol::{ExecRequest, Payload, SandboxSpec};
 use mowis_host::{image, initrd, transport, vmm};
+use mowis_orchestration::conductor::Conductor;
+use mowis_orchestration::captain::Captain;
+use mowis_orchestration::critic::Critic;
+use mowis_orchestration::config::OrchConfig;
+use mowis_orchestration::events::{Event, EventBus};
+use mowis_orchestration::plan::PlanId;
 
 #[derive(Debug, Parser)]
 #[command(name = "mowisd", version, about = "MowisAI host-side daemon (new architecture)")]
@@ -86,6 +92,14 @@ enum Cmd {
         /// Command and args. Use `--` to separate flags from the command.
         #[arg(last = true)]
         argv: Vec<String>,
+    },
+    /// Start an interactive chat session with the orchestration engine.
+    Chat {
+        /// Optional vsock CID to connect to a running VM for tool execution.
+        #[arg(long)]
+        cid: Option<u32>,
+        #[arg(long, default_value_t = mowis_host::protocol::DEFAULT_VSOCK_PORT)]
+        port: u32,
     },
 }
 
@@ -207,6 +221,107 @@ async fn main() -> Result<()> {
                 let _ = conn.call(Payload::DestroySandbox { sandbox_id: id }).await;
             }
             std::process::exit(exit);
+        }
+        Cmd::Chat { cid, port } => {
+            let cfg = OrchConfig::load().unwrap_or_default();
+            let bus = EventBus::new();
+
+            let mut conductor = Conductor::new(&cfg, bus.clone())?;
+            let mut critic = Critic::new(&cfg, bus.clone())?;
+
+            // Spawn critic on background
+            let critic_handle = tokio::spawn(async move {
+                if let Err(e) = critic.run().await {
+                    tracing::error!(error = %e, "critic exited with error");
+                }
+            });
+
+            // Spawn event logger
+            let bus_clone = bus.clone();
+            let logger_handle = tokio::spawn(async move {
+                let mut rx = bus_clone.subscribe();
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => {
+                            tracing::info!(?event, "orchestration event");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            println!("MowisAI chat session started. Type your message and press Enter.");
+            println!("Type 'quit' or 'exit' to leave.\n");
+
+            let stdin = std::io::stdin();
+            loop {
+                print!("> ");
+                use std::io::Write;
+                std::io::stdout().flush()?;
+
+                let mut line = String::new();
+                if stdin.read_line(&mut line)? == 0 {
+                    break;
+                }
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if line == "quit" || line == "exit" {
+                    break;
+                }
+
+                match conductor.handle_user_message(line.to_string()).await {
+                    Ok(mowis_orchestration::conductor::ConductorAction::Chat { reply }) => {
+                        println!("\n{}\n", reply);
+                    }
+                    Ok(mowis_orchestration::conductor::ConductorAction::PlanDrafted { plan_id }) => {
+                        println!("\nPlan drafted: {}", plan_id.0);
+                        println!("The critic will review it now.");
+                        println!("Type 'approve' to approve or 'cancel' to cancel.\n");
+
+                        // Wait for user approval
+                        print!("> ");
+                        std::io::stdout().flush()?;
+                        let mut approval = String::new();
+                        stdin.read_line(&mut approval)?;
+                        let approval = approval.trim();
+                        if approval == "approve" || approval == "y" || approval == "yes" {
+                            bus.emit(Event::UserApproved { plan_id: plan_id.clone() });
+                            println!("Plan approved! Spawning Captain...\n");
+
+                            let captain = Captain::new(&cfg, plan_id, bus.clone())?;
+                            match captain.run().await {
+                                Ok(mowis_orchestration::captain::CaptainOutcome::Completed { sandbox_id }) => {
+                                    println!("Plan completed! Sandbox: {}", sandbox_id);
+                                }
+                                Ok(mowis_orchestration::captain::CaptainOutcome::Failed { reason, .. }) => {
+                                    eprintln!("Plan failed: {}", reason);
+                                }
+                                Ok(mowis_orchestration::captain::CaptainOutcome::Aborted) => {
+                                    println!("Plan aborted.");
+                                }
+                                Err(e) => {
+                                    eprintln!("Captain error: {}", e);
+                                }
+                            }
+                        } else {
+                            bus.emit(Event::UserCancelled { plan_id });
+                            println!("Plan cancelled.\n");
+                        }
+                    }
+                    Ok(other) => {
+                        println!("{:?}", other);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                    }
+                }
+            }
+
+            critic_handle.abort();
+            logger_handle.abort();
         }
     }
     Ok(())

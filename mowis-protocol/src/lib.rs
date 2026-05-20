@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_VSOCK_PORT: u32 = 5252;
 
 /// Protocol version. Bump on any wire-format-breaking change.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -41,6 +41,40 @@ pub enum Payload {
         sandbox_id: String,
         tool: String,
         input: serde_json::Value,
+    },
+
+    // ---- Agent overlay management (host -> guest) ----
+    CreateAgentOverlay {
+        parent_sandbox_id: String,
+        agent_id: String,
+        limits: ResourceLimits,
+    },
+    MergeAgentOverlay {
+        parent_sandbox_id: String,
+        agent_id: String,
+    },
+    DiscardAgentOverlay {
+        parent_sandbox_id: String,
+        agent_id: String,
+    },
+    InvokeToolAsAgent {
+        parent_sandbox_id: String,
+        agent_id: String,
+        tool: String,
+        input: serde_json::Value,
+        caller_tier: String,
+    },
+
+    // ---- Agent overlay responses (guest -> host) ----
+    AgentOverlayCreated {
+        agent_id: String,
+    },
+    AgentOverlayMerged {
+        agent_id: String,
+        changed_paths: Vec<String>,
+    },
+    AgentOverlayDiscarded {
+        agent_id: String,
     },
 
     // ---- Responses / events (guest -> host) ----
@@ -209,5 +243,169 @@ mod tests {
             Payload::Stdout { data } => assert_eq!(data, "hello\n"),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn roundtrip_create_agent_overlay() {
+        let e = Envelope::new(
+            10,
+            Payload::CreateAgentOverlay {
+                parent_sandbox_id: "sb-1".into(),
+                agent_id: "ag-001".into(),
+                limits: ResourceLimits {
+                    ram_bytes: Some(512 * 1024 * 1024),
+                    cpu_millis: Some(1000),
+                },
+            },
+        );
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 10);
+        match back.payload {
+            Payload::CreateAgentOverlay {
+                parent_sandbox_id,
+                agent_id,
+                limits,
+            } => {
+                assert_eq!(parent_sandbox_id, "sb-1");
+                assert_eq!(agent_id, "ag-001");
+                assert_eq!(limits.ram_bytes, Some(512 * 1024 * 1024));
+            }
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_merge_agent_overlay() {
+        let e = Envelope::new(
+            11,
+            Payload::MergeAgentOverlay {
+                parent_sandbox_id: "sb-1".into(),
+                agent_id: "ag-001".into(),
+            },
+        );
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 11);
+        match back.payload {
+            Payload::MergeAgentOverlay {
+                parent_sandbox_id,
+                agent_id,
+            } => {
+                assert_eq!(parent_sandbox_id, "sb-1");
+                assert_eq!(agent_id, "ag-001");
+            }
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_discard_agent_overlay() {
+        let e = Envelope::new(
+            12,
+            Payload::DiscardAgentOverlay {
+                parent_sandbox_id: "sb-1".into(),
+                agent_id: "ag-002".into(),
+            },
+        );
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 12);
+        match back.payload {
+            Payload::DiscardAgentOverlay {
+                parent_sandbox_id,
+                agent_id,
+            } => {
+                assert_eq!(parent_sandbox_id, "sb-1");
+                assert_eq!(agent_id, "ag-002");
+            }
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_invoke_tool_as_agent() {
+        let e = Envelope::new(
+            13,
+            Payload::InvokeToolAsAgent {
+                parent_sandbox_id: "sb-1".into(),
+                agent_id: "ag-001".into(),
+                tool: "read_file".into(),
+                input: serde_json::json!({"path": "/src/main.rs"}),
+                caller_tier: "crew".into(),
+            },
+        );
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 13);
+        match back.payload {
+            Payload::InvokeToolAsAgent {
+                parent_sandbox_id,
+                agent_id,
+                tool,
+                input,
+                caller_tier,
+            } => {
+                assert_eq!(parent_sandbox_id, "sb-1");
+                assert_eq!(agent_id, "ag-001");
+                assert_eq!(tool, "read_file");
+                assert_eq!(input, serde_json::json!({"path": "/src/main.rs"}));
+                assert_eq!(caller_tier, "crew");
+            }
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_agent_overlay_created() {
+        let e = Envelope::new(14, Payload::AgentOverlayCreated { agent_id: "ag-001".into() });
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 14);
+        match back.payload {
+            Payload::AgentOverlayCreated { agent_id } => assert_eq!(agent_id, "ag-001"),
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_agent_overlay_merged() {
+        let e = Envelope::new(
+            15,
+            Payload::AgentOverlayMerged {
+                agent_id: "ag-001".into(),
+                changed_paths: vec!["src/main.rs".into(), "Cargo.toml".into()],
+            },
+        );
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 15);
+        match back.payload {
+            Payload::AgentOverlayMerged {
+                agent_id,
+                changed_paths,
+            } => {
+                assert_eq!(agent_id, "ag-001");
+                assert_eq!(changed_paths, vec!["src/main.rs", "Cargo.toml"]);
+            }
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_agent_overlay_discarded() {
+        let e = Envelope::new(16, Payload::AgentOverlayDiscarded { agent_id: "ag-002".into() });
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 16);
+        match back.payload {
+            Payload::AgentOverlayDiscarded { agent_id } => assert_eq!(agent_id, "ag-002"),
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[test]
+    fn protocol_version_is_2() {
+        assert_eq!(PROTOCOL_VERSION, 2);
     }
 }

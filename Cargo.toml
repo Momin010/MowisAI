@@ -7,6 +7,7 @@ members = [
     "mowis-protocol",
     "mowis-host",
     "mowis-executor",
+    "mowis-orchestration",
 ]
 resolver = "2"
 

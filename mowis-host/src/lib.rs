@@ -22,5 +22,6 @@ pub mod image;
 pub mod initrd;
 pub mod transport;
 pub mod vmm;
+pub mod vsock_transport;
 
 pub use mowis_protocol as protocol;

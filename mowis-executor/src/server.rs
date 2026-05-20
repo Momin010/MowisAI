@@ -157,6 +157,115 @@ async fn dispatch(
                 Err(e) => send_error(&writer, id, e.to_string()).await?,
             }
         }
+        Payload::CreateAgentOverlay {
+            parent_sandbox_id,
+            agent_id,
+            limits,
+        } => {
+            let parent = match sandboxes.get(&parent_sandbox_id) {
+                Some(s) => s.clone(),
+                None => {
+                    send_error(&writer, id, format!("no sandbox `{parent_sandbox_id}`")).await?;
+                    return Ok(());
+                }
+            };
+            let agent_id_clone = agent_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::sandbox::Sandbox::create_agent_overlay(&parent, &agent_id_clone, limits)
+            })
+            .await?
+            {
+                Ok(overlay_sb) => {
+                    let overlay_id = overlay_sb.id.clone();
+                    sandboxes.insert(overlay_id, Arc::new(overlay_sb));
+                    send(
+                        &writer,
+                        Envelope::new(id, Payload::AgentOverlayCreated { agent_id }),
+                    )
+                    .await?;
+                }
+                Err(e) => send_error(&writer, id, e.to_string()).await?,
+            }
+        }
+        Payload::MergeAgentOverlay {
+            parent_sandbox_id,
+            agent_id,
+        } => {
+            let parent = match sandboxes.get(&parent_sandbox_id) {
+                Some(s) => s.clone(),
+                None => {
+                    send_error(&writer, id, format!("no sandbox `{parent_sandbox_id}`")).await?;
+                    return Ok(());
+                }
+            };
+            let overlay_key = format!("{}:{}", parent_sandbox_id, agent_id);
+            let overlay = match sandboxes.get(&overlay_key) {
+                Some(s) => s.clone(),
+                None => {
+                    send_error(&writer, id, format!("no agent overlay `{agent_id}`")).await?;
+                    return Ok(());
+                }
+            };
+            let agent_id_clone = agent_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::sandbox::merge_overlay(&parent, &overlay)
+            })
+            .await?
+            {
+                Ok(changed_paths) => {
+                    sandboxes.remove(&overlay_key);
+                    send(
+                        &writer,
+                        Envelope::new(
+                            id,
+                            Payload::AgentOverlayMerged {
+                                agent_id: agent_id_clone,
+                                changed_paths,
+                            },
+                        ),
+                    )
+                    .await?;
+                }
+                Err(e) => send_error(&writer, id, e.to_string()).await?,
+            }
+        }
+        Payload::DiscardAgentOverlay {
+            parent_sandbox_id,
+            agent_id,
+        } => {
+            let overlay_key = format!("{}:{}", parent_sandbox_id, agent_id);
+            if sandboxes.remove(&overlay_key).is_some() {
+                send(
+                    &writer,
+                    Envelope::new(id, Payload::AgentOverlayDiscarded { agent_id }),
+                )
+                .await?;
+            } else {
+                send_error(&writer, id, format!("no agent overlay `{agent_id}`")).await?;
+            }
+        }
+        Payload::InvokeToolAsAgent {
+            parent_sandbox_id,
+            agent_id,
+            tool,
+            input,
+            caller_tier: _,
+        } => {
+            let overlay_key = format!("{}:{}", parent_sandbox_id, agent_id);
+            let sb = match sandboxes.get(&overlay_key) {
+                Some(s) => s.clone(),
+                None => {
+                    send_error(&writer, id, format!("no agent overlay `{agent_id}`")).await?;
+                    return Ok(());
+                }
+            };
+            match tokio::task::spawn_blocking(move || tools::invoke(&sb, &tool, input)).await? {
+                Ok(output) => {
+                    send(&writer, Envelope::new(id, Payload::ToolResult { output })).await?;
+                }
+                Err(e) => send_error(&writer, id, e.to_string()).await?,
+            }
+        }
         // Guest-side payloads should never arrive from the host; ignore.
         Payload::Pong { .. }
         | Payload::SandboxCreated { .. }
@@ -166,6 +275,9 @@ async fn dispatch(
         | Payload::Stderr { .. }
         | Payload::ExitCode { .. }
         | Payload::ToolResult { .. }
+        | Payload::AgentOverlayCreated { .. }
+        | Payload::AgentOverlayMerged { .. }
+        | Payload::AgentOverlayDiscarded { .. }
         | Payload::Error { .. } => {
             tracing::warn!(?id, "received unexpected guest-side payload from host");
         }
