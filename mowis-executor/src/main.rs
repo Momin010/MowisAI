@@ -44,6 +44,8 @@ async fn main() -> anyhow::Result<()> {
         if let Err(e) = init::mount_essentials() {
             tracing::error!(error = %e, "essential mounts failed");
         }
+        tracing::info!("loading vsock kernel modules");
+        init::load_vsock_modules();
     }
 
     tracing::info!(

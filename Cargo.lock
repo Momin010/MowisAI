@@ -2792,6 +2792,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dashmap",
+ "libc",
  "mowis-protocol",
  "nix 0.27.1",
  "serde",

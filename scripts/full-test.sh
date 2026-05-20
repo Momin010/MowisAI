@@ -100,8 +100,8 @@ run "timeout 10 target/release/mowisd ping --cid 1 --port 5252 2>&1"
 sub "exec /bin/echo over vsock loopback (no sandbox — host's binaries are visible)"
 run "timeout 20 target/release/mowisd exec --cid 1 --port 5252 --no-sandbox -- /bin/echo hello-from-vsock 2>&1"
 
-sub "create+destroy sandbox over vsock loopback"
-run "timeout 10 target/release/mowisd exec --cid 1 --port 5252 -- /bin/true 2>&1; echo (sandbox path: expected non-zero because tmpfs has no /bin/true)"
+sub "create sandbox over vsock loopback (sandboxed path; expected non-zero — tmpfs has no /bin/true)"
+run "timeout 10 target/release/mowisd exec --cid 1 --port 5252 -- /bin/true 2>&1 || true"
 
 sub "executor log after exec"
 run "tail -30 $LOG"

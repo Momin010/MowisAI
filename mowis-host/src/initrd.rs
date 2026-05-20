@@ -68,6 +68,12 @@ pub async fn build(executor_bin: &Path, output: &Path) -> Result<()> {
         }
     }
 
+    // Bundle vsock kernel modules so the guest can register an AF_VSOCK
+    // transport. Without these the executor's bind fails with "No such device"
+    // because the host kernel has vsock built as a module and the initramfs
+    // has no /lib/modules to modprobe from.
+    bundle_vsock_modules(root).await?;
+
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -148,6 +154,88 @@ async fn ldd_dependencies(bin: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(paths.into_iter().collect())
+}
+
+/// Copy the vsock kernel modules into the initramfs at the path the executor
+/// looks for them. Handles plain `.ko` and compressed `.ko.zst` / `.ko.gz` /
+/// `.ko.xz` by shelling out to the matching decompressor (already installed
+/// alongside cpio on every distro we care about).
+async fn bundle_vsock_modules(staging_root: &Path) -> Result<()> {
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .context("read /proc/sys/kernel/osrelease")?;
+    let release = release.trim();
+    let src_dir = PathBuf::from(format!(
+        "/lib/modules/{release}/kernel/net/vmw_vsock"
+    ));
+    if !src_dir.exists() {
+        tracing::warn!(
+            path = %src_dir.display(),
+            "vsock module directory missing; guest will fail to bind AF_VSOCK"
+        );
+        return Ok(());
+    }
+    let dest_dir = staging_root.join(format!(
+        "lib/modules/{release}/kernel/net/vmw_vsock"
+    ));
+    std::fs::create_dir_all(&dest_dir)?;
+
+    let modules = [
+        "vsock",
+        "vmw_vsock_virtio_transport_common",
+        "vmw_vsock_virtio_transport",
+    ];
+    let mut bundled = 0;
+    for name in modules {
+        let dest = dest_dir.join(format!("{name}.ko"));
+        let mut found = false;
+        for ext in ["ko", "ko.zst", "ko.gz", "ko.xz"] {
+            let candidate = src_dir.join(format!("{name}.{ext}"));
+            if !candidate.exists() {
+                continue;
+            }
+            decompress_to(&candidate, &dest, ext).await.with_context(|| {
+                format!("decompress {} -> {}", candidate.display(), dest.display())
+            })?;
+            tracing::info!(module = name, src = %candidate.display(), "bundled");
+            bundled += 1;
+            found = true;
+            break;
+        }
+        if !found {
+            tracing::warn!(module = name, dir = %src_dir.display(), "module not found");
+        }
+    }
+    if bundled == 0 {
+        tracing::warn!("no vsock modules bundled; guest will not have AF_VSOCK");
+    }
+    Ok(())
+}
+
+async fn decompress_to(src: &Path, dest: &Path, ext: &str) -> Result<()> {
+    let cmd = match ext {
+        "ko" => {
+            std::fs::copy(src, dest)?;
+            return Ok(());
+        }
+        "ko.zst" => "zstd",
+        "ko.gz" => "gzip",
+        "ko.xz" => "xz",
+        other => anyhow::bail!("unknown module extension `{other}`"),
+    };
+    which::which(cmd)
+        .with_context(|| format!("`{cmd}` not found on PATH (needed to decompress {ext})"))?;
+    let status = Command::new(cmd)
+        .arg("-d")
+        .arg("-c")
+        .arg(src)
+        .stdout(std::process::Stdio::from(std::fs::File::create(dest)?))
+        .status()
+        .await
+        .with_context(|| format!("spawn {cmd}"))?;
+    if !status.success() {
+        anyhow::bail!("{cmd} -d failed: exit {status}");
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
