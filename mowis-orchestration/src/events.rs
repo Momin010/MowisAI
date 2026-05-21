@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::plan::{PlanId, TaskId};
-use crate::critic::{Verdict, Issue};
+use crate::critic::Verdict;
+use crate::plan::{PlanId, PlanStatus, TaskId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
+    // From Conductor
     PlanDrafted {
         plan_id: PlanId,
         version: u32,
@@ -14,10 +15,19 @@ pub enum Event {
         plan_id: PlanId,
         version: u32,
     },
+    PlanSuperseded {
+        old_plan_id: PlanId,
+        new_plan_id: PlanId,
+    },
     PlanApproved {
         plan_id: PlanId,
     },
+    ConductorReply {
+        kind: ConductorReplyKind,
+        text: String,
+    },
 
+    // From Critic
     CriticReviewing {
         plan_id: PlanId,
         version: u32,
@@ -28,6 +38,7 @@ pub enum Event {
         verdict: Verdict,
     },
 
+    // From user (via host)
     UserApproved {
         plan_id: PlanId,
     },
@@ -37,7 +48,11 @@ pub enum Event {
     UserCancelled {
         plan_id: PlanId,
     },
+    UserMessageReceived {
+        text: String,
+    },
 
+    // From Captain
     CaptainStarted {
         plan_id: PlanId,
         sandbox_id: String,
@@ -47,11 +62,11 @@ pub enum Event {
         task_id: TaskId,
         agent_id: String,
     },
-    CrewProgress {
-        plan_id: PlanId,
+    CrewToolSummary {
         agent_id: String,
-        tool: String,
-        round: u32,
+        text: String,
+        tool_name: String,
+        success: bool,
     },
     CrewDone {
         plan_id: PlanId,
@@ -71,6 +86,11 @@ pub enum Event {
         plan_id: PlanId,
         agent_id: String,
     },
+    TaskInjected {
+        plan_id: PlanId,
+        task_id: TaskId,
+        reason: String,
+    },
     PlanCompleted {
         plan_id: PlanId,
     },
@@ -78,6 +98,36 @@ pub enum Event {
         plan_id: PlanId,
         reason: String,
     },
+    CaptainStatusUpdate {
+        status: CaptainStatus,
+    },
+
+    // Lifecycle
+    ConversationEnded,
+    CaptainShutdown {
+        sandbox_id: String,
+        final_plan_status: PlanStatus,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConductorReplyKind {
+    Chat,
+    PlanDrafted,
+    PlanRevised,
+    HotPatched,
+    ScopeChanged,
+    Awaiting,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptainStatus {
+    pub plan_id: Option<PlanId>,
+    pub sandbox_id: Option<String>,
+    pub in_flight: Vec<(TaskId, String, u32)>,
+    pub completed: Vec<TaskId>,
+    pub failed: Vec<(TaskId, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,5 +156,79 @@ impl EventBus {
 impl Default for EventBus {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_event_bus_basic() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        bus.emit(Event::PlanDrafted {
+            plan_id: PlanId("test".into()),
+            version: 1,
+        });
+
+        let ev = rx.try_recv().unwrap();
+        match ev {
+            Event::PlanDrafted { plan_id, version } => {
+                assert_eq!(plan_id.0, "test");
+                assert_eq!(version, 1);
+            }
+            _ => panic!("wrong event"),
+        }
+    }
+
+    #[test]
+    fn test_event_bus_multiple_subscribers() {
+        let bus = EventBus::new();
+        let mut rx1 = bus.subscribe();
+        let mut rx2 = bus.subscribe();
+
+        bus.emit(Event::ConversationEnded);
+
+        assert!(matches!(rx1.try_recv().unwrap(), Event::ConversationEnded));
+        assert!(matches!(rx2.try_recv().unwrap(), Event::ConversationEnded));
+    }
+
+    #[test]
+    fn test_event_bus_lagged() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        for _ in 0..2048 {
+            bus.emit(Event::ConversationEnded);
+        }
+
+        let mut got_lagged = false;
+        loop {
+            match rx.try_recv() {
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    got_lagged = true;
+                    break;
+                }
+                Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+        assert!(got_lagged);
+    }
+
+    #[test]
+    fn test_captain_status_serializable() {
+        let status = CaptainStatus {
+            plan_id: Some(PlanId("p1".into())),
+            sandbox_id: Some("sb-1".into()),
+            in_flight: vec![(TaskId("t1".into()), "ag-1".into(), 5)],
+            completed: vec![TaskId("t0".into())],
+            failed: vec![],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("p1"));
+        assert!(json.contains("ag-1"));
     }
 }

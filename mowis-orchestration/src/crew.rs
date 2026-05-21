@@ -4,7 +4,8 @@ use serde_json::json;
 
 use crate::events::{Event, EventBus};
 use crate::plan::{PlanId, TaskId};
-use crate::providers::{AgentConversation, AgentRoundResult, LlmConfig, ToolCall};
+use crate::providers::{AgentConversation, LlmConfig, ToolCall};
+use crate::summaries::{summarize, ToolOutcome};
 use crate::tools::ToolGateway;
 
 #[derive(Debug, Clone)]
@@ -121,15 +122,36 @@ impl Crew {
             for tc in round.tool_calls {
                 tool_call_count += 1;
 
-                self.bus.emit(Event::CrewProgress {
-                    plan_id: self.plan_id.clone(),
-                    agent_id: self.agent_id.clone(),
-                    tool: tc.name.clone(),
-                    round: conversation.round_count() as u32,
-                });
+                // Check whitelist
+                if !self.tool_gateway.allows(&tc.name) {
+                    let outcome = ToolOutcome::Denied;
+                    let summary_text = summarize(&tc, &outcome);
 
+                    self.bus.emit(Event::CrewToolSummary {
+                        agent_id: self.agent_id.clone(),
+                        text: summary_text,
+                        tool_name: tc.name.clone(),
+                        success: false,
+                    });
+
+                    results.push((tc, json!({"error": "tool forbidden"})));
+                    continue;
+                }
+
+                // Invoke tool through gateway
                 let result = self.tool_gateway.invoke(tc.clone()).await.unwrap_or_else(|e| {
                     json!({"error": e.to_string()})
+                });
+
+                // Generate deterministic summary
+                let outcome: ToolOutcome = result.clone().into();
+                let summary_text = summarize(&tc, &outcome);
+
+                self.bus.emit(Event::CrewToolSummary {
+                    agent_id: self.agent_id.clone(),
+                    text: summary_text,
+                    tool_name: tc.name.clone(),
+                    success: outcome.is_ok(),
                 });
 
                 results.push((tc, result));

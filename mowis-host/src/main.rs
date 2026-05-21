@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 use mowis_host::protocol::{ExecRequest, Payload, SandboxSpec};
 use mowis_host::{image, initrd, transport, vmm};
 use mowis_orchestration::conductor::Conductor;
-use mowis_orchestration::captain::Captain;
+use mowis_orchestration::captain::SimpleCaptain;
 use mowis_orchestration::critic::Critic;
 use mowis_orchestration::config::OrchConfig;
 use mowis_orchestration::events::{Event, EventBus};
@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
             let cfg = OrchConfig::load().unwrap_or_default();
             let bus = EventBus::new();
 
-            let mut conductor = Conductor::new(&cfg, bus.clone())?;
+            let (mut conductor, _cmd_tx) = Conductor::new(&cfg, bus.clone())?;
             let mut critic = Critic::new(&cfg, bus.clone())?;
 
             // Spawn critic on background
@@ -273,10 +273,10 @@ async fn main() -> Result<()> {
                 }
 
                 match conductor.handle_user_message(line.to_string()).await {
-                    Ok(mowis_orchestration::conductor::ConductorAction::Chat { reply }) => {
+                    Ok(mowis_orchestration::conductor::ConductorReply::Chat { reply }) => {
                         println!("\n{}\n", reply);
                     }
-                    Ok(mowis_orchestration::conductor::ConductorAction::PlanDrafted { plan_id }) => {
+                    Ok(mowis_orchestration::conductor::ConductorReply::PlanDrafted { plan_id, .. }) => {
                         println!("\nPlan drafted: {}", plan_id.0);
                         println!("The critic will review it now.");
                         println!("Type 'approve' to approve or 'cancel' to cancel.\n");
@@ -291,7 +291,7 @@ async fn main() -> Result<()> {
                             bus.emit(Event::UserApproved { plan_id: plan_id.clone() });
                             println!("Plan approved! Spawning Captain...\n");
 
-                            let captain = Captain::new(&cfg, plan_id, bus.clone())?;
+                            let captain = SimpleCaptain::new(&cfg, plan_id, bus.clone())?;
                             match captain.run().await {
                                 Ok(mowis_orchestration::captain::CaptainOutcome::Completed { sandbox_id }) => {
                                     println!("Plan completed! Sandbox: {}", sandbox_id);

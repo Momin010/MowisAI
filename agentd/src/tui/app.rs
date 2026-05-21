@@ -1,10 +1,25 @@
 use crate::config::MowisConfig;
-use crate::intent::{classify_intent, UserIntent};
 use crate::orchestration::ComplexityMode;
 use crate::tui::event::{OrchActivityEvent, TuiEvent};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// Stubs for removed modules (deleted per mowis-orchestration spec §14.1)
+#[derive(Debug, Clone, PartialEq)]
+pub enum UserIntent {
+    Build,
+    Chat,
+}
+
+fn classify_intent(text: &str) -> UserIntent {
+    let lower = text.to_lowercase();
+    if lower.starts_with("build") || lower.starts_with("make") || lower.starts_with("create") {
+        UserIntent::Build
+    } else {
+        UserIntent::Chat
+    }
+}
 
 // ── Public types consumed by ui.rs ───────────────────────────────────────────
 

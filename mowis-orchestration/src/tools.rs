@@ -93,6 +93,10 @@ impl ToolGateway {
         }
     }
 
+    pub fn allows(&self, tool_name: &str) -> bool {
+        self.allowlist.allows(tool_name)
+    }
+
     pub async fn set_transport(&self, transport: Box<dyn ToolTransport>) {
         let mut t = self.transport.lock().await;
         *t = Some(transport);
