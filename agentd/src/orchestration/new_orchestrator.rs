@@ -30,7 +30,7 @@ pub enum OrchestratorEvent {
 }
 
 use super::agent_execution::AgentExecutor;
-use super::types::{classify_complexity, ComplexityMode};
+use super::complexity_classifier::{classify_complexity, ComplexityMode};
 use super::health::HealthMonitor;
 use super::merge_reviewer::{AgentContribution, ConflictDetector, MergeReviewerAgent, parse_unified_diff};
 use super::planner::{plan_task, plan_task_standard, scan_directory_tree_pub};

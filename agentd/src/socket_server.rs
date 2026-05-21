@@ -20,7 +20,7 @@ use crate::vm_backend::{boot_vm, exec_in_vm, stop_vm, VmHandle};
 use crate::{ResourceLimits, Sandbox};
 
 use crate::config::MowisConfig;
-use crate::orchestration::types::ComplexityMode;
+use crate::orchestration::complexity_classifier::ComplexityMode;
 use crate::orchestration::new_orchestrator::{
     NewOrchestrator, OrchestratorConfig, OrchestratorEvent,
 };
