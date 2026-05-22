@@ -27,6 +27,9 @@ async-trait = "0.1"
 which = "6"
 dashmap = "5"
 tempfile = "3"
+base64 = "0.21"
+tar = "0.4"
+flate2 = "1"
 
 # vsock transport is Linux-only for the MVP. Apple Virtualization.framework
 # and Hyper-V hvsocket integrations live behind backend-specific feature

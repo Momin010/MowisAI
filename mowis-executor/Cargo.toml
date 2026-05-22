@@ -19,6 +19,9 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 dashmap = "5"
 reqwest = { version = "0.11", default-features = false, features = ["json", "blocking", "rustls-tls-webpki-roots"] }
+base64 = "0.21"
+tar = "0.4"
+flate2 = "1"
 
 # Guest is Linux-only — vsock + namespace/mount primitives.
 [target.'cfg(target_os = "linux")'.dependencies]

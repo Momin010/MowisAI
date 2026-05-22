@@ -133,6 +133,8 @@ async fn read_loop(
                 | Payload::AgentOverlayCreated { .. }
                 | Payload::AgentOverlayMerged { .. }
                 | Payload::AgentOverlayDiscarded { .. }
+                | Payload::CodebaseUploaded { .. }
+                | Payload::HealthOk { .. }
         );
         if let Some(tx) = inflight.get(&env.id) {
             let _ = tx.send(env.payload);

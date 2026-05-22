@@ -266,6 +266,53 @@ async fn dispatch(
                 Err(e) => send_error(&writer, id, e.to_string()).await?,
             }
         }
+        Payload::UploadCodebase {
+            sandbox_id,
+            archive_b64,
+            file_count,
+        } => {
+            let sb = match sandboxes.get(&sandbox_id) {
+                Some(s) => s.clone(),
+                None => {
+                    send_error(&writer, id, format!("no sandbox `{sandbox_id}`")).await?;
+                    return Ok(());
+                }
+            };
+            match tokio::task::spawn_blocking(move || {
+                upload_codebase(&sb, &archive_b64)
+            })
+            .await?
+            {
+                Ok(uploaded_count) => {
+                    send(
+                        &writer,
+                        Envelope::new(
+                            id,
+                            Payload::CodebaseUploaded {
+                                sandbox_id,
+                                file_count: uploaded_count,
+                            },
+                        ),
+                    )
+                    .await?;
+                }
+                Err(e) => send_error(&writer, id, e.to_string()).await?,
+            }
+        }
+        Payload::HealthCheck => {
+            let sandbox_count = sandboxes.len();
+            send(
+                &writer,
+                Envelope::new(
+                    id,
+                    Payload::HealthOk {
+                        uptime_secs: 0,
+                        sandbox_count,
+                    },
+                ),
+            )
+            .await?;
+        }
         // Guest-side payloads should never arrive from the host; ignore.
         Payload::Pong { .. }
         | Payload::SandboxCreated { .. }
@@ -278,6 +325,8 @@ async fn dispatch(
         | Payload::AgentOverlayCreated { .. }
         | Payload::AgentOverlayMerged { .. }
         | Payload::AgentOverlayDiscarded { .. }
+        | Payload::CodebaseUploaded { .. }
+        | Payload::HealthOk { .. }
         | Payload::Error { .. } => {
             tracing::warn!(?id, "received unexpected guest-side payload from host");
         }
@@ -394,4 +443,33 @@ async fn send_error(
     message: String,
 ) -> Result<()> {
     send(writer, Envelope::new(id, Payload::Error { message })).await
+}
+
+fn upload_codebase(sandbox: &Sandbox, archive_b64: &str) -> Result<u32> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use std::io::Read;
+
+    let compressed = BASE64.decode(archive_b64).context("base64 decode archive")?;
+    let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+    let mut tar_data = Vec::new();
+    decoder.read_to_end(&mut tar_data).context("gzip decompress")?;
+
+    let root = sandbox.root_path();
+    let mut file_count = 0u32;
+    let mut archive = tar::Archive::new(&tar_data[..]);
+    for entry in archive.entries().context("read tar entries")? {
+        let mut entry = entry.context("read tar entry")?;
+        let path = entry.path().context("entry path")?.to_path_buf();
+        // Security: reject absolute paths and path traversal
+        if path.is_absolute()
+            || path.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+        let dest = root.join(&path);
+        entry.unpack(&dest).context("unpack entry")?;
+        file_count += 1;
+    }
+    tracing::info!(path = %root.display(), files = file_count, "codebase uploaded");
+    Ok(file_count)
 }

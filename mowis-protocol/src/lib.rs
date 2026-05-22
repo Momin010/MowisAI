@@ -65,6 +65,16 @@ pub enum Payload {
         caller_tier: String,
     },
 
+    // ---- Codebase management (host -> guest) ----
+    UploadCodebase {
+        sandbox_id: String,
+        /// Base64-encoded tar.gz of the codebase
+        archive_b64: String,
+        /// Number of files in the archive
+        file_count: u32,
+    },
+    HealthCheck,
+
     // ---- Agent overlay responses (guest -> host) ----
     AgentOverlayCreated {
         agent_id: String,
@@ -75,6 +85,16 @@ pub enum Payload {
     },
     AgentOverlayDiscarded {
         agent_id: String,
+    },
+
+    // ---- Codebase responses (guest -> host) ----
+    CodebaseUploaded {
+        sandbox_id: String,
+        file_count: u32,
+    },
+    HealthOk {
+        uptime_secs: u64,
+        sandbox_count: usize,
     },
 
     // ---- Responses / events (guest -> host) ----
@@ -407,5 +427,89 @@ mod tests {
     #[test]
     fn protocol_version_is_2() {
         assert_eq!(PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn roundtrip_upload_codebase() {
+        let e = Envelope::new(
+            20,
+            Payload::UploadCodebase {
+                sandbox_id: "sb-1".into(),
+                archive_b64: "dGVzdA==".into(), // "test" in base64
+                file_count: 5,
+            },
+        );
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 20);
+        match back.payload {
+            Payload::UploadCodebase {
+                sandbox_id,
+                archive_b64,
+                file_count,
+            } => {
+                assert_eq!(sandbox_id, "sb-1");
+                assert_eq!(archive_b64, "dGVzdA==");
+                assert_eq!(file_count, 5);
+            }
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_codebase_uploaded() {
+        let e = Envelope::new(
+            21,
+            Payload::CodebaseUploaded {
+                sandbox_id: "sb-1".into(),
+                file_count: 42,
+            },
+        );
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 21);
+        match back.payload {
+            Payload::CodebaseUploaded {
+                sandbox_id,
+                file_count,
+            } => {
+                assert_eq!(sandbox_id, "sb-1");
+                assert_eq!(file_count, 42);
+            }
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_health_check() {
+        let e = Envelope::new(22, Payload::HealthCheck);
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 22);
+        assert!(matches!(back.payload, Payload::HealthCheck));
+    }
+
+    #[test]
+    fn roundtrip_health_ok() {
+        let e = Envelope::new(
+            23,
+            Payload::HealthOk {
+                uptime_secs: 3600,
+                sandbox_count: 3,
+            },
+        );
+        let line = e.to_line().unwrap();
+        let back = Envelope::from_line(&line).unwrap();
+        assert_eq!(back.id, 23);
+        match back.payload {
+            Payload::HealthOk {
+                uptime_secs,
+                sandbox_count,
+            } => {
+                assert_eq!(uptime_secs, 3600);
+                assert_eq!(sandbox_count, 3);
+            }
+            _ => panic!("wrong payload"),
+        }
     }
 }

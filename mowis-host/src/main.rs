@@ -1,38 +1,38 @@
 //! mowisd — host-side CLI for the new architecture.
 //!
-//! Subcommands for the MVP focus on validating the host<->guest path:
-//!   - `mowisd pull --image <ref>`        pull an OCI image, extract rootfs
-//!   - `mowisd boot --kernel ... --initrd ...`  boot a VM with the executor
-//!   - `mowisd ping --cid <n>`            sanity-check vsock to a running VM
-//!   - `mowisd exec --cid <n> <cmd> ...`  run a command in a fresh sandbox
-//!
-//! Boot + exec are intentionally separate so you can re-run `exec` against an
-//! already-running VM without paying boot cost each time. Once the path is
-//! solid, the orchestrate / chat surface from `agentd` will move here.
+//! Usage:
+//!   `mowisd`            — start interactive chat (auto-detects config, boots VM)
+//!   `mowisd setup`      — run setup wizard
+//!   `mowisd boot ...`   — manual VM boot (advanced)
+//!   `mowisd ping ...`   — check VM health
+//!   `mowisd exec ...`   — run command in VM sandbox
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use mowis_host::protocol::{ExecRequest, Payload, SandboxSpec};
+use mowis_host::protocol::{Payload, SandboxSpec};
 use mowis_host::{image, initrd, transport, vmm};
-use mowis_orchestration::conductor::Conductor;
 use mowis_orchestration::captain::SimpleCaptain;
+use mowis_orchestration::config::{ModelRef, OrchConfig, ProviderCreds};
+use mowis_orchestration::conductor::Conductor;
 use mowis_orchestration::critic::Critic;
-use mowis_orchestration::config::OrchConfig;
 use mowis_orchestration::events::{Event, EventBus};
 use mowis_orchestration::plan::PlanId;
+use mowis_orchestration::providers::Provider;
 
 #[derive(Debug, Parser)]
-#[command(name = "mowisd", version, about = "MowisAI host-side daemon (new architecture)")]
+#[command(name = "mowisd", version, about = "MowisAI — AI agent orchestration engine")]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Run the setup wizard to configure providers and API keys.
+    Setup,
     /// Pull an OCI image and extract its rootfs to a cache dir.
     Pull {
         #[arg(long)]
@@ -42,17 +42,13 @@ enum Cmd {
     },
     /// Build a bootable initramfs (cpio.gz) that runs mowis-executor as PID 1.
     BuildInitrd {
-        /// Path to the mowis-executor binary to embed.
         #[arg(long)]
         executor: PathBuf,
-        /// Where to write the initramfs.
         #[arg(long, default_value = "mowis-initrd.cpio.gz")]
         output: PathBuf,
     },
     /// Boot a VM with mowis-executor inside. Stays in foreground until killed.
     Boot {
-        /// Linux kernel image. Defaults to the host's running kernel
-        /// (/boot/vmlinuz-$(uname -r)) when not specified.
         #[arg(long)]
         kernel: Option<PathBuf>,
         #[arg(long)]
@@ -81,26 +77,149 @@ enum Cmd {
         cid: u32,
         #[arg(long, default_value_t = mowis_host::protocol::DEFAULT_VSOCK_PORT)]
         port: u32,
-        /// Optional rootfs path (inside the guest) to use as overlay lower layer.
         #[arg(long)]
         guest_rootfs: Option<String>,
-        /// Skip sandbox creation; run directly in the executor's own
-        /// namespace. Useful for loopback tests where the sandbox would be an
-        /// empty tmpfs with no binaries.
         #[arg(long)]
         no_sandbox: bool,
-        /// Command and args. Use `--` to separate flags from the command.
         #[arg(last = true)]
         argv: Vec<String>,
     },
     /// Start an interactive chat session with the orchestration engine.
     Chat {
-        /// Optional vsock CID to connect to a running VM for tool execution.
         #[arg(long)]
         cid: Option<u32>,
         #[arg(long, default_value_t = mowis_host::protocol::DEFAULT_VSOCK_PORT)]
         port: u32,
+        /// Path to the project/codebase to upload into the VM.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
+}
+
+fn prompt_input(prompt: &str) -> Result<String> {
+    print!("{}", prompt);
+    use std::io::Write;
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+fn prompt_secret(prompt: &str) -> Result<String> {
+    print!("{}", prompt);
+    use std::io::Write;
+    std::io::stdout().flush()?;
+    // For now, just read normally (no terminal echo masking in MVP)
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+async fn run_setup_wizard() -> Result<OrchConfig> {
+    println!("\n╔══════════════════════════════════════╗");
+    println!("║       MowisAI Setup Wizard           ║");
+    println!("╚══════════════════════════════════════╝\n");
+    println!("No configuration found. Let's set up your AI providers.\n");
+
+    println!("Available providers:");
+    println!("  1. Anthropic (Claude) — recommended");
+    println!("  2. OpenAI (GPT)");
+    println!("  3. Google Gemini");
+    println!("  4. Vertex AI (GCP)");
+    println!("  5. Grok (xAI)");
+    println!("  6. Groq");
+    println!("  7. Mimo (Xiaomi)\n");
+
+    let choice = prompt_input("Select provider [1-7] (default: 1): ")?;
+    let provider = match choice.as_str() {
+        "2" => Provider::OpenAi,
+        "3" => Provider::Gemini,
+        "4" => Provider::VertexAi,
+        "5" => Provider::Grok,
+        "6" => Provider::Groq,
+        "7" => Provider::Mimo,
+        _ => Provider::Anthropic,
+    };
+
+    let api_key = if provider == Provider::VertexAi {
+        println!("\nVertex AI uses gcloud Application Default Credentials.");
+        println!("Run: gcloud auth application-default login\n");
+        let project_id = prompt_input("GCP Project ID: ")?;
+        let mut creds_map = std::collections::HashMap::new();
+        creds_map.insert(
+            provider.clone(),
+            ProviderCreds {
+                api_key_enc: None,
+                project_id: Some(project_id),
+            },
+        );
+        creds_map
+    } else {
+        let key = prompt_secret(&format!("\nEnter API key for {:?}: ", provider))?;
+        if key.is_empty() {
+            anyhow::bail!("API key cannot be empty");
+        }
+        let encrypted = mowis_orchestration::crypto::encrypt(&key)?;
+        let mut creds_map = std::collections::HashMap::new();
+        creds_map.insert(
+            provider.clone(),
+            ProviderCreds {
+                api_key_enc: Some(encrypted),
+                project_id: None,
+            },
+        );
+        creds_map
+    };
+
+    let default_model = match provider {
+        Provider::Anthropic => "claude-sonnet-4-20250514",
+        Provider::OpenAi => "gpt-4o",
+        Provider::Gemini => "gemini-2.5-pro",
+        Provider::VertexAi => "gemini-2.5-pro",
+        Provider::Grok => "grok-3",
+        Provider::Groq => "llama-3.3-70b-versatile",
+        Provider::Mimo => "mimo-v2.5-pro",
+    };
+
+    let model_input = prompt_input(&format!(
+        "\nModel name (default: {}): ",
+        default_model
+    ))?;
+    let model = if model_input.is_empty() {
+        default_model.to_string()
+    } else {
+        model_input
+    };
+
+    let model_ref = ModelRef {
+        provider: provider.clone(),
+        model: model.clone(),
+    };
+
+    let mut tiers = std::collections::HashMap::new();
+    // Conductor and Critic use flagship model
+    tiers.insert(mowis_orchestration::plan::Tier::Conductor, model_ref.clone());
+    tiers.insert(mowis_orchestration::plan::Tier::Critic, model_ref.clone());
+    // Captain uses a mid-tier (same provider, smaller model)
+    tiers.insert(mowis_orchestration::plan::Tier::Captain, model_ref.clone());
+    // Crew uses the same for now
+    tiers.insert(mowis_orchestration::plan::Tier::Crew, model_ref.clone());
+
+    let cfg = OrchConfig {
+        providers: api_key,
+        tiers,
+        sandbox: mowis_orchestration::plan::SandboxConfig::default(),
+        plans_dir: std::path::PathBuf::from(".mowis/plans"),
+    };
+
+    cfg.save()?;
+
+    println!("\n✓ Configuration saved to ~/.mowisai/mowis.toml");
+    println!("  Provider: {:?}", provider);
+    println!("  Model: {}", model);
+    println!("\nYou can now run `mowisd` to start chatting.\n");
+
+    Ok(cfg)
 }
 
 #[tokio::main]
@@ -114,15 +233,65 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Pull { image, cache } => {
+        None | Some(Cmd::Chat { .. }) => {
+            // Default: interactive chat
+            let (cid, port, project) = match cli.cmd {
+                Some(Cmd::Chat { cid, port, project }) => (cid, port, project),
+                _ => (None, mowis_host::protocol::DEFAULT_VSOCK_PORT, None),
+            };
+
+            // Load or create config
+            let cfg = match OrchConfig::load() {
+                Ok(c) if !c.providers.is_empty() => c,
+                _ => run_setup_wizard().await?,
+            };
+
+            // Auto-boot VM if no CID provided
+            let (conn, _vm_handle) = if let Some(cid) = cid {
+                // User provided a CID — connect to existing VM
+                let conn = transport::connect(cid, port).await?;
+                println!("Connected to VM cid={cid} port={port}");
+                (Some(conn), None)
+            } else {
+                // Try to boot a VM automatically
+                match try_boot_vm().await {
+                    Ok((conn, handle)) => {
+                        println!("VM booted and ready");
+                        (Some(conn), Some(handle))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not boot VM; running without tool execution");
+                        println!("Note: No VM available. Agent will plan but not execute tools.");
+                        println!("To enable tool execution, run: mowisd boot --initrd <path>\n");
+                        (None, None)
+                    }
+                }
+            };
+
+            // Upload codebase if project path given and VM is available
+            if let (Some(ref conn), Some(ref project_path)) = (&conn, &project) {
+                if project_path.exists() {
+                    println!("Uploading project to VM...");
+                    upload_project(conn, project_path).await?;
+                    println!("Project uploaded.");
+                }
+            }
+
+            // Run the orchestration
+            run_chat(cfg, conn, project).await?;
+        }
+        Some(Cmd::Setup) => {
+            run_setup_wizard().await?;
+        }
+        Some(Cmd::Pull { image, cache }) => {
             let path = image::pull_rootfs(&image, &cache).await?;
             println!("{}", path.display());
         }
-        Cmd::BuildInitrd { executor, output } => {
+        Some(Cmd::BuildInitrd { executor, output }) => {
             initrd::build(&executor, &output).await?;
             println!("{}", output.display());
         }
-        Cmd::Boot {
+        Some(Cmd::Boot {
             kernel,
             initrd: initrd_path,
             rootfs,
@@ -130,7 +299,7 @@ async fn main() -> Result<()> {
             vcpus,
             cid,
             port,
-        } => {
+        }) => {
             let kernel = kernel
                 .or_else(initrd::default_kernel)
                 .context("no --kernel provided and no /boot/vmlinuz-* found")?;
@@ -147,26 +316,31 @@ async fn main() -> Result<()> {
                     extra_cmdline: vec![],
                 })
                 .await?;
-            println!("VM booted; cid={} port={}", handle.guest_cid(), handle.executor_port());
+            println!(
+                "VM booted; cid={} port={}",
+                handle.guest_cid(),
+                handle.executor_port()
+            );
             println!("Try: mowisd ping --cid {cid} --port {port}");
-            // Hold the handle to keep the VM alive until ctrl-c.
             tokio::signal::ctrl_c().await.ok();
             backend.shutdown(handle).await?;
         }
-        Cmd::Ping { cid, port } => {
+        Some(Cmd::Ping { cid, port }) => {
             let conn = transport::connect(cid, port).await?;
             let (version, protocol) = conn.ping().await?;
             println!("guest version={version} protocol={protocol}");
         }
-        Cmd::Exec {
+        Some(Cmd::Exec {
             cid,
             port,
             guest_rootfs,
             no_sandbox,
             argv,
-        } => {
+        }) => {
             if argv.is_empty() {
-                anyhow::bail!("provide a command after `--`, e.g. `mowisd exec --cid 42 -- /bin/ls /`");
+                anyhow::bail!(
+                    "provide a command after `--`, e.g. `mowisd exec --cid 42 -- /bin/ls /`"
+                );
             }
             let conn = transport::connect(cid, port).await?;
 
@@ -189,6 +363,7 @@ async fn main() -> Result<()> {
                 Some(id)
             };
 
+            use mowis_host::protocol::ExecRequest;
             let (cmd, args) = argv.split_first().context("empty argv")?;
             let mut rx = conn
                 .call_streaming(Payload::Exec(ExecRequest {
@@ -216,113 +391,369 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Best-effort cleanup; ignore errors.
             if let Some(id) = sandbox_id {
                 let _ = conn.call(Payload::DestroySandbox { sandbox_id: id }).await;
             }
             std::process::exit(exit);
         }
-        Cmd::Chat { cid, port } => {
-            let cfg = OrchConfig::load().unwrap_or_default();
-            let bus = EventBus::new();
+    }
+    Ok(())
+}
 
-            let (mut conductor, _cmd_tx) = Conductor::new(&cfg, bus.clone())?;
-            let mut critic = Critic::new(&cfg, bus.clone())?;
+async fn try_boot_vm() -> Result<(transport::Connection, Box<dyn vmm::VmHandle>)> {
+    let kernel = initrd::default_kernel().context("no /boot/vmlinuz-* found")?;
 
-            // Spawn critic on background
-            let critic_handle = tokio::spawn(async move {
-                if let Err(e) = critic.run().await {
-                    tracing::error!(error = %e, "critic exited with error");
+    // Build initrd if we have the executor binary
+    let executor_path = find_executor_binary()?;
+    let initrd_path = std::path::PathBuf::from("/tmp/mowis-initrd.cpio.gz");
+    if !initrd_path.exists() {
+        println!("Building initramfs...");
+        initrd::build(&executor_path, &initrd_path).await?;
+    }
+
+    let backend = vmm::default_backend()?;
+    let handle = backend
+        .boot(vmm::VmConfig {
+            kernel,
+            initrd: initrd_path,
+            rootfs: None,
+            memory_mb: 2048,
+            vcpus: 2,
+            guest_cid: 42,
+            executor_port: mowis_host::protocol::DEFAULT_VSOCK_PORT,
+            extra_cmdline: vec![],
+        })
+        .await?;
+
+    // Wait for executor to be ready
+    let cid = handle.guest_cid();
+    let port = handle.executor_port();
+    let conn = wait_for_executor(cid, port, 30).await?;
+
+    Ok((conn, handle))
+}
+
+async fn wait_for_executor(cid: u32, port: u32, max_secs: u64) -> Result<transport::Connection> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs);
+    loop {
+        match transport::connect(cid, port).await {
+            Ok(conn) => match conn.ping().await {
+                Ok((version, protocol)) => {
+                    tracing::info!(version, protocol, "executor is ready");
+                    return Ok(conn);
                 }
-            });
-
-            // Spawn event logger
-            let bus_clone = bus.clone();
-            let logger_handle = tokio::spawn(async move {
-                let mut rx = bus_clone.subscribe();
-                loop {
-                    match rx.recv().await {
-                        Ok(event) => {
-                            tracing::info!(?event, "orchestration event");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(_) => break,
-                    }
+                Err(e) => {
+                    tracing::debug!(error = %e, "ping failed, retrying...");
                 }
-            });
-
-            println!("MowisAI chat session started. Type your message and press Enter.");
-            println!("Type 'quit' or 'exit' to leave.\n");
-
-            let stdin = std::io::stdin();
-            loop {
-                print!("> ");
-                use std::io::Write;
-                std::io::stdout().flush()?;
-
-                let mut line = String::new();
-                if stdin.read_line(&mut line)? == 0 {
-                    break;
-                }
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if line == "quit" || line == "exit" {
-                    break;
-                }
-
-                match conductor.handle_user_message(line.to_string()).await {
-                    Ok(mowis_orchestration::conductor::ConductorReply::Chat { reply }) => {
-                        println!("\n{}\n", reply);
-                    }
-                    Ok(mowis_orchestration::conductor::ConductorReply::PlanDrafted { plan_id, .. }) => {
-                        println!("\nPlan drafted: {}", plan_id.0);
-                        println!("The critic will review it now.");
-                        println!("Type 'approve' to approve or 'cancel' to cancel.\n");
-
-                        // Wait for user approval
-                        print!("> ");
-                        std::io::stdout().flush()?;
-                        let mut approval = String::new();
-                        stdin.read_line(&mut approval)?;
-                        let approval = approval.trim();
-                        if approval == "approve" || approval == "y" || approval == "yes" {
-                            bus.emit(Event::UserApproved { plan_id: plan_id.clone() });
-                            println!("Plan approved! Spawning Captain...\n");
-
-                            let captain = SimpleCaptain::new(&cfg, plan_id, bus.clone())?;
-                            match captain.run().await {
-                                Ok(mowis_orchestration::captain::CaptainOutcome::Completed { sandbox_id }) => {
-                                    println!("Plan completed! Sandbox: {}", sandbox_id);
-                                }
-                                Ok(mowis_orchestration::captain::CaptainOutcome::Failed { reason, .. }) => {
-                                    eprintln!("Plan failed: {}", reason);
-                                }
-                                Ok(mowis_orchestration::captain::CaptainOutcome::Aborted) => {
-                                    println!("Plan aborted.");
-                                }
-                                Err(e) => {
-                                    eprintln!("Captain error: {}", e);
-                                }
-                            }
-                        } else {
-                            bus.emit(Event::UserCancelled { plan_id });
-                            println!("Plan cancelled.\n");
-                        }
-                    }
-                    Ok(other) => {
-                        println!("{:?}", other);
-                    }
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                    }
-                }
+            },
+            Err(e) => {
+                tracing::debug!(error = %e, "connect failed, retrying...");
             }
+        }
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!("executor did not become ready within {}s", max_secs);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
 
-            critic_handle.abort();
-            logger_handle.abort();
+fn find_executor_binary() -> Result<PathBuf> {
+    // Check common locations
+    let candidates = [
+        PathBuf::from("target/release/mowis-executor"),
+        PathBuf::from("target/debug/mowis-executor"),
+        PathBuf::from("/usr/local/bin/mowis-executor"),
+    ];
+    for c in &candidates {
+        if c.exists() {
+            return Ok(c.clone());
         }
     }
+    // Try to build it
+    anyhow::bail!(
+        "mowis-executor binary not found. Build it with: cargo build -p mowis-executor"
+    )
+}
+
+async fn upload_project(
+    conn: &transport::Connection,
+    project_path: &std::path::Path,
+) -> Result<()> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    // Create sandbox for the project
+    let sandbox_id = match conn
+        .call(Payload::CreateSandbox(SandboxSpec {
+            sandbox_id: Some("project".into()),
+            image_rootfs: None,
+            limits: Default::default(),
+        }))
+        .await?
+    {
+        Payload::SandboxCreated { sandbox_id } => sandbox_id,
+        Payload::Error { message } => anyhow::bail!("create_sandbox: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    };
+
+    // Create tar.gz of the project
+    let tar_data = create_tar_gz(project_path)?;
+    let archive_b64 = BASE64.encode(&tar_data);
+
+    // Count files
+    let file_count = count_files(project_path)? as u32;
+
+    // Upload
+    match conn
+        .call(Payload::UploadCodebase {
+            sandbox_id,
+            archive_b64,
+            file_count,
+        })
+        .await?
+    {
+        Payload::CodebaseUploaded {
+            file_count: uploaded,
+            ..
+        } => {
+            tracing::info!(files = uploaded, "codebase uploaded to VM");
+        }
+        Payload::Error { message } => anyhow::bail!("upload failed: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+
+    Ok(())
+}
+
+fn create_tar_gz(path: &std::path::Path) -> Result<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let tar_data = Vec::new();
+    let encoder = GzEncoder::new(tar_data, Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+
+    // Add all files from the directory, excluding .git and target
+    add_dir_to_tar(&mut builder, path, path)?;
+
+    let encoder = builder.into_inner()?;
+    let compressed = encoder.finish()?;
+    Ok(compressed)
+}
+
+fn add_dir_to_tar(
+    builder: &mut tar::Builder<flate2::write::GzEncoder<Vec<u8>>>,
+    base: &std::path::Path,
+    current: &std::path::Path,
+) -> Result<()> {
+    for entry in std::fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // Skip .git, target, node_modules
+        if name == ".git" || name == "target" || name == "node_modules" {
+            continue;
+        }
+
+        let rel = path.strip_prefix(base).unwrap();
+        if entry.file_type()?.is_dir() {
+            builder.append_dir(rel, &path)?;
+            add_dir_to_tar(builder, base, &path)?;
+        } else {
+            builder.append_path_with_name(&path, rel)?;
+        }
+    }
+    Ok(())
+}
+
+fn count_files(path: &std::path::Path) -> Result<usize> {
+    let mut count = 0;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == ".git" || name == "target" || name == "node_modules" {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            count += count_files(&entry.path())?;
+        } else {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+async fn run_chat(
+    cfg: OrchConfig,
+    conn: Option<transport::Connection>,
+    project: Option<PathBuf>,
+) -> Result<()> {
+    let bus = EventBus::new();
+
+    // Spawn event printer (real-time streaming to terminal)
+    let bus_print = bus.clone();
+    let print_handle = tokio::spawn(async move {
+        let mut rx = bus_print.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(event) => match event {
+                    Event::CrewToolSummary {
+                        agent_id,
+                        text,
+                        tool_name: _,
+                        success,
+                    } => {
+                        let icon = if success { "✓" } else { "✗" };
+                        println!("  [{}] {} {}", icon, agent_id, text);
+                    }
+                    Event::CrewStarted {
+                        task_id, agent_id, ..
+                    } => {
+                        println!("  ▶ Crew {} started task {}", agent_id, task_id.0);
+                    }
+                    Event::CrewDone {
+                        agent_id, summary, ..
+                    } => {
+                        println!("  ■ Crew {} done: {}", agent_id, summary);
+                    }
+                    Event::CrewFailed {
+                        agent_id, reason, ..
+                    } => {
+                        println!("  ✗ Crew {} failed: {}", agent_id, reason);
+                    }
+                    Event::PlanDrafted { plan_id, version } => {
+                        println!(
+                            "\n  📋 Plan drafted: {} (v{})",
+                            plan_id.0, version
+                        );
+                    }
+                    Event::PlanCompleted { plan_id } => {
+                        println!("\n  ✓ Plan {} completed!", plan_id.0);
+                    }
+                    Event::PlanFailed { plan_id, reason } => {
+                        println!("\n  ✗ Plan {} failed: {}", plan_id.0, reason);
+                    }
+                    Event::CaptainStarted { sandbox_id, .. } => {
+                        println!("  🚀 Captain started (sandbox: {})", sandbox_id);
+                    }
+                    Event::MergeCompleted { agent_id, .. } => {
+                        println!("  🔀 Merged overlay for {}", agent_id);
+                    }
+                    Event::CriticVerdict {
+                        verdict, version, ..
+                    } => {
+                        println!("  🔍 Critic verdict (v{}): {:?}", version, verdict);
+                    }
+                    Event::ConversationEnded => {
+                        println!("\n  Conversation ended.");
+                        break;
+                    }
+                    _ => {}
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+
+    let (mut conductor, _cmd_tx) = Conductor::new(&cfg, bus.clone())?;
+    let mut critic = Critic::new(&cfg, bus.clone())?;
+
+    // Spawn critic on background
+    let critic_handle = tokio::spawn(async move {
+        if let Err(e) = critic.run().await {
+            tracing::error!(error = %e, "critic exited with error");
+        }
+    });
+
+    println!("\n╔══════════════════════════════════════╗");
+    println!("║       MowisAI Chat                   ║");
+    println!("╚══════════════════════════════════════╝\n");
+    if conn.is_some() {
+        println!("VM connected. Tool execution enabled.");
+    } else {
+        println!("No VM. Planning only (no tool execution).");
+    }
+    if let Some(ref p) = project {
+        println!("Project: {}", p.display());
+    }
+    println!("Type your message and press Enter. Type 'quit' to exit.\n");
+
+    let stdin = std::io::stdin();
+    loop {
+        print!("> ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+
+        let mut line = String::new();
+        if stdin.read_line(&mut line)? == 0 {
+            break;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "quit" || line == "exit" {
+            break;
+        }
+
+        match conductor.handle_user_message(line.to_string()).await {
+            Ok(mowis_orchestration::conductor::ConductorReply::Chat { reply }) => {
+                println!("\n{}\n", reply);
+            }
+            Ok(mowis_orchestration::conductor::ConductorReply::PlanDrafted {
+                plan_id, ..
+            }) => {
+                println!("\nType 'approve' to approve or 'cancel' to cancel.\n");
+
+                print!("> ");
+                std::io::stdout().flush()?;
+                let mut approval = String::new();
+                stdin.read_line(&mut approval)?;
+                let approval = approval.trim();
+                if approval == "approve" || approval == "y" || approval == "yes" {
+                    bus.emit(Event::UserApproved {
+                        plan_id: plan_id.clone(),
+                    });
+                    println!("Plan approved! Captain starting...\n");
+
+                    let captain = SimpleCaptain::new(&cfg, plan_id, bus.clone())?;
+                    match captain.run().await {
+                        Ok(mowis_orchestration::captain::CaptainOutcome::Completed {
+                            sandbox_id,
+                        }) => {
+                            println!("\n✓ Plan completed! Sandbox: {}", sandbox_id);
+                        }
+                        Ok(mowis_orchestration::captain::CaptainOutcome::Failed {
+                            reason, ..
+                        }) => {
+                            eprintln!("\n✗ Plan failed: {}", reason);
+                        }
+                        Ok(mowis_orchestration::captain::CaptainOutcome::Aborted) => {
+                            println!("\nPlan aborted.");
+                        }
+                        Err(e) => {
+                            eprintln!("\nCaptain error: {}", e);
+                        }
+                    }
+                } else {
+                    bus.emit(Event::UserCancelled {
+                        plan_id,
+                    });
+                    println!("Plan cancelled.\n");
+                }
+            }
+            Ok(other) => {
+                println!("{:?}", other);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+            }
+        }
+    }
+
+    bus.emit(Event::ConversationEnded);
+    print_handle.abort();
+    critic_handle.abort();
     Ok(())
 }

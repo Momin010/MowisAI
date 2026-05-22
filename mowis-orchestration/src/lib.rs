@@ -5,6 +5,7 @@ pub mod crew;
 pub mod critic;
 pub mod digest;
 pub mod events;
+pub mod merger;
 pub mod plan;
 pub mod providers;
 pub mod summaries;
