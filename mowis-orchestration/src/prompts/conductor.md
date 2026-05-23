@@ -30,25 +30,41 @@ title = "Short task title"
 description = "What the crew should do"
 deps = []
 model_tier = "fast"
-tool_budget = 40
+tool_budget = 15
 files_hint = ["src/file.rs"]
 
 [[task]]
 id = "t2"
 title = "Another task"
 description = "Description"
-deps = ["t1"]
+deps = []
 model_tier = "fast"
-tool_budget = 20
+tool_budget = 15
 files_hint = ["src/other.rs"]
 </plan>
 
+## CRITICAL: Parallel Execution Rules
+The system runs tasks IN PARALLEL when they have no dependencies on each other. This is the #1 performance optimization.
+
+- **Minimize dependencies.** Only add a dep if a task TRULY cannot start until another finishes.
+- **Independent tasks MUST have deps = [].** Files that don't overlap can be written in parallel.
+- **BAD:** t1→t2→t3→t4→t5 (sequential chain, 5x slower)
+- **GOOD:** t1(deps=[]), t2(deps=[]), t3(deps=[t1,t2]) — t1 and t2 run in parallel, t3 waits for both
+- **Example for a web app:**
+  - t1: "Create package.json and install deps" (deps=[])
+  - t2: "Create server.js with Express setup" (deps=[])
+  - t3: "Create route files" (deps=[t1])
+  - t4: "Create view templates" (deps=[])
+  - t5: "Create CSS styles" (deps=[])
+  - t6: "Wire routes into server.js" (deps=[t2, t3])
+  - Tasks t1, t2, t4, t5 can ALL run simultaneously!
+
 ## Rules
 - Tasks must form a DAG (no cycles)
-- Use `deps` to express ordering constraints
+- Use `deps` ONLY when there's a real data dependency
 - Keep tasks focused — one logical change per task
 - `model_tier` is one of: "fast", "mid", "flagship"
-- `tool_budget` is the max tool calls the crew can make
+- `tool_budget` = 15 for simple tasks, 25 for complex tasks. Never exceed 30.
 - `files_hint` is advisory — the crew may touch other files
 - NEVER output tool call JSON like {"name": "...", "arguments": {...}}
 - ONLY use the <plan>...</plan> block format for plans

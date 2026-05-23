@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::OrchConfig;
 use crate::crew::{Crew, CrewOutcome, CrewTask};
@@ -13,15 +13,14 @@ use crate::tools::{crew_allowlist, ToolGateway};
 
 #[derive(Debug)]
 pub struct Captain {
-    cfg: Arc<OrchConfig>,
-    bus: EventBus,
-    cmd_rx: mpsc::Receiver<CaptainCommand>,
-    cmd_tx: mpsc::Sender<CaptainCommand>,
-    plan: Option<Plan>,
-    sandbox_id: Option<String>,
-    in_flight: HashMap<TaskId, CrewHandle>,
-    completed: HashMap<TaskId, CrewOutcome>,
-    failed: HashMap<TaskId, CrewOutcome>,
+    cfg:           Arc<OrchConfig>,
+    bus:           EventBus,
+    cmd_rx:        mpsc::Receiver<CaptainCommand>,
+    cmd_tx:        mpsc::Sender<CaptainCommand>,
+    plan:          Option<Plan>,
+    sandbox_id:    Option<String>,
+    completed:     HashMap<TaskId, CrewOutcome>,
+    failed:        HashMap<TaskId, CrewOutcome>,
     injected_tasks: Vec<InjectedTask>,
 }
 
@@ -89,7 +88,6 @@ impl Captain {
             cmd_tx: cmd_tx.clone(),
             plan: None,
             sandbox_id: None,
-            in_flight: HashMap::new(),
             completed: HashMap::new(),
             failed: HashMap::new(),
             injected_tasks: Vec::new(),
@@ -140,7 +138,6 @@ impl Captain {
     async fn start_plan(&mut self, plan_id: PlanId) -> Result<CaptainOutcome> {
         let plan = Plan::load(&self.cfg.plans_dir, &plan_id)?;
 
-        // Create sandbox if we don't have one
         let sandbox_id = if let Some(ref id) = self.sandbox_id {
             id.clone()
         } else {
@@ -157,33 +154,44 @@ impl Captain {
         });
 
         let task_graph = plan.task_graph();
-        let execution_order = topological_sort(&task_graph.tasks)?;
 
-        for wave in execution_order {
-            let mut handles = Vec::new();
+        // Build dependency map
+        let mut remaining: HashMap<TaskId, Vec<TaskId>> = HashMap::new();
+        let mut completed: std::collections::HashSet<TaskId> = std::collections::HashSet::new();
+        let mut handles: HashMap<TaskId, tokio::task::JoinHandle<(TaskId, Result<CrewOutcome>)>> = HashMap::new();
 
-            for task_id in &wave {
-                let task_node = task_graph
-                    .tasks
-                    .iter()
-                    .find(|t| &t.id == task_id)
+        for task in &task_graph.tasks {
+            remaining.insert(task.id.clone(), task.deps.clone());
+        }
+
+        // Event-driven scheduling: spawn tasks as soon as deps are met
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<(TaskId, Result<CrewOutcome>)>(64);
+        let mut running = 0usize;
+
+        loop {
+            // Find all tasks whose deps are satisfied and not yet started
+            let ready: Vec<TaskId> = remaining.iter()
+                .filter(|(_, deps)| deps.iter().all(|d| completed.contains(d)))
+                .map(|(id, _)| id.clone())
+                .collect();
+
+            if ready.is_empty() && running == 0 {
+                break; // All done
+            }
+
+            // Spawn ready tasks
+            for task_id in ready {
+                remaining.remove(&task_id);
+                let task_node = task_graph.tasks.iter()
+                    .find(|t| t.id == task_id)
                     .ok_or_else(|| anyhow::anyhow!("task {} not found", task_id.0))?;
 
                 let agent_id = format!("{}-{}", plan_id.0, task_id.0);
-
-                self.in_flight.insert(
-                    task_id.clone(),
-                    CrewHandle {
-                        agent_id: agent_id.clone(),
-                        task_id: task_id.clone(),
-                    },
-                );
-
                 let llm_config = self.cfg.llm_for_task(&plan, task_node)?;
                 let tool_gateway = ToolGateway::new(
                     crate::plan::Tier::Crew,
                     crew_allowlist(),
-                    sandbox_id.to_string(),
+                    sandbox_id.clone(),
                     agent_id.clone(),
                 );
                 let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -199,7 +207,7 @@ impl Captain {
 
                 let crew = Crew::new(
                     plan_id.clone(),
-                    sandbox_id.to_string(),
+                    sandbox_id.clone(),
                     agent_id.clone(),
                     crew_task,
                     llm_config,
@@ -207,68 +215,50 @@ impl Captain {
                     self.bus.clone(),
                 );
 
-                let bus = self.bus.clone();
-                let plan_id_c = plan_id.clone();
-                let task_id_c = task_id.clone();
-
-                handles.push(tokio::spawn(async move {
+                let tx = done_tx.clone();
+                tokio::spawn(async move {
                     let outcome = crew.run().await;
-                    (task_id_c, outcome)
-                }));
+                    let _ = tx.send((task_id, outcome)).await;
+                });
+                running += 1;
             }
 
-            for handle in handles {
-                match handle.await {
-                    Ok((task_id, Ok(outcome))) => {
-                        self.in_flight.remove(&task_id);
-                        match &outcome {
-                            CrewOutcome::Done { agent_id, .. } => {
-                                // Merge overlay
-                                self.bus.emit(Event::MergeCompleted {
-                                    plan_id: plan_id.clone(),
-                                    agent_id: agent_id.clone(),
-                                });
-                                self.completed.insert(task_id, outcome);
-                            }
-                            CrewOutcome::Failed { agent_id, reason, .. } => {
-                                // Retry logic: up to 2 retries
-                                let retry_count = self.failed.iter()
-                                    .filter(|(id, _)| **id == task_id)
-                                    .count();
+            // Wait for any one task to complete
+            if running == 0 {
+                break;
+            }
 
-                                if retry_count < 2 {
-                                    tracing::info!(
-                                        task = %task_id.0,
-                                        retry = retry_count + 1,
-                                        "retrying failed crew"
-                                    );
-                                    self.failed.insert(task_id.clone(), outcome);
-                                    // Would re-spawn crew here in full impl
-                                } else {
-                                    self.bus.emit(Event::CrewFailed {
-                                        plan_id: plan_id.clone(),
-                                        agent_id: agent_id.clone(),
-                                        reason: reason.clone(),
-                                    });
-                                    self.failed.insert(task_id, outcome);
-                                }
-                            }
+            let (task_id, result) = done_rx.recv().await
+                .ok_or_else(|| anyhow::anyhow!("channel closed"))?;
+            running -= 1;
+
+            match result {
+                Ok(outcome) => {
+                    match &outcome {
+                        CrewOutcome::Done { agent_id, .. } => {
+                            completed.insert(task_id.clone());
+                            self.bus.emit(Event::MergeCompleted {
+                                plan_id: plan_id.clone(),
+                                agent_id: agent_id.clone(),
+                            });
+                            self.completed.insert(task_id, outcome);
+                        }
+                        CrewOutcome::Failed { agent_id, reason, .. } => {
+                            self.bus.emit(Event::CrewFailed {
+                                plan_id: plan_id.clone(),
+                                agent_id: agent_id.clone(),
+                                reason: reason.clone(),
+                            });
+                            self.failed.insert(task_id, outcome);
                         }
                     }
-                    Ok((task_id, Err(e))) => {
-                        self.in_flight.remove(&task_id);
-                        self.failed.insert(
-                            task_id,
-                            CrewOutcome::Failed {
-                                agent_id: String::new(),
-                                reason: e.to_string(),
-                                tool_calls: 0,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "crew task panicked");
-                    }
+                }
+                Err(e) => {
+                    self.failed.insert(task_id, CrewOutcome::Failed {
+                        agent_id: String::new(),
+                        reason: e.to_string(),
+                        tool_calls: 0,
+                    });
                 }
             }
         }
@@ -407,7 +397,6 @@ impl Captain {
 
     async fn cancel_plan(&mut self, reason: &str) {
         tracing::info!(reason = %reason, "cancelling plan");
-        self.in_flight.clear();
         if let Some(ref plan) = self.plan {
             self.bus.emit(Event::PlanFailed {
                 plan_id: plan.plan_id.clone(),
@@ -420,11 +409,7 @@ impl Captain {
         CaptainStatus {
             plan_id: self.plan.as_ref().map(|p| p.plan_id.clone()),
             sandbox_id: self.sandbox_id.clone(),
-            in_flight: self
-                .in_flight
-                .values()
-                .map(|h| (h.task_id.clone(), h.agent_id.clone(), 0))
-                .collect(),
+            in_flight: vec![], // Tasks are tracked in completed/failed
             completed: self.completed.keys().cloned().collect(),
             failed: self
                 .failed
@@ -442,7 +427,6 @@ impl Captain {
 
     async fn shutdown(&mut self) {
         tracing::info!("captain shutting down");
-        self.in_flight.clear();
         if let Some(ref sandbox_id) = self.sandbox_id {
             let status = if self.failed.is_empty() {
                 PlanStatus::Done
