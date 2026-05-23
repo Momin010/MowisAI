@@ -390,7 +390,7 @@ fn openai_compat_url_and_key(llm_config: &LlmConfig) -> Result<(String, String)>
         Provider::OpenAi => "https://api.openai.com/v1/chat/completions".to_string(),
         Provider::Grok => "https://api.x.ai/v1/chat/completions".to_string(),
         Provider::Groq => "https://api.groq.com/openai/v1/chat/completions".to_string(),
-        Provider::Mimo => "https://api.mimo.xiaomi.com/v1/chat/completions".to_string(),
+        Provider::Mimo => "https://token-plan-ams.xiaomimimo.com/v1/chat/completions".to_string(),
         _ => return Err(anyhow::anyhow!("Not an OpenAI-compat provider")),
     };
     Ok((url, api_key.to_string()))
