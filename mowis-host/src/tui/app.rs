@@ -67,8 +67,13 @@ pub struct TuiApp {
 impl TuiApp {
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        Self {
-            screen: AppScreen::Splash { frame: 0 },
+
+        // Check if config already exists
+        let existing_config = OrchConfig::load().ok().filter(|c| !c.providers.is_empty());
+        let has_config = existing_config.is_some();
+
+        let mut app = Self {
+            screen: if has_config { AppScreen::Main } else { AppScreen::Splash { frame: 0 } },
             setup: SetupState::new(),
             message_log: MessageLog::new(),
             plan_preview: PlanPreview::new(),
@@ -84,7 +89,15 @@ impl TuiApp {
             event_rx: Some(event_rx),
             event_tx,
             orchestrator_started: false,
+        };
+
+        // If config exists, start orchestrator immediately
+        if let Some(cfg) = existing_config {
+            app.start_orchestrator(cfg);
+            app.message_log.add_system("MowisAI ready. Type your message.");
         }
+
+        app
     }
 
     fn tick(&mut self) {

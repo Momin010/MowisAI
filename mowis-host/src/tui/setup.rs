@@ -230,7 +230,7 @@ impl SetupState {
                 Constraint::Length(1), // provider
                 Constraint::Length(1), // spacer
                 Constraint::Length(1), // label
-                Constraint::Length(1), // input
+                Constraint::Length(3), // input field with border
                 Constraint::Length(1), // spacer
                 Constraint::Length(1), // hint
             ])
@@ -257,14 +257,16 @@ impl SetupState {
         let label = Paragraph::new(Line::from("Enter your API key:"));
         f.render_widget(label, chunks[4]);
 
-        // API key input (masked)
+        // API key input with border, masked characters, and cursor
         let masked = "*".repeat(self.api_key.len());
+        let input_text = format!("{}▌", masked); // cursor character
         let input_block = Block::default()
+            .title(" API Key ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(PURPLE))
             .style(Style::default().bg(Color::Rgb(8, 8, 12)));
         let input = Paragraph::new(Line::from(Span::styled(
-            masked,
+            input_text,
             Style::default().fg(Color::White),
         )))
         .block(input_block);
