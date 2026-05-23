@@ -87,6 +87,12 @@ impl TuiApp {
         }
     }
 
+    fn tick(&mut self) {
+        if let AppScreen::Splash { ref mut frame } = self.screen {
+            *frame += 1;
+        }
+    }
+
     fn start_orchestrator(&mut self, cfg: OrchConfig) {
         let bus = EventBus::new();
         let bus_for_critic = bus.clone();
@@ -189,44 +195,40 @@ impl TuiApp {
     }
 
     async fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-        let tick_rate = Duration::from_millis(100);
+        let tick_rate = Duration::from_millis(500);
         let mut event_rx = self.event_rx.take().unwrap();
+        let mut last_tick = std::time::Instant::now();
 
         loop {
             terminal.draw(|f| self.draw(f))?;
 
-            // Poll for events
-            let has_event = tokio::time::timeout(tick_rate, async {
-                // Check terminal events (non-blocking)
-                if event::poll(Duration::ZERO).unwrap_or(false) {
-                    if let Ok(Event::Key(key)) = event::read() {
-                        return Some(TuiEvent::Terminal(key));
+            // Wait for terminal input with short timeout
+            if crossterm::event::poll(Duration::from_millis(16))? {
+                if let Event::Key(key) = event::read()? {
+                    self.handle_key(key.code, key.modifiers).await;
+                    if self.should_quit {
+                        if let Some(ref tx) = self.conductor_tx {
+                            let _ = tx.send(ConductorCommand::EndConversation).await;
+                        }
+                        return Ok(());
                     }
-                }
-                // Check orchestration events
-                tokio::select! {
-                    Some(ev) = event_rx.recv() => Some(ev),
-                    else => None,
-                }
-            })
-            .await
-            .unwrap_or(None);
-
-            if let Some(ev) = has_event {
-                match ev {
-                    TuiEvent::Terminal(key) => self.handle_key(key.code, key.modifiers).await,
-                    TuiEvent::Orch(orch_event) => self.handle_orch_event(orch_event),
-                    TuiEvent::ConductorReply(reply) => self.handle_conductor_reply(reply),
-                    TuiEvent::Tick => {}
                 }
             }
 
-            if self.should_quit {
-                // Send EndConversation if orchestrator is running
-                if let Some(ref tx) = self.conductor_tx {
-                    let _ = tx.send(ConductorCommand::EndConversation).await;
+            // Drain all pending orchestration events
+            loop {
+                match event_rx.try_recv() {
+                    Ok(TuiEvent::Orch(ev)) => self.handle_orch_event(ev),
+                    Ok(TuiEvent::ConductorReply(reply)) => self.handle_conductor_reply(reply),
+                    Ok(_) => {}
+                    Err(_) => break,
                 }
-                return Ok(());
+            }
+
+            // Tick for animations
+            if last_tick.elapsed() >= tick_rate {
+                self.tick();
+                last_tick = std::time::Instant::now();
             }
         }
     }
