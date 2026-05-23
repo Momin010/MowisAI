@@ -424,6 +424,18 @@ impl TuiApp {
                     KeyCode::Char('c') if self.overlay_visible && self.input.is_empty() => {
                         self.critic_expanded = !self.critic_expanded;
                     }
+                    KeyCode::Up if self.input.is_empty() => {
+                        self.message_log.scroll_up();
+                    }
+                    KeyCode::Down if self.input.is_empty() => {
+                        self.message_log.scroll_down();
+                    }
+                    KeyCode::PageUp => {
+                        for _ in 0..10 { self.message_log.scroll_up(); }
+                    }
+                    KeyCode::PageDown => {
+                        for _ in 0..10 { self.message_log.scroll_down(); }
+                    }
                     KeyCode::Char('/') if self.input.is_empty() => {
                         self.input.push('/');
                         self.slash_menu.show();
@@ -477,7 +489,7 @@ impl TuiApp {
         self.message_log.add_user(&msg);
 
         if let Some(ref tx) = self.conductor_tx {
-            self.message_log.add_thinking("Conductor is thinking...");
+            self.message_log.thinking = true; // Show spinner only, no text line
             let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
             if let Err(e) = tx.send(ConductorCommand::UserMessage {
                 text: msg,

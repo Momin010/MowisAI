@@ -142,6 +142,7 @@ pub struct MessageLog {
     pub streaming: bool,
     pub had_streaming: bool,
     streaming_text: String,
+    pub auto_scroll: bool,
 }
 
 struct LogLine {
@@ -154,7 +155,28 @@ struct LogLine {
 
 impl MessageLog {
     pub fn new() -> Self {
-        Self { lines: Vec::new(), scroll_offset: 0, thinking: false, spinner_frame: 0, streaming: false, had_streaming: false, streaming_text: String::new() }
+        Self { lines: Vec::new(), scroll_offset: 0, thinking: false, spinner_frame: 0, streaming: false, had_streaming: false, streaming_text: String::new(), auto_scroll: true }
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.auto_scroll = false;
+        if self.scroll_offset > 0 {
+            self.scroll_offset -= 1;
+        }
+    }
+
+    pub fn scroll_down(&mut self) {
+        if self.scroll_offset < self.lines.len() {
+            self.scroll_offset += 1;
+        }
+        // Re-enable auto-scroll if we're at the bottom
+        if self.scroll_offset >= self.lines.len().saturating_sub(10) {
+            self.auto_scroll = true;
+        }
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.auto_scroll = true;
     }
 
     pub fn push_stream_token(&mut self, token: &str) {
@@ -371,13 +393,17 @@ impl MessageLog {
             }
         }
 
-        // Auto-scroll to bottom
+        // Auto-scroll to bottom or use manual scroll
         let total_lines = spans.len();
         let visible_height = area.height as usize;
-        let scroll = if total_lines > visible_height {
-            total_lines - visible_height
+        let scroll = if self.auto_scroll || total_lines <= visible_height {
+            if total_lines > visible_height {
+                total_lines - visible_height
+            } else {
+                0
+            }
         } else {
-            0
+            self.scroll_offset
         };
 
         let log = Paragraph::new(spans)
