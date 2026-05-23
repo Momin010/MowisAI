@@ -228,32 +228,16 @@ impl Conductor {
             });
         }
 
-        // Check if the LLM output contains tool call JSON and strip it from the reply
+        // Strip any tool call JSON the LLM might have output
         let clean_reply = self.strip_tool_calls(&reply);
-
-        // If the reply mentions creating a plan or tasks, auto-draft a plan
-        let lower = reply.to_lowercase();
-        if (lower.contains("plan") && (lower.contains("creat") || lower.contains("draft") || lower.contains("put together")))
-            || lower.contains("let me create")
-            || lower.contains("i'll draft")
-        {
-            let plan_id = self.draft_plan(&msg).await?;
-            self.current_plan = Some(plan_id.clone());
-            return Ok(ConductorReply::PlanDrafted {
-                plan_id,
-                version: 1,
-            });
-        }
 
         Ok(ConductorReply::Chat { reply: clean_reply })
     }
 
     fn strip_tool_calls(&self, text: &str) -> String {
-        // Remove JSON tool call blocks from the response
         let mut result = text.to_string();
-        // Remove patterns like {"name": "...", "arguments": {...}}
+        // Remove JSON tool call blocks
         while let Some(start) = result.find("{\"name\":") {
-            // Find the matching closing brace
             let mut depth = 0;
             let mut end = start;
             for (i, ch) in result[start..].char_indices() {
@@ -270,7 +254,7 @@ impl Conductor {
                 break;
             }
         }
-        // Remove ```json...``` blocks that contain tool calls
+        // Remove ```json...``` blocks containing tool calls
         while let Some(start) = result.find("```json") {
             if let Some(end) = result[start+7..].find("```") {
                 let block_end = start + 7 + end + 3;

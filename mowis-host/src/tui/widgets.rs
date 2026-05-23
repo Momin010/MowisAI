@@ -13,6 +13,125 @@ const YELLOW: Color = Color::Rgb(234, 179, 8);
 const RED: Color = Color::Rgb(239, 68, 68);
 const DIM: Color = Color::Rgb(102, 102, 102);
 
+fn markdown_to_lines(text: &str, prefix: &str, prefix_color: Color) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for line_text in text.lines() {
+        let trimmed = line_text.trim();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+
+        // Add prefix on first line
+        if lines.is_empty() && !prefix.is_empty() {
+            spans.push(Span::styled(prefix.to_string(), Style::default().fg(prefix_color)));
+        } else if !lines.is_empty() {
+            // Indent continuation lines to align with text after prefix
+            spans.push(Span::raw("  ".to_string()));
+        }
+
+        if trimmed.starts_with("# ") {
+            // Header
+            spans.push(Span::styled(
+                trimmed[2..].to_string(),
+                Style::default().fg(PURPLE).add_modifier(Modifier::BOLD),
+            ));
+        } else if trimmed.starts_with("## ") {
+            spans.push(Span::styled(
+                trimmed[3..].to_string(),
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            ));
+        } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            // Bullet point
+            spans.push(Span::styled("  • ".to_string(), Style::default().fg(PURPLE)));
+            // Parse inline formatting in the bullet text
+            spans.extend(parse_inline_markdown(&trimmed[2..]));
+        } else if trimmed.len() > 2 && trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            && trimmed.contains(". ") {
+            // Numbered list
+            if let Some(dot_pos) = trimmed.find(". ") {
+                spans.push(Span::styled(
+                    format!("  {} ", &trimmed[..dot_pos]),
+                    Style::default().fg(PURPLE).add_modifier(Modifier::BOLD),
+                ));
+                spans.extend(parse_inline_markdown(&trimmed[dot_pos + 2..]));
+            }
+        } else {
+            // Regular text with inline formatting
+            spans.extend(parse_inline_markdown(trimmed));
+        }
+
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+fn parse_inline_markdown(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '*' && chars.peek() == Some(&'*') {
+            // Bold **text**
+            chars.next(); // skip second *
+            if !current.is_empty() {
+                spans.push(Span::raw(current.clone()));
+                current.clear();
+            }
+            let mut bold_text = String::new();
+            while let Some(c) = chars.next() {
+                if c == '*' && chars.peek() == Some(&'*') {
+                    chars.next();
+                    break;
+                }
+                bold_text.push(c);
+            }
+            spans.push(Span::styled(
+                bold_text,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        } else if ch == '*' {
+            // Italic *text*
+            if !current.is_empty() {
+                spans.push(Span::raw(current.clone()));
+                current.clear();
+            }
+            let mut italic_text = String::new();
+            while let Some(c) = chars.next() {
+                if c == '*' {
+                    break;
+                }
+                italic_text.push(c);
+            }
+            spans.push(Span::styled(
+                italic_text,
+                Style::default().add_modifier(Modifier::ITALIC),
+            ));
+        } else if ch == '`' {
+            // Inline code `text`
+            if !current.is_empty() {
+                spans.push(Span::raw(current.clone()));
+                current.clear();
+            }
+            let mut code_text = String::new();
+            while let Some(c) = chars.next() {
+                if c == '`' {
+                    break;
+                }
+                code_text.push(c);
+            }
+            spans.push(Span::styled(
+                code_text,
+                Style::default().fg(YELLOW).bg(Color::Rgb(30, 30, 40)),
+            ));
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        spans.push(Span::raw(current));
+    }
+    spans
+}
+
 // ── Message Log ────────────────────────────────────────────────
 
 pub struct MessageLog {
@@ -21,6 +140,7 @@ pub struct MessageLog {
     pub thinking: bool,
     spinner_frame: usize,
     pub streaming: bool,
+    pub had_streaming: bool,
     streaming_text: String,
 }
 
@@ -34,14 +154,15 @@ struct LogLine {
 
 impl MessageLog {
     pub fn new() -> Self {
-        Self { lines: Vec::new(), scroll_offset: 0, thinking: false, spinner_frame: 0, streaming: false, streaming_text: String::new() }
+        Self { lines: Vec::new(), scroll_offset: 0, thinking: false, spinner_frame: 0, streaming: false, had_streaming: false, streaming_text: String::new() }
     }
 
     pub fn push_stream_token(&mut self, token: &str) {
         if !self.streaming {
             // Start new streaming line
             self.streaming = true;
-            self.thinking = false;
+            self.had_streaming = true;
+            self.thinking = false; // Clear thinking on first token
             self.streaming_text.clear();
             // Add spacing
             if !self.lines.is_empty() {
@@ -60,7 +181,7 @@ impl MessageLog {
     pub fn finish_streaming(&mut self) {
         if self.streaming {
             self.streaming = false;
-            // Move streaming text to a permanent line
+            // Store as a special log line that will be rendered with markdown
             self.lines.push(LogLine {
                 prefix: "◈ ".into(),
                 prefix_color: GREEN,
@@ -83,6 +204,8 @@ impl MessageLog {
 
     pub fn add_user(&mut self, text: &str) {
         self.thinking = false;
+        self.had_streaming = false; // Reset for next exchange
+        self.finish_streaming();
         // Add blank line before user message for spacing
         if !self.lines.is_empty() {
             self.lines.push(LogLine {
@@ -210,18 +333,26 @@ impl MessageLog {
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let mut spans: Vec<Line> = Vec::new();
         for line in &self.lines {
-            let prefix_style = Style::default().fg(line.prefix_color);
-            let mut text_style = Style::default().fg(Color::White);
-            if line.italic {
-                text_style = text_style.add_modifier(Modifier::ITALIC);
+            // Use markdown rendering for conductor messages (◈ prefix)
+            if line.prefix == "◈ " && line.prefix_color == GREEN {
+                let md_lines = markdown_to_lines(&line.text, "◈ ", GREEN);
+                for md_line in md_lines {
+                    spans.push(md_line);
+                }
+            } else {
+                let prefix_style = Style::default().fg(line.prefix_color);
+                let mut text_style = Style::default().fg(Color::White);
+                if line.italic {
+                    text_style = text_style.add_modifier(Modifier::ITALIC);
+                }
+                if line.dim {
+                    text_style = text_style.fg(DIM);
+                }
+                spans.push(Line::from(vec![
+                    Span::styled(line.prefix.clone(), prefix_style),
+                    Span::styled(line.text.clone(), text_style),
+                ]));
             }
-            if line.dim {
-                text_style = text_style.fg(DIM);
-            }
-            spans.push(Line::from(vec![
-                Span::styled(&line.prefix, prefix_style),
-                Span::styled(&line.text, text_style),
-            ]));
         }
 
         // Show spinner at bottom if thinking
@@ -232,12 +363,12 @@ impl MessageLog {
             )));
         }
 
-        // Show streaming text if active
+        // Show streaming text if active (with markdown rendering)
         if self.streaming && !self.streaming_text.is_empty() {
-            spans.push(Line::from(vec![
-                Span::styled("◈ ", Style::default().fg(GREEN)),
-                Span::raw(&self.streaming_text),
-            ]));
+            let md_lines = markdown_to_lines(&self.streaming_text, "◈ ", GREEN);
+            for line in md_lines {
+                spans.push(line);
+            }
         }
 
         // Auto-scroll to bottom

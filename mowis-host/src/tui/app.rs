@@ -337,10 +337,15 @@ impl TuiApp {
     }
 
     fn handle_conductor_reply(&mut self, reply: ConductorReply) {
+        // If we already streamed the text, don't add it again
+        let was_streaming = self.message_log.streaming || self.message_log.had_streaming;
+        self.message_log.finish_streaming();
         self.message_log.stop_thinking();
+
         match reply {
             ConductorReply::Chat { reply } => {
-                if !reply.is_empty() {
+                if !reply.is_empty() && !was_streaming {
+                    // Only add if we didn't already stream it
                     self.message_log.add_conductor(&reply);
                 }
             }
