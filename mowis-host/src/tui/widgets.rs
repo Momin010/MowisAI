@@ -17,6 +17,9 @@ const DIM: Color = Color::Rgb(102, 102, 102);
 
 pub struct MessageLog {
     lines: Vec<LogLine>,
+    scroll_offset: usize,
+    pub thinking: bool,
+    spinner_frame: usize,
 }
 
 struct LogLine {
@@ -29,10 +32,20 @@ struct LogLine {
 
 impl MessageLog {
     pub fn new() -> Self {
-        Self { lines: Vec::new() }
+        Self { lines: Vec::new(), scroll_offset: 0, thinking: false, spinner_frame: 0 }
+    }
+
+    pub fn tick_spinner(&mut self) {
+        self.spinner_frame = (self.spinner_frame + 1) % 10;
+    }
+
+    pub fn spinner_char(&self) -> &str {
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        FRAMES[self.spinner_frame % FRAMES.len()]
     }
 
     pub fn add_user(&mut self, text: &str) {
+        self.thinking = false;
         self.lines.push(LogLine {
             prefix: "• ".into(),
             prefix_color: PURPLE,
@@ -63,6 +76,7 @@ impl MessageLog {
     }
 
     pub fn add_thinking(&mut self, text: &str) {
+        self.thinking = true;
         self.lines.push(LogLine {
             prefix: "⟳ ".into(),
             prefix_color: YELLOW,
@@ -70,6 +84,11 @@ impl MessageLog {
             italic: true,
             dim: true,
         });
+        self.scroll_offset = self.lines.len();
+    }
+
+    pub fn stop_thinking(&mut self) {
+        self.thinking = false;
     }
 
     pub fn add_plan_link(&mut self, plan_id: &str, version: u32) {
@@ -137,16 +156,26 @@ impl MessageLog {
             ]));
         }
 
-        // Show last N lines that fit the area
+        // Show spinner at bottom if thinking
+        if self.thinking {
+            spans.push(Line::from(Span::styled(
+                format!("  {} thinking...", self.spinner_char()),
+                Style::default().fg(YELLOW).add_modifier(Modifier::ITALIC),
+            )));
+        }
+
+        // Auto-scroll to bottom
+        let total_lines = spans.len();
         let visible_height = area.height as usize;
-        let start = if spans.len() > visible_height {
-            spans.len() - visible_height
+        let scroll = if total_lines > visible_height {
+            total_lines - visible_height
         } else {
             0
         };
 
-        let visible: Vec<Line> = spans[start..].to_vec();
-        let log = Paragraph::new(visible);
+        let log = Paragraph::new(spans)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0));
         f.render_widget(log, area);
     }
 }

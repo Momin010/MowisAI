@@ -104,6 +104,7 @@ impl TuiApp {
         if let AppScreen::Splash { ref mut frame } = self.screen {
             *frame += 1;
         }
+        self.message_log.tick_spinner();
     }
 
     fn start_orchestrator(&mut self, cfg: OrchConfig) {
@@ -330,6 +331,7 @@ impl TuiApp {
     }
 
     fn handle_conductor_reply(&mut self, reply: ConductorReply) {
+        self.message_log.stop_thinking();
         match reply {
             ConductorReply::Chat { reply } => {
                 if !reply.is_empty() {
@@ -573,6 +575,11 @@ impl TuiApp {
             };
             let input = Paragraph::new(input_text);
             f.render_widget(input, chunks[4]);
+
+            // Show cursor in input field
+            let cursor_x = chunks[4].x + self.input.len() as u16 + 1;
+            let cursor_y = chunks[4].y;
+            f.set_cursor(cursor_x, cursor_y);
 
             let divider2 = Paragraph::new("─".repeat(chunks[5].width as usize))
                 .style(Style::default().fg(PURPLE));
