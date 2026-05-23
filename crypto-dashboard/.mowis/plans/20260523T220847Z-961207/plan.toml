@@ -1,0 +1,20 @@
+plan_id = "20260523T220847Z-961207"
+created_at = "2026-05-23T22:08:47.692490766+00:00"
+conversation_id = "stdin-session"
+current_version = 1
+status = "Draft"
+user_goal = """
+complete the crypto dashboard. The project already has scaffolding, API layer (src/api/coingecko.ts), and types (src/types/coingecko.ts). You need to create ALL the React components that are missing. Create ALL of these files NOW:
+
+src/utils/format.ts - currency/number formatting utilities
+src/hooks/useCryptoData.ts - data fetching hook with auto-refresh
+src/hooks/usePortfolio.ts - portfolio management with localStorage
+src/components/Sparkline.tsx - inline SVG sparkline
+src/components/PriceTable.tsx - crypto price table with search
+src/components/CoinDetail.tsx - coin detail with chart.js line chart
+src/components/Portfolio.tsx - portfolio tracker
+src/components/AddHoldingModal.tsx - add holding modal
+src/App.tsx - MAIN app component wiring everything together (REPLACE the placeholder)
+src/index.css - clean minimal CSS (REPLACE the existing one)
+
+Design rules: NO gradients, NO emojis, NO purple. White bg, dark text, #2563EB accent. System fonts. Clean like Linear.app."""

@@ -1,0 +1,6 @@
+plan_id = "20260523T140537Z-3dd9da"
+created_at = "2026-05-23T14:05:37.781535960+00:00"
+conversation_id = "stdin-session"
+current_version = 1
+status = "Draft"
+user_goal = "create a simple hello world Node.js app with Express"

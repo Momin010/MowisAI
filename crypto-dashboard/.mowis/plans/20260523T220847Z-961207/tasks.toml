@@ -1,0 +1,104 @@
+[[tasks]]
+id = "t1"
+title = "Create formatting utilities"
+description = "Create src/utils/format.ts with these exported functions using ES module exports:"
+deps = []
+model_tier = "Fast"
+tool_budget = 20
+files_hint = ["src/utils/format.ts"]
+
+[[tasks]]
+id = "t2"
+title = "Create Sparkline SVG component"
+description = "Create src/components/Sparkline.tsx — a pure inline SVG sparkline chart component."
+deps = []
+model_tier = "Fast"
+tool_budget = 20
+files_hint = ["src/components/Sparkline.tsx"]
+
+[[tasks]]
+id = "t3"
+title = "Create AddHoldingModal component"
+description = "Create src/components/AddHoldingModal.tsx — a modal dialog for adding a crypto holding to the portfolio."
+deps = []
+model_tier = "Fast"
+tool_budget = 25
+files_hint = ["src/components/AddHoldingModal.tsx"]
+
+[[tasks]]
+id = "t4"
+title = "Create base CSS styles"
+description = "REPLACE src/index.css with a complete, production-quality stylesheet. This is the ONLY CSS file — no CSS modules, no styled-components."
+deps = []
+model_tier = "Fast"
+tool_budget = 25
+files_hint = ["src/index.css"]
+
+[[tasks]]
+id = "t5"
+title = "Create useCryptoData hook"
+description = "Create src/hooks/useCryptoData.ts — a React hook for fetching cryptocurrency market data with auto-refresh."
+deps = []
+model_tier = "Fast"
+tool_budget = 25
+files_hint = ["src/hooks/useCryptoData.ts"]
+
+[[tasks]]
+id = "t6"
+title = "Create usePortfolio hook"
+description = "Create src/hooks/usePortfolio.ts — a React hook for managing a crypto portfolio persisted to localStorage."
+deps = []
+model_tier = "Fast"
+tool_budget = 25
+files_hint = ["src/hooks/usePortfolio.ts"]
+
+[[tasks]]
+id = "t7"
+title = "Create PriceTable component"
+description = "Create src/components/PriceTable.tsx — a searchable cryptocurrency price table."
+deps = [
+    "t1",
+    "t2",
+]
+model_tier = "Fast"
+tool_budget = 25
+files_hint = ["src/components/PriceTable.tsx"]
+
+[[tasks]]
+id = "t8"
+title = "Create CoinDetail component"
+description = "Create src/components/CoinDetail.tsx — detailed view for a single cryptocurrency with a Chart.js line chart."
+deps = [
+    "t1",
+    "t5",
+]
+model_tier = "Fast"
+tool_budget = 30
+files_hint = ["src/components/CoinDetail.tsx"]
+
+[[tasks]]
+id = "t9"
+title = "Create Portfolio component"
+description = "Create src/components/Portfolio.tsx — portfolio tracker showing holdings and P&L."
+deps = [
+    "t1",
+    "t3",
+    "t6",
+]
+model_tier = "Fast"
+tool_budget = 30
+files_hint = ["src/components/Portfolio.tsx"]
+
+[[tasks]]
+id = "t10"
+title = "Create main App component"
+description = "REPLACE src/App.tsx with the main application component that wires everything together."
+deps = [
+    "t4",
+    "t7",
+    "t8",
+    "t9",
+]
+model_tier = "Fast"
+tool_budget = 25
+files_hint = ["src/App.tsx"]

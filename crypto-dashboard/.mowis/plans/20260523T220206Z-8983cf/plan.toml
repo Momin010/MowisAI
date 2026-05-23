@@ -1,0 +1,6 @@
+plan_id = "20260523T220206Z-8983cf"
+created_at = "2026-05-23T22:02:06.565213454+00:00"
+conversation_id = "stdin-session"
+current_version = 1
+status = "Draft"
+user_goal = "build a real-time cryptocurrency dashboard with live prices, charts, and portfolio tracking. Use clean minimal design like Linear.app. No API keys needed - use CoinGecko free API. No gradients, no emojis, no purple. White background, dark text, subtle blue accent. System fonts only. Responsive layout."
