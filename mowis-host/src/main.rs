@@ -848,6 +848,12 @@ async fn run_autonomous(cfg: OrchConfig, prompt: String, use_vm: bool, verbose: 
     // Step 2: Set up orchestration
     let bus = EventBus::new();
 
+    // Create working directory for sandbox output
+    let work_dir = std::path::PathBuf::from(".mowis-work");
+    std::fs::create_dir_all(&work_dir)?;
+    let work_dir = work_dir.canonicalize()?;
+    println!("[sandbox] Working directory: {}", work_dir.display());
+
     // Subscribe to bus events and print them
     let bus_print = bus.clone();
     let print_handle = tokio::spawn(async move {
@@ -976,6 +982,33 @@ async fn run_autonomous(cfg: OrchConfig, prompt: String, use_vm: bool, verbose: 
             match captain.run().await {
                 Ok(mowis_orchestration::captain::CaptainOutcome::Completed { sandbox_id }) => {
                     println!("\n[done] ✓ Plan completed successfully! Sandbox: {}", sandbox_id);
+
+                    // Copy output from sandbox to local filesystem
+                    println!("[output] Copying output to current directory...");
+                    let output_dir = std::path::PathBuf::from(".");
+                    match copy_sandbox_output(&work_dir, &output_dir) {
+                        Ok(count) => {
+                            println!("[output] ✓ Copied {} files to {}", count, output_dir.display());
+                            // List what was copied
+                            if verbose {
+                                for entry in walkdir::WalkDir::new(&output_dir).max_depth(3) {
+                                    if let Ok(e) = entry {
+                                        let path = e.path();
+                                        if path.starts_with(&work_dir) { continue; }
+                                        if path.is_file() {
+                                            println!("[output]   {}", path.display());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[output] ✗ Failed to copy output: {}", e);
+                        }
+                    }
+
+                    // Clean up work directory
+                    let _ = std::fs::remove_dir_all(&work_dir);
                 }
                 Ok(mowis_orchestration::captain::CaptainOutcome::Failed { reason, sandbox_id }) => {
                     eprintln!("\n[done] ✗ Plan failed: {} (sandbox: {})", reason, sandbox_id);
@@ -1002,4 +1035,25 @@ async fn run_autonomous(cfg: OrchConfig, prompt: String, use_vm: bool, verbose: 
     bus.emit(Event::ConversationEnded);
     print_handle.abort();
     Ok(())
+}
+
+fn copy_sandbox_output(src: &std::path::Path, dst: &std::path::Path) -> Result<usize> {
+    let mut count = 0;
+    for entry in walkdir::WalkDir::new(src) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(src).unwrap();
+        let dest_path = dst.join(rel);
+
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&dest_path)?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(entry.path(), &dest_path)?;
+            tracing::debug!(src = %entry.path().display(), dst = %dest_path.display(), "copied file");
+            count += 1;
+        }
+    }
+    Ok(count)
 }
