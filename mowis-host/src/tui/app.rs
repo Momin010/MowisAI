@@ -326,6 +326,12 @@ impl TuiApp {
             OrchEvent::ConversationEnded => {
                 self.message_log.add_system("Conversation ended.");
             }
+            OrchEvent::StreamToken { text } => {
+                self.message_log.push_stream_token(&text);
+            }
+            OrchEvent::StreamDone => {
+                self.message_log.finish_streaming();
+            }
             _ => {}
         }
     }

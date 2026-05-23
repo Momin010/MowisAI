@@ -108,6 +108,12 @@ pub enum Event {
         sandbox_id: String,
         final_plan_status: PlanStatus,
     },
+
+    // Streaming
+    StreamToken {
+        text: String,
+    },
+    StreamDone,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

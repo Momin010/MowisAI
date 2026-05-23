@@ -983,3 +983,195 @@ async fn generate_chat_anthropic(
         .ok_or_else(|| anyhow::anyhow!("Anthropic: unexpected response in chat"))
         .map(|s| s.to_string())
 }
+
+// ── Streaming ────────────────────────────────────────────────────────────────
+
+use tokio::sync::mpsc;
+
+/// Stream tokens from the LLM one by one via a channel.
+/// Returns the full accumulated text when done.
+pub async fn generate_chat_streaming(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[serde_json::Value],
+    temperature: f64,
+    token_tx: mpsc::UnboundedSender<String>,
+) -> Result<String> {
+    match llm_config.provider {
+        Provider::Anthropic => {
+            generate_chat_anthropic_streaming(llm_config, system_prompt, history, temperature, token_tx).await
+        }
+        Provider::OpenAi | Provider::Grok | Provider::Groq | Provider::Mimo => {
+            generate_chat_openai_streaming(llm_config, system_prompt, history, temperature, token_tx).await
+        }
+        Provider::VertexAi | Provider::Gemini => {
+            // Gemini streaming is complex; fall back to non-streaming
+            let text = generate_chat(llm_config, system_prompt, history, temperature).await?;
+            let _ = token_tx.send(text.clone());
+            Ok(text)
+        }
+    }
+}
+
+async fn generate_chat_anthropic_streaming(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[serde_json::Value],
+    temperature: f64,
+    token_tx: mpsc::UnboundedSender<String>,
+) -> Result<String> {
+    let api_key = llm_config
+        .api_key
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("No Anthropic API key"))?;
+
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    for msg in history {
+        messages.push(msg.clone());
+    }
+
+    let body = serde_json::json!({
+        "model": llm_config.model,
+        "system": system_prompt,
+        "messages": messages,
+        "max_tokens": 16384u32,
+        "temperature": temperature,
+        "stream": true
+    });
+
+    let client = &*HTTP_CLIENT;
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(900))
+        .send()
+        .await
+        .context("Anthropic streaming request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Anthropic API error ({}): {}", status, text));
+    }
+
+    let mut full_text = String::new();
+    let mut stream = response.bytes_stream();
+    use futures_util::StreamExt;
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading stream chunk")?;
+        let chunk_str = String::from_utf8_lossy(&chunk);
+        buffer.push_str(&chunk_str);
+
+        // Process complete SSE lines
+        while let Some(line_end) = buffer.find('\n') {
+            let line = buffer[..line_end].trim().to_string();
+            buffer = buffer[line_end + 1..].to_string();
+
+            if line.starts_with("data: ") {
+                let data = &line[6..];
+                if data == "[DONE]" {
+                    continue;
+                }
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    // Anthropic SSE: content_block_delta with text delta
+                    if let Some(delta) = event.get("delta") {
+                        if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                            if !text.is_empty() {
+                                full_text.push_str(text);
+                                let _ = token_tx.send(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(full_text)
+}
+
+async fn generate_chat_openai_streaming(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[serde_json::Value],
+    temperature: f64,
+    token_tx: mpsc::UnboundedSender<String>,
+) -> Result<String> {
+    let (url, api_key) = openai_compat_url_and_key(llm_config)?;
+
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "system", "content": system_prompt})];
+    for msg in history {
+        messages.push(msg.clone());
+    }
+
+    let body = serde_json::json!({
+        "model": llm_config.model,
+        "messages": messages,
+        "max_tokens": 16384u32,
+        "temperature": temperature,
+        "stream": true
+    });
+
+    let client = &*HTTP_CLIENT;
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(900))
+        .send()
+        .await
+        .context("OpenAI streaming request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("{} API error ({}): {}", llm_config.provider, status, text));
+    }
+
+    let mut full_text = String::new();
+    let mut stream = response.bytes_stream();
+    use futures_util::StreamExt;
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading stream chunk")?;
+        let chunk_str = String::from_utf8_lossy(&chunk);
+        buffer.push_str(&chunk_str);
+
+        while let Some(line_end) = buffer.find('\n') {
+            let line = buffer[..line_end].trim().to_string();
+            buffer = buffer[line_end + 1..].to_string();
+
+            if line.starts_with("data: ") {
+                let data = &line[6..];
+                if data == "[DONE]" {
+                    continue;
+                }
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    // OpenAI SSE: choices[0].delta.content
+                    if let Some(content) = event
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str())
+                    {
+                        if !content.is_empty() {
+                            full_text.push_str(content);
+                            let _ = token_tx.send(content.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(full_text)
+}

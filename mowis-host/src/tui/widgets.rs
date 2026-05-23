@@ -20,6 +20,8 @@ pub struct MessageLog {
     scroll_offset: usize,
     pub thinking: bool,
     spinner_frame: usize,
+    pub streaming: bool,
+    streaming_text: String,
 }
 
 struct LogLine {
@@ -32,7 +34,42 @@ struct LogLine {
 
 impl MessageLog {
     pub fn new() -> Self {
-        Self { lines: Vec::new(), scroll_offset: 0, thinking: false, spinner_frame: 0 }
+        Self { lines: Vec::new(), scroll_offset: 0, thinking: false, spinner_frame: 0, streaming: false, streaming_text: String::new() }
+    }
+
+    pub fn push_stream_token(&mut self, token: &str) {
+        if !self.streaming {
+            // Start new streaming line
+            self.streaming = true;
+            self.thinking = false;
+            self.streaming_text.clear();
+            // Add spacing
+            if !self.lines.is_empty() {
+                self.lines.push(LogLine {
+                    prefix: String::new(),
+                    prefix_color: DIM,
+                    text: String::new(),
+                    italic: false,
+                    dim: false,
+                });
+            }
+        }
+        self.streaming_text.push_str(token);
+    }
+
+    pub fn finish_streaming(&mut self) {
+        if self.streaming {
+            self.streaming = false;
+            // Move streaming text to a permanent line
+            self.lines.push(LogLine {
+                prefix: "◈ ".into(),
+                prefix_color: GREEN,
+                text: self.streaming_text.clone(),
+                italic: false,
+                dim: false,
+            });
+            self.streaming_text.clear();
+        }
     }
 
     pub fn tick_spinner(&mut self) {
@@ -193,6 +230,14 @@ impl MessageLog {
                 format!("  {} thinking...", self.spinner_char()),
                 Style::default().fg(YELLOW).add_modifier(Modifier::ITALIC),
             )));
+        }
+
+        // Show streaming text if active
+        if self.streaming && !self.streaming_text.is_empty() {
+            spans.push(Line::from(vec![
+                Span::styled("◈ ", Style::default().fg(GREEN)),
+                Span::raw(&self.streaming_text),
+            ]));
         }
 
         // Auto-scroll to bottom

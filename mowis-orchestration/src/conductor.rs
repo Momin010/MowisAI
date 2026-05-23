@@ -306,8 +306,33 @@ impl Conductor {
             })
             .collect();
 
-        let response =
-            crate::providers::generate_chat(&llm_config, &system_prompt, &history, 0.7).await?;
+        // Use streaming — emit tokens as they arrive
+        let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let bus = self.bus.clone();
+
+        // Spawn a task to forward tokens to the event bus
+        let forward_bus = bus.clone();
+        let forward_handle = tokio::spawn(async move {
+            while let Some(token) = token_rx.recv().await {
+                forward_bus.emit(crate::events::Event::StreamToken { text: token });
+            }
+        });
+
+        let response = crate::providers::generate_chat_streaming(
+            &llm_config,
+            &system_prompt,
+            &history,
+            0.7,
+            token_tx,
+        )
+        .await?;
+
+        // Wait for forward task to finish
+        let _ = forward_handle.await;
+
+        // Emit stream done
+        bus.emit(crate::events::Event::StreamDone);
+
         self.conversation.push(response.clone());
         Ok(response)
     }
