@@ -233,13 +233,12 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        None | Some(Cmd::Chat { .. }) => {
-            // Default: interactive chat
-            let (cid, port, project) = match cli.cmd {
-                Some(Cmd::Chat { cid, port, project }) => (cid, port, project),
-                _ => (None, mowis_host::protocol::DEFAULT_VSOCK_PORT, None),
-            };
-
+        None => {
+            // No subcommand: launch TUI (splash → setup → main)
+            let mut app = mowis_host::tui::TuiApp::new();
+            app.run()?;
+        }
+        Some(Cmd::Chat { cid, port, project }) => {
             // Load or create config
             let cfg = match OrchConfig::load() {
                 Ok(c) if !c.providers.is_empty() => c,
