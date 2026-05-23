@@ -218,16 +218,73 @@ impl Conductor {
         // No plan running or classifier failed — normal flow
         let reply = self.chat_reply().await?;
 
+        // Check if the LLM wants to draft a plan (contains <plan> tag)
         if reply.contains("<plan>") {
             let plan_id = self.draft_plan_from_response(&reply, &msg).await?;
             self.current_plan = Some(plan_id.clone());
-            Ok(ConductorReply::PlanDrafted {
+            return Ok(ConductorReply::PlanDrafted {
                 plan_id,
                 version: 1,
-            })
-        } else {
-            Ok(ConductorReply::Chat { reply })
+            });
         }
+
+        // Check if the LLM output contains tool call JSON and strip it from the reply
+        let clean_reply = self.strip_tool_calls(&reply);
+
+        // If the reply mentions creating a plan or tasks, auto-draft a plan
+        let lower = reply.to_lowercase();
+        if (lower.contains("plan") && (lower.contains("creat") || lower.contains("draft") || lower.contains("put together")))
+            || lower.contains("let me create")
+            || lower.contains("i'll draft")
+        {
+            let plan_id = self.draft_plan(&msg).await?;
+            self.current_plan = Some(plan_id.clone());
+            return Ok(ConductorReply::PlanDrafted {
+                plan_id,
+                version: 1,
+            });
+        }
+
+        Ok(ConductorReply::Chat { reply: clean_reply })
+    }
+
+    fn strip_tool_calls(&self, text: &str) -> String {
+        // Remove JSON tool call blocks from the response
+        let mut result = text.to_string();
+        // Remove patterns like {"name": "...", "arguments": {...}}
+        while let Some(start) = result.find("{\"name\":") {
+            // Find the matching closing brace
+            let mut depth = 0;
+            let mut end = start;
+            for (i, ch) in result[start..].char_indices() {
+                if ch == '{' { depth += 1; }
+                if ch == '}' { depth -= 1; }
+                if depth == 0 {
+                    end = start + i + 1;
+                    break;
+                }
+            }
+            if end > start {
+                result = format!("{}{}", &result[..start], &result[end..]).trim().to_string();
+            } else {
+                break;
+            }
+        }
+        // Remove ```json...``` blocks that contain tool calls
+        while let Some(start) = result.find("```json") {
+            if let Some(end) = result[start+7..].find("```") {
+                let block_end = start + 7 + end + 3;
+                let block = &result[start..block_end];
+                if block.contains("\"name\"") && block.contains("\"arguments\"") {
+                    result = format!("{}{}", &result[..start], &result[block_end..]).trim().to_string();
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        result.trim().to_string()
     }
 
     async fn chat_reply(&mut self) -> Result<String> {

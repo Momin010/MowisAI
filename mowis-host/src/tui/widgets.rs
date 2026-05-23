@@ -46,6 +46,16 @@ impl MessageLog {
 
     pub fn add_user(&mut self, text: &str) {
         self.thinking = false;
+        // Add blank line before user message for spacing
+        if !self.lines.is_empty() {
+            self.lines.push(LogLine {
+                prefix: String::new(),
+                prefix_color: DIM,
+                text: String::new(),
+                italic: false,
+                dim: false,
+            });
+        }
         self.lines.push(LogLine {
             prefix: "• ".into(),
             prefix_color: PURPLE,
@@ -56,6 +66,17 @@ impl MessageLog {
     }
 
     pub fn add_conductor(&mut self, text: &str) {
+        self.thinking = false;
+        // Add blank line before conductor message for spacing
+        if !self.lines.is_empty() {
+            self.lines.push(LogLine {
+                prefix: String::new(),
+                prefix_color: DIM,
+                text: String::new(),
+                italic: false,
+                dim: false,
+            });
+        }
         self.lines.push(LogLine {
             prefix: "◈ ".into(),
             prefix_color: GREEN,
@@ -77,6 +98,16 @@ impl MessageLog {
 
     pub fn add_thinking(&mut self, text: &str) {
         self.thinking = true;
+        // Add blank line before thinking for spacing
+        if !self.lines.is_empty() {
+            self.lines.push(LogLine {
+                prefix: String::new(),
+                prefix_color: DIM,
+                text: String::new(),
+                italic: false,
+                dim: false,
+            });
+        }
         self.lines.push(LogLine {
             prefix: "⟳ ".into(),
             prefix_color: YELLOW,
