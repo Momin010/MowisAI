@@ -1,9 +1,38 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::plan::Tier;
+
+/// Transport for executing tools locally on the host (no VM).
+pub struct LocalTransport {
+    work_dir: PathBuf,
+}
+
+impl LocalTransport {
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self { work_dir }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolTransport for LocalTransport {
+    async fn invoke_tool(&self, payload: mowis_protocol::Payload) -> Result<mowis_protocol::Payload> {
+        match payload {
+            mowis_protocol::Payload::InvokeToolAsAgent { tool, input, .. } => {
+                let result = crate::host_tools::execute_tool_local(&tool, &input, &self.work_dir)?;
+                Ok(mowis_protocol::Payload::ToolResult { output: result })
+            }
+            mowis_protocol::Payload::InvokeTool { tool, input, .. } => {
+                let result = crate::host_tools::execute_tool_local(&tool, &input, &self.work_dir)?;
+                Ok(mowis_protocol::Payload::ToolResult { output: result })
+            }
+            other => Err(anyhow::anyhow!("unsupported payload for local transport: {:?}", other)),
+        }
+    }
+}
 
 pub struct ToolGateway {
     transport: Arc<Mutex<Option<Box<dyn ToolTransport>>>>,

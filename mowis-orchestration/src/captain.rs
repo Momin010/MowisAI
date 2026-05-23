@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -182,9 +183,11 @@ impl Captain {
                 let tool_gateway = ToolGateway::new(
                     crate::plan::Tier::Crew,
                     crew_allowlist(),
-                    sandbox_id.clone(),
+                    sandbox_id.to_string(),
                     agent_id.clone(),
                 );
+                let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                tool_gateway.set_transport(Box::new(crate::tools::LocalTransport::new(work_dir))).await;
 
                 let crew_task = CrewTask {
                     task_id: task_node.id.clone(),
@@ -196,7 +199,7 @@ impl Captain {
 
                 let crew = Crew::new(
                     plan_id.clone(),
-                    sandbox_id.clone(),
+                    sandbox_id.to_string(),
                     agent_id.clone(),
                     crew_task,
                     llm_config,
@@ -324,12 +327,14 @@ impl Captain {
                 }
             };
 
-            let tool_gateway = ToolGateway::new(
-                crate::plan::Tier::Crew,
-                crew_allowlist(),
-                sandbox_id.to_string(),
-                agent_id.clone(),
-            );
+                let tool_gateway = ToolGateway::new(
+                    crate::plan::Tier::Crew,
+                    crew_allowlist(),
+                    sandbox_id.to_string(),
+                    agent_id.clone(),
+                );
+                let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                tool_gateway.set_transport(Box::new(crate::tools::LocalTransport::new(work_dir))).await;
 
             let crew_task = CrewTask {
                 task_id: task_node.id.clone(),
@@ -511,6 +516,8 @@ impl SimpleCaptain {
                     sandbox_id.clone(),
                     agent_id.clone(),
                 );
+                let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                tool_gateway.set_transport(Box::new(crate::tools::LocalTransport::new(work_dir))).await;
 
                 let crew_task = CrewTask {
                     task_id: task_node.id.clone(),

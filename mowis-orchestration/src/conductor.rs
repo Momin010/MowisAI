@@ -423,10 +423,24 @@ impl Conductor {
         let mut plan = Plan::new_draft(plan_id.clone(), user_msg, "stdin-session");
 
         if let Some(toml_start) = response.find("<plan>") {
-            if let Some(toml_end) = response.find("</plan>") {
+            // Find the LAST </plan> to avoid matching partial tags in streaming
+            if let Some(toml_end) = response.rfind("</plan>") {
                 let plan_toml = &response[toml_start + 6..toml_end];
-                if let Ok(task_graph) = toml::from_str::<crate::plan::TaskGraph>(plan_toml) {
-                    plan.task_graph = task_graph;
+                tracing::debug!(toml = %plan_toml, "parsing plan TOML");
+                match toml::from_str::<crate::plan::TaskGraph>(plan_toml) {
+                    Ok(task_graph) => {
+                        tracing::info!(tasks = task_graph.tasks.len(), "parsed plan tasks");
+                        plan.task_graph = task_graph;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to parse plan TOML, trying line-by-line extraction");
+                        // Try to extract tasks line by line
+                        let task_graph = extract_tasks_from_text(plan_toml);
+                        if !task_graph.tasks.is_empty() {
+                            tracing::info!(tasks = task_graph.tasks.len(), "extracted tasks from text");
+                            plan.task_graph = task_graph;
+                        }
+                    }
                 }
             }
         }
@@ -439,6 +453,7 @@ impl Conductor {
             version: 1,
         });
 
+        tracing::info!(plan_id = %plan_id.0, tasks = plan.task_graph.tasks.len(), "plan drafted");
         Ok(plan_id)
     }
 
@@ -527,6 +542,89 @@ fn truncate_str(s: &str, max: usize) -> String {
     } else {
         format!("{}...", &s[..max])
     }
+}
+
+fn extract_tasks_from_text(text: &str) -> crate::plan::TaskGraph {
+    use crate::plan::{TaskGraph, TaskNode, TaskId, ModelTier};
+
+    let mut tasks = Vec::new();
+    let mut current_id = String::new();
+    let mut current_title = String::new();
+    let mut current_desc = String::new();
+    let mut current_deps: Vec<TaskId> = Vec::new();
+    let mut current_tier = ModelTier::Fast;
+    let mut current_budget: u32 = 20;
+    let mut current_hint: Vec<String> = Vec::new();
+    let mut in_task = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[[task]]" {
+            if in_task && !current_id.is_empty() {
+                tasks.push(TaskNode {
+                    id: TaskId(current_id.clone()),
+                    title: current_title.clone(),
+                    description: current_desc.clone(),
+                    deps: current_deps.clone(),
+                    model_tier: current_tier.clone(),
+                    tool_budget: current_budget,
+                    files_hint: current_hint.clone(),
+                });
+            }
+            in_task = true;
+            current_id.clear();
+            current_title.clear();
+            current_desc.clear();
+            current_deps.clear();
+            current_tier = ModelTier::Fast;
+            current_budget = 20;
+            current_hint.clear();
+        } else if in_task {
+            if let Some(val) = trimmed.strip_prefix("id = ") {
+                current_id = val.trim_matches('"').to_string();
+            } else if let Some(val) = trimmed.strip_prefix("title = ") {
+                current_title = val.trim_matches('"').to_string();
+            } else if let Some(val) = trimmed.strip_prefix("description = ") {
+                current_desc = val.trim_matches('"').to_string();
+            } else if let Some(val) = trimmed.strip_prefix("model_tier = ") {
+                current_tier = match val.trim_matches('"') {
+                    "mid" => ModelTier::Mid,
+                    "flagship" => ModelTier::Flagship,
+                    _ => ModelTier::Fast,
+                };
+            } else if let Some(val) = trimmed.strip_prefix("tool_budget = ") {
+                current_budget = val.parse().unwrap_or(20);
+            } else if let Some(val) = trimmed.strip_prefix("files_hint = ") {
+                current_hint = val.trim_matches(|c| c == '[' || c == ']')
+                    .split(',')
+                    .map(|s| s.trim().trim_matches('"').to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            } else if let Some(val) = trimmed.strip_prefix("deps = ") {
+                current_deps = val.trim_matches(|c| c == '[' || c == ']')
+                    .split(',')
+                    .map(|s| s.trim().trim_matches('"').to_string())
+                    .filter(|s| !s.is_empty())
+                    .map(TaskId)
+                    .collect();
+            }
+        }
+    }
+
+    // Push last task
+    if in_task && !current_id.is_empty() {
+        tasks.push(TaskNode {
+            id: TaskId(current_id),
+            title: current_title,
+            description: current_desc,
+            deps: current_deps,
+            model_tier: current_tier,
+            tool_budget: current_budget,
+            files_hint: current_hint,
+        });
+    }
+
+    TaskGraph { tasks }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
