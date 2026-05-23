@@ -20,12 +20,11 @@ import {
 // Configuration
 // ---------------------------------------------------------------------------
 
-const BASE_URL =
-  process.env.COINGECKO_BASE_URL ?? "https://api.coingecko.com/api/v3";
+const BASE_URL = "https://api.coingecko.com/api/v3";
 
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS) || 8_000;
+const REQUEST_TIMEOUT_MS = 8_000;
 
-const DEFAULT_CURRENCY = (process.env.DEFAULT_CURRENCY ?? "usd").toLowerCase();
+const DEFAULT_CURRENCY = "usd";
 
 // ---------------------------------------------------------------------------
 // Helpers
