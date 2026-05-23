@@ -25,6 +25,10 @@ use mowis_orchestration::providers::Provider;
 #[derive(Debug, Parser)]
 #[command(name = "mowisd", version, about = "MowisAI — AI agent orchestration engine")]
 struct Cli {
+    /// Autonomous mode: provide a prompt and mowisd will execute it end-to-end.
+    #[arg(short = 'p', long = "prompt")]
+    prompt: Option<String>,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -232,6 +236,20 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Handle -p flag (autonomous mode) first
+    if let Some(ref prompt) = cli.prompt {
+        let cfg = match OrchConfig::load() {
+            Ok(c) if !c.providers.is_empty() => c,
+            _ => {
+                eprintln!("No config found. Run 'mowisd setup' first.");
+                std::process::exit(1);
+            }
+        };
+        run_autonomous(cfg, prompt.clone()).await?;
+        return Ok(());
+    }
+
     match cli.cmd {
         None => {
             // No subcommand: launch TUI (splash → setup → main with real orchestration)
@@ -754,5 +772,137 @@ async fn run_chat(
     bus.emit(Event::ConversationEnded);
     print_handle.abort();
     critic_handle.abort();
+    Ok(())
+}
+
+async fn run_autonomous(cfg: OrchConfig, prompt: String) -> Result<()> {
+    use mowis_orchestration::conductor::ConductorReply;
+
+    println!("\n╔══════════════════════════════════════╗");
+    println!("║  MowisAI Autonomous Mode             ║");
+    println!("╚══════════════════════════════════════╝\n");
+    println!("Prompt: {}\n", prompt);
+
+    let bus = EventBus::new();
+
+    // Subscribe to bus events and print them
+    let bus_print = bus.clone();
+    let print_handle = tokio::spawn(async move {
+        let mut rx = bus_print.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(event) => match event {
+                    Event::CrewToolSummary { text, success, .. } => {
+                        let icon = if success { "✓" } else { "✗" };
+                        println!("  [{}] {}", icon, text);
+                    }
+                    Event::CrewStarted { task_id, agent_id, .. } => {
+                        println!("  ▶ Agent {} started task {}", agent_id, task_id.0);
+                    }
+                    Event::CrewDone { agent_id, summary, .. } => {
+                        println!("  ■ Agent {} done: {}", agent_id, summary);
+                    }
+                    Event::CrewFailed { agent_id, reason, .. } => {
+                        println!("  ✗ Agent {} failed: {}", agent_id, reason);
+                    }
+                    Event::PlanDrafted { plan_id, version } => {
+                        println!("  📋 Plan drafted: {} v{}", plan_id.0, version);
+                    }
+                    Event::CriticVerdict { verdict, version, .. } => {
+                        let v = match &verdict {
+                            mowis_orchestration::critic::Verdict::Approve => "APPROVE",
+                            mowis_orchestration::critic::Verdict::Revise { .. } => "REVISE",
+                            mowis_orchestration::critic::Verdict::Block { .. } => "BLOCK",
+                        };
+                        println!("  🔍 Critic verdict (v{}): {}", version, v);
+                    }
+                    Event::CaptainStarted { sandbox_id, .. } => {
+                        println!("  🚀 Captain started (sandbox: {})", sandbox_id);
+                    }
+                    Event::MergeCompleted { agent_id, .. } => {
+                        println!("  🔀 Merged overlay for {}", agent_id);
+                    }
+                    Event::PlanCompleted { plan_id } => {
+                        println!("\n  ✓ Plan {} completed!", plan_id.0);
+                    }
+                    Event::PlanFailed { plan_id, reason } => {
+                        println!("\n  ✗ Plan {} failed: {}", plan_id.0, reason);
+                    }
+                    Event::StreamToken { text } => {
+                        print!("{}", text);
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
+                    Event::StreamDone => {
+                        println!();
+                    }
+                    Event::ConversationEnded => {
+                        break;
+                    }
+                    _ => {}
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Create conductor
+    let (mut conductor, _cmd_tx) = Conductor::new(&cfg, bus.clone())?;
+
+    // Create and spawn critic
+    let mut critic = Critic::new(&cfg, bus.clone())?;
+    tokio::spawn(async move {
+        if let Err(e) = critic.run().await {
+            tracing::error!(error = %e, "critic exited with error");
+        }
+    });
+
+    // Send the prompt to conductor
+    println!("Conductor is processing your request...\n");
+    let reply = conductor.handle_user_message(prompt.clone()).await?;
+
+    match reply {
+        ConductorReply::PlanDrafted { plan_id, version } => {
+            println!("Plan drafted: {} v{}", plan_id.0, version);
+            println!("Waiting for critic review...\n");
+
+            // Wait a moment for critic to review
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            // Auto-approve
+            println!("Auto-approving plan...\n");
+            bus.emit(Event::UserApproved { plan_id: plan_id.clone() });
+
+            // Run captain
+            let captain = SimpleCaptain::new(&cfg, plan_id, bus.clone())?;
+            match captain.run().await {
+                Ok(mowis_orchestration::captain::CaptainOutcome::Completed { sandbox_id }) => {
+                    println!("\n✓ Plan completed successfully! Sandbox: {}", sandbox_id);
+                }
+                Ok(mowis_orchestration::captain::CaptainOutcome::Failed { reason, .. }) => {
+                    eprintln!("\n✗ Plan failed: {}", reason);
+                }
+                Ok(mowis_orchestration::captain::CaptainOutcome::Aborted) => {
+                    println!("\nPlan aborted.");
+                }
+                Err(e) => {
+                    eprintln!("\nCaptain error: {}", e);
+                }
+            }
+        }
+        ConductorReply::Chat { reply } => {
+            println!("Conductor: {}", reply);
+        }
+        ConductorReply::Error { message } => {
+            eprintln!("Error: {}", message);
+        }
+        _ => {
+            println!("Conductor response: {:?}", reply);
+        }
+    }
+
+    bus.emit(Event::ConversationEnded);
+    print_handle.abort();
     Ok(())
 }
