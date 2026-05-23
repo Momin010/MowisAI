@@ -143,6 +143,49 @@ impl Crew {
                     json!({"error": e.to_string()})
                 });
 
+                // Check for interactive prompt
+                if let Some(prompt_text) = result.get("interactive_prompt").and_then(|v| v.as_str()) {
+                    if !prompt_text.is_empty() {
+                        // Ask LLM what to send
+                        conversation.push_tool_results(vec![(tc.clone(), result.clone())]);
+                        conversation.push_user(format!(
+                            "The command is waiting for input. The prompt is:\n{}\nWhat should I type? Respond with ONLY the input text, nothing else.",
+                            prompt_text
+                        ));
+
+                        let input_round = crate::providers::call_agent_round(
+                            &self.llm_config,
+                            &conversation,
+                            &[json!({"name": "send_input", "description": "Send input to interactive command", "parameters": {"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"]}})],
+                            "You are helping an interactive command. Respond with the exact input to send.",
+                        ).await;
+
+                        if let Ok(input_result) = input_round {
+                            let input_text = input_result.text.unwrap_or_else(|| "y".into());
+                            let input_clean = input_text.trim().to_string();
+
+                            // Send input via tool gateway
+                            let send_result = self.tool_gateway.invoke(crate::providers::ToolCall {
+                                id: format!("{}-input", tc.id),
+                                name: "send_input".into(),
+                                args: json!({"input": input_clean}),
+                            }).await;
+
+                            self.bus.emit(Event::CrewToolSummary {
+                                agent_id: self.agent_id.clone(),
+                                text: format!("Sent input to interactive command: {}", input_clean),
+                                tool_name: "send_input".into(),
+                                success: send_result.is_ok(),
+                            });
+                        }
+
+                        // Remove the extra user message we added
+                        // (not needed since we'll continue the conversation naturally)
+                        results.push((tc, result));
+                        continue;
+                    }
+                }
+
                 // Generate deterministic summary
                 let outcome: ToolOutcome = result.clone().into();
                 let summary_text = summarize(&tc, &outcome);

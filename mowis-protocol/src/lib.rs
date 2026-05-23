@@ -68,12 +68,21 @@ pub enum Payload {
     // ---- Codebase management (host -> guest) ----
     UploadCodebase {
         sandbox_id: String,
-        /// Base64-encoded tar.gz of the codebase
         archive_b64: String,
-        /// Number of files in the archive
         file_count: u32,
     },
     HealthCheck,
+
+    // ---- Interactive shell (host -> guest) ----
+    SendInput {
+        sandbox_id: String,
+        agent_id: String,
+        input: String,
+    },
+    InteractiveStatus {
+        sandbox_id: String,
+        agent_id: String,
+    },
 
     // ---- Agent overlay responses (guest -> host) ----
     AgentOverlayCreated {
@@ -95,6 +104,13 @@ pub enum Payload {
     HealthOk {
         uptime_secs: u64,
         sandbox_count: usize,
+    },
+
+    // ---- Interactive shell responses (guest -> host) ----
+    InteractivePrompt {
+        agent_id: String,
+        prompt: String,
+        waiting: bool,
     },
 
     // ---- Responses / events (guest -> host) ----

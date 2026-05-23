@@ -16,6 +16,14 @@ use tokio_vsock::{VsockAddr, VsockListener, VsockStream, VMADDR_CID_ANY};
 use crate::sandbox::Sandbox;
 use crate::tools;
 
+// Interactive shell state
+static INTERACTIVE_STDIN: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> =
+    tokio::sync::Mutex::const_new(None);
+static INTERACTIVE_WAITING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static INTERACTIVE_PROMPT: tokio::sync::Mutex<String> =
+    tokio::sync::Mutex::const_new(String::new());
+
 type SandboxMap = Arc<DashMap<String, Arc<Sandbox>>>;
 
 pub async fn serve(port: u32) -> Result<()> {
@@ -313,6 +321,55 @@ async fn dispatch(
             )
             .await?;
         }
+        Payload::SendInput {
+            sandbox_id,
+            agent_id,
+            input,
+        } => {
+            let overlay_key = format!("{}:{}", sandbox_id, agent_id);
+            if sandboxes.contains_key(&overlay_key) {
+                // Write input to the interactive stdin channel
+                let mut stdin_lock = INTERACTIVE_STDIN.lock().await;
+                if let Some(tx) = stdin_lock.as_ref() {
+                    let _ = tx.send(format!("{}\n", input).into_bytes());
+                    send(
+                        &writer,
+                        Envelope::new(id, Payload::ToolResult {
+                            output: serde_json::json!({"success": true, "message": "input sent"}),
+                        }),
+                    )
+                    .await?;
+                } else {
+                    send_error(&writer, id, "no interactive command running".into()).await?;
+                }
+            } else {
+                send_error(&writer, id, format!("no agent overlay `{agent_id}`")).await?;
+            }
+        }
+        Payload::InteractiveStatus {
+            sandbox_id,
+            agent_id,
+        } => {
+            let overlay_key = format!("{}:{}", sandbox_id, agent_id);
+            if sandboxes.contains_key(&overlay_key) {
+                let waiting = INTERACTIVE_WAITING.load(std::sync::atomic::Ordering::Relaxed);
+                let prompt = INTERACTIVE_PROMPT.lock().await.clone();
+                send(
+                    &writer,
+                    Envelope::new(
+                        id,
+                        Payload::InteractivePrompt {
+                            agent_id,
+                            prompt,
+                            waiting,
+                        },
+                    ),
+                )
+                .await?;
+            } else {
+                send_error(&writer, id, format!("no agent overlay `{agent_id}`")).await?;
+            }
+        }
         // Guest-side payloads should never arrive from the host; ignore.
         Payload::Pong { .. }
         | Payload::SandboxCreated { .. }
@@ -327,6 +384,7 @@ async fn dispatch(
         | Payload::AgentOverlayDiscarded { .. }
         | Payload::CodebaseUploaded { .. }
         | Payload::HealthOk { .. }
+        | Payload::InteractivePrompt { .. }
         | Payload::Error { .. } => {
             tracing::warn!(?id, "received unexpected guest-side payload from host");
         }
