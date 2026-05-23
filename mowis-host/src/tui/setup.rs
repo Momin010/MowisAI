@@ -5,19 +5,22 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
+use mowis_orchestration::config::{ModelRef, OrchConfig, ProviderCreds};
+use mowis_orchestration::plan::Tier;
+use mowis_orchestration::providers::Provider;
 
 const PURPLE: Color = Color::Rgb(109, 40, 217);
 const DIM: Color = Color::Rgb(102, 102, 102);
 const BG_PANEL: Color = Color::Rgb(13, 13, 26);
 
-const PROVIDERS: &[(&str, &str)] = &[
-    ("anthropic", "Anthropic (Claude)"),
-    ("openai", "OpenAI (GPT)"),
-    ("gemini", "Google Gemini"),
-    ("vertex_ai", "Vertex AI (GCP)"),
-    ("grok", "Grok (xAI)"),
-    ("groq", "Groq"),
-    ("mimo", "Mimo (Xiaomi)"),
+const PROVIDERS: &[(&str, &str, Provider)] = &[
+    ("anthropic", "Anthropic (Claude)", Provider::Anthropic),
+    ("openai", "OpenAI (GPT)", Provider::OpenAi),
+    ("gemini", "Google Gemini", Provider::Gemini),
+    ("vertex_ai", "Vertex AI (GCP)", Provider::VertexAi),
+    ("grok", "Grok (xAI)", Provider::Grok),
+    ("groq", "Groq", Provider::Groq),
+    ("mimo", "Mimo (Xiaomi)", Provider::Mimo),
 ];
 
 pub struct SetupState {
@@ -25,6 +28,7 @@ pub struct SetupState {
     pub selected: usize,
     pub provider_id: String,
     pub provider_name: String,
+    pub provider: Provider,
     pub api_key: String,
 }
 
@@ -35,6 +39,7 @@ impl SetupState {
             selected: 0,
             provider_id: String::new(),
             provider_name: String::new(),
+            provider: Provider::Anthropic,
             api_key: String::new(),
         }
     }
@@ -52,10 +57,67 @@ impl SetupState {
     }
 
     pub fn advance_to_step2(&mut self) {
-        let (id, name) = PROVIDERS[self.selected];
+        let (id, name, provider) = &PROVIDERS[self.selected];
         self.provider_id = id.to_string();
         self.provider_name = name.to_string();
+        self.provider = provider.clone();
         self.step = 2;
+    }
+
+    pub fn save_config(&self) -> anyhow::Result<OrchConfig> {
+        use std::collections::HashMap;
+
+        let encrypted = if self.provider == Provider::VertexAi {
+            None
+        } else {
+            Some(mowis_orchestration::crypto::encrypt(&self.api_key)?)
+        };
+
+        let project_id = if self.provider == Provider::VertexAi {
+            Some(self.api_key.clone()) // For Vertex, api_key field holds project_id
+        } else {
+            None
+        };
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            self.provider.clone(),
+            ProviderCreds {
+                api_key_enc: encrypted,
+                project_id,
+            },
+        );
+
+        let default_model = match self.provider {
+            Provider::Anthropic => "claude-sonnet-4-20250514",
+            Provider::OpenAi => "gpt-4o",
+            Provider::Gemini => "gemini-2.5-pro",
+            Provider::VertexAi => "gemini-2.5-pro",
+            Provider::Grok => "grok-3",
+            Provider::Groq => "llama-3.3-70b-versatile",
+            Provider::Mimo => "mimo-v2.5-pro",
+        };
+
+        let model_ref = ModelRef {
+            provider: self.provider.clone(),
+            model: default_model.to_string(),
+        };
+
+        let mut tiers = HashMap::new();
+        tiers.insert(Tier::Conductor, model_ref.clone());
+        tiers.insert(Tier::Critic, model_ref.clone());
+        tiers.insert(Tier::Captain, model_ref.clone());
+        tiers.insert(Tier::Crew, model_ref);
+
+        let cfg = OrchConfig {
+            providers,
+            tiers,
+            sandbox: mowis_orchestration::plan::SandboxConfig::default(),
+            plans_dir: std::path::PathBuf::from(".mowis/plans"),
+        };
+
+        cfg.save()?;
+        Ok(cfg)
     }
 
     pub fn draw(&self, f: &mut Frame) {
@@ -140,7 +202,7 @@ impl SetupState {
         f.render_widget(list_block, chunks[4]);
 
         let mut list_lines = Vec::new();
-        for (i, (_id, name)) in PROVIDERS.iter().enumerate() {
+        for (i, (_id, name, _provider)) in PROVIDERS.iter().enumerate() {
             let style = if i == self.selected {
                 Style::default().bg(PURPLE).fg(Color::White)
             } else {

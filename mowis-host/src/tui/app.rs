@@ -8,16 +8,21 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame, Terminal,
 };
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 use crate::tui::splash::render_splash;
 use crate::tui::setup::SetupState;
 use crate::tui::widgets::*;
+use mowis_orchestration::config::OrchConfig;
+use mowis_orchestration::conductor::{Conductor, ConductorCommand, ConductorReply};
+use mowis_orchestration::critic::Critic;
+use mowis_orchestration::events::{Event as OrchEvent, EventBus};
 
 const PURPLE: Color = Color::Rgb(109, 40, 217);
 const CYAN: Color = Color::Rgb(34, 211, 238);
@@ -25,18 +30,23 @@ const GREEN: Color = Color::Rgb(34, 197, 94);
 const YELLOW: Color = Color::Rgb(234, 179, 8);
 const RED: Color = Color::Rgb(239, 68, 68);
 const DIM: Color = Color::Rgb(102, 102, 102);
-const BG: Color = Color::Rgb(0, 0, 0);
-const BG_PANEL: Color = Color::Rgb(13, 13, 26);
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Screen {
-    Splash { frame: u64, started: Instant },
+pub enum AppScreen {
+    Splash { frame: u64 },
     Setup,
     Main,
 }
 
+pub enum TuiEvent {
+    Terminal(crossterm::event::KeyEvent),
+    Orch(OrchEvent),
+    ConductorReply(ConductorReply),
+    Tick,
+}
+
 pub struct TuiApp {
-    pub screen: Screen,
+    pub screen: AppScreen,
     pub setup: SetupState,
     pub message_log: MessageLog,
     pub plan_preview: PlanPreview,
@@ -46,16 +56,19 @@ pub struct TuiApp {
     pub plan_expanded: bool,
     pub critic_expanded: bool,
     pub input: String,
-    pub input_cursor: usize,
     pub slash_menu: SlashMenu,
-    pub scroll_offset: usize,
     pub should_quit: bool,
+    pub conductor_tx: Option<mpsc::Sender<ConductorCommand>>,
+    pub event_rx: Option<mpsc::UnboundedReceiver<TuiEvent>>,
+    pub event_tx: mpsc::UnboundedSender<TuiEvent>,
+    pub orchestrator_started: bool,
 }
 
 impl TuiApp {
     pub fn new() -> Self {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         Self {
-            screen: Screen::Splash { frame: 0, started: Instant::now() },
+            screen: AppScreen::Splash { frame: 0 },
             setup: SetupState::new(),
             message_log: MessageLog::new(),
             plan_preview: PlanPreview::new(),
@@ -65,21 +78,104 @@ impl TuiApp {
             plan_expanded: false,
             critic_expanded: false,
             input: String::new(),
-            input_cursor: 0,
             slash_menu: SlashMenu::new(),
-            scroll_offset: 0,
             should_quit: false,
+            conductor_tx: None,
+            event_rx: Some(event_rx),
+            event_tx,
+            orchestrator_started: false,
         }
     }
 
-    pub fn run(&mut self) -> Result<()> {
+    fn start_orchestrator(&mut self, cfg: OrchConfig) {
+        let bus = EventBus::new();
+        let bus_for_critic = bus.clone();
+        let event_tx = self.event_tx.clone();
+
+        // Subscribe to bus events and forward to TUI
+        let bus_sub = bus.subscribe();
+        let fwd_tx = event_tx.clone();
+        tokio::spawn(async move {
+            let mut rx = bus_sub;
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        let _ = fwd_tx.send(TuiEvent::Orch(ev));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Create conductor
+        let (mut conductor, _unused_tx) = match Conductor::new(&cfg, bus.clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                self.message_log.add_system(&format!("Failed to create conductor: {}", e));
+                return;
+            }
+        };
+
+        // Create our own command channel
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ConductorCommand>(64);
+        self.conductor_tx = Some(cmd_tx);
+
+        // Spawn conductor task that processes commands
+        let conductor_event_tx = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    ConductorCommand::UserMessage { text, reply_tx } => {
+                        let result = conductor.handle_user_message(text).await;
+                        match result {
+                            Ok(reply) => {
+                                let _ = conductor_event_tx.send(TuiEvent::ConductorReply(reply));
+                                let _ = reply_tx.send(ConductorReply::Chat { reply: String::new() });
+                            }
+                            Err(e) => {
+                                let _ = conductor_event_tx.send(TuiEvent::ConductorReply(
+                                    ConductorReply::Error { message: e.to_string() }
+                                ));
+                            }
+                        }
+                    }
+                    ConductorCommand::CriticVerdict { plan_id, version, verdict } => {
+                        let _ = conductor.handle_critic_verdict(plan_id, version, verdict).await;
+                    }
+                    ConductorCommand::EndConversation => {
+                        bus.emit(OrchEvent::ConversationEnded);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Create and spawn critic
+        let mut critic = match Critic::new(&cfg, bus_for_critic) {
+            Ok(c) => c,
+            Err(e) => {
+                self.message_log.add_system(&format!("Failed to create critic: {}", e));
+                return;
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(e) = critic.run().await {
+                tracing::error!(error = %e, "critic exited with error");
+            }
+        });
+
+        self.orchestrator_started = true;
+    }
+
+    pub async fn run_async(&mut self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        let result = self.run_loop(&mut terminal);
+        let result = self.run_loop(&mut terminal).await;
 
         disable_raw_mode()?;
         execute!(
@@ -92,72 +188,185 @@ impl TuiApp {
         result
     }
 
-    fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-        let tick_rate = Duration::from_millis(600);
-        let mut last_tick = Instant::now();
+    async fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+        let tick_rate = Duration::from_millis(100);
+        let mut event_rx = self.event_rx.take().unwrap();
 
         loop {
-            // Draw
             terminal.draw(|f| self.draw(f))?;
 
-            // Handle input
-            let timeout = tick_rate
-                .checked_sub(last_tick.elapsed())
-                .unwrap_or_else(|| Duration::from_secs(0));
+            // Poll for events
+            let has_event = tokio::time::timeout(tick_rate, async {
+                // Check terminal events (non-blocking)
+                if event::poll(Duration::ZERO).unwrap_or(false) {
+                    if let Ok(Event::Key(key)) = event::read() {
+                        return Some(TuiEvent::Terminal(key));
+                    }
+                }
+                // Check orchestration events
+                tokio::select! {
+                    Some(ev) = event_rx.recv() => Some(ev),
+                    else => None,
+                }
+            })
+            .await
+            .unwrap_or(None);
 
-            if crossterm::event::poll(timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key(key.code, key.modifiers);
+            if let Some(ev) = has_event {
+                match ev {
+                    TuiEvent::Terminal(key) => self.handle_key(key.code, key.modifiers).await,
+                    TuiEvent::Orch(orch_event) => self.handle_orch_event(orch_event),
+                    TuiEvent::ConductorReply(reply) => self.handle_conductor_reply(reply),
+                    TuiEvent::Tick => {}
                 }
             }
 
-            if last_tick.elapsed() >= tick_rate {
-                self.tick();
-                last_tick = Instant::now();
-            }
-
             if self.should_quit {
+                // Send EndConversation if orchestrator is running
+                if let Some(ref tx) = self.conductor_tx {
+                    let _ = tx.send(ConductorCommand::EndConversation).await;
+                }
                 return Ok(());
             }
         }
     }
 
-    fn tick(&mut self) {
-        match &self.screen {
-            Screen::Splash { frame, started } => {
-                let elapsed = started.elapsed();
-                if elapsed > Duration::from_secs(3) {
-                    self.screen = Screen::Splash { frame: frame + 1, started: *started };
-                } else {
-                    self.screen = Screen::Splash { frame: frame + 1, started: *started };
-                }
+    fn handle_orch_event(&mut self, event: OrchEvent) {
+        match event {
+            OrchEvent::CrewToolSummary { agent_id, text, tool_name: _, success } => {
+                self.captain_panel.add_tool_summary(&agent_id, &text, success);
+            }
+            OrchEvent::CrewStarted { task_id, agent_id, .. } => {
+                self.captain_panel.add_crew_started(&agent_id, &task_id.0);
+            }
+            OrchEvent::CrewDone { agent_id, summary, .. } => {
+                self.captain_panel.add_crew_done(&agent_id, &summary);
+            }
+            OrchEvent::CrewFailed { agent_id, reason, .. } => {
+                self.captain_panel.add_crew_failed(&agent_id, &reason);
+            }
+            OrchEvent::PlanDrafted { plan_id, version } => {
+                self.message_log.add_plan_link(&plan_id.0, version);
+                // Set plan preview with basic info
+                self.plan_preview.set_plan(
+                    plan_id.0.clone(),
+                    version,
+                    "Plan drafted by Conductor".into(),
+                    vec![],
+                    "N/A".into(),
+                    0,
+                );
+            }
+            OrchEvent::PlanRevised { plan_id, version } => {
+                self.message_log.add_system(&format!("Plan {} revised to v{}", plan_id.0, version));
+            }
+            OrchEvent::CriticVerdict { plan_id: _, version: _, verdict } => {
+                let verdict_str = match &verdict {
+                    mowis_orchestration::critic::Verdict::Approve => "approve",
+                    mowis_orchestration::critic::Verdict::Revise { .. } => "revise",
+                    mowis_orchestration::critic::Verdict::Block { .. } => "block",
+                };
+                let issues = match &verdict {
+                    mowis_orchestration::critic::Verdict::Revise { issues } => {
+                        issues.iter().map(|i| CriticIssue {
+                            severity: i.severity.clone(),
+                            section: i.section.clone(),
+                            message: i.message.clone(),
+                            suggested_fix: i.suggested_fix.clone(),
+                        }).collect()
+                    }
+                    mowis_orchestration::critic::Verdict::Block { issues, .. } => {
+                        issues.iter().map(|i| CriticIssue {
+                            severity: i.severity.clone(),
+                            section: i.section.clone(),
+                            message: i.message.clone(),
+                            suggested_fix: i.suggested_fix.clone(),
+                        }).collect()
+                    }
+                    _ => vec![],
+                };
+                self.critic_panel.set_verdict(verdict_str, issues, String::new());
+                self.message_log.add_critic_verdict(verdict_str, "");
+            }
+            OrchEvent::CriticReviewing { plan_id, version } => {
+                self.critic_panel.set_reviewing(&plan_id.0, version);
+            }
+            OrchEvent::CaptainStarted { sandbox_id, .. } => {
+                self.captain_panel.set_status("running");
+                self.captain_panel.add_captain_started(&sandbox_id);
+                self.overlay_visible = true;
+            }
+            OrchEvent::MergeCompleted { agent_id, .. } => {
+                self.captain_panel.add_merge_completed(&agent_id, &[]);
+            }
+            OrchEvent::PlanCompleted { .. } => {
+                self.captain_panel.set_status("completed");
+                self.message_log.add_system("Plan completed successfully!");
+            }
+            OrchEvent::PlanFailed { reason, .. } => {
+                self.captain_panel.set_status("failed");
+                self.message_log.add_system(&format!("Plan failed: {}", reason));
+            }
+            OrchEvent::ConversationEnded => {
+                self.message_log.add_system("Conversation ended.");
             }
             _ => {}
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+    fn handle_conductor_reply(&mut self, reply: ConductorReply) {
+        match reply {
+            ConductorReply::Chat { reply } => {
+                if !reply.is_empty() {
+                    self.message_log.add_conductor(&reply);
+                }
+            }
+            ConductorReply::PlanDrafted { plan_id, version } => {
+                self.message_log.add_plan_link(&plan_id.0, version);
+                self.plan_preview.set_awaiting();
+                self.message_log.add_awaiting_approval(&plan_id.0);
+            }
+            ConductorReply::PlanRevised { plan_id, version } => {
+                self.message_log.add_system(&format!("Plan revised: {} v{}", plan_id.0, version));
+            }
+            ConductorReply::Error { message } => {
+                self.message_log.add_system(&format!("Error: {}", message));
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         match &self.screen {
-            Screen::Splash { started, .. } => {
+            AppScreen::Splash { frame } => {
                 if code == KeyCode::Enter || code == KeyCode::Char(' ') {
-                    if started.elapsed() > Duration::from_secs(2) {
-                        self.screen = Screen::Setup;
+                    if *frame > 4 {
+                        self.screen = AppScreen::Setup;
                     }
                 }
                 if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
                     self.should_quit = true;
                 }
             }
-            Screen::Setup => {
+            AppScreen::Setup => {
                 match code {
                     KeyCode::Up => self.setup.move_up(),
                     KeyCode::Down => self.setup.move_down(),
                     KeyCode::Enter => {
                         if self.setup.step == 1 {
                             self.setup.advance_to_step2();
-                        } else if self.setup.step == 2 && !self.setup.api_key.is_empty() {
-                            self.screen = Screen::Main;
-                            self.message_log.add_system("MowisAI ready. Type your message.");
+                        } else if self.setup.step == 2 {
+                            // Save config
+                            match self.setup.save_config() {
+                                Ok(cfg) => {
+                                    self.screen = AppScreen::Main;
+                                    self.start_orchestrator(cfg);
+                                    self.message_log.add_system("MowisAI ready. Type your message.");
+                                }
+                                Err(e) => {
+                                    self.message_log.add_system(&format!("Setup error: {}", e));
+                                }
+                            }
                         }
                     }
                     KeyCode::Char(c) if self.setup.step == 2 => {
@@ -173,7 +382,7 @@ impl TuiApp {
                     _ => {}
                 }
             }
-            Screen::Main => {
+            AppScreen::Main => {
                 match code {
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         self.should_quit = true;
@@ -181,13 +390,10 @@ impl TuiApp {
                     KeyCode::Tab => {
                         self.overlay_visible = !self.overlay_visible;
                     }
-                    KeyCode::Char('p') if self.overlay_visible => {
+                    KeyCode::Char('p') if self.overlay_visible && self.input.is_empty() => {
                         self.plan_expanded = !self.plan_expanded;
                     }
-                    KeyCode::Char('c') if self.overlay_visible && !self.input.is_empty() => {
-                        // Don't toggle critic when typing
-                    }
-                    KeyCode::Char('c') if self.overlay_visible => {
+                    KeyCode::Char('c') if self.overlay_visible && self.input.is_empty() => {
                         self.critic_expanded = !self.critic_expanded;
                     }
                     KeyCode::Char('/') if self.input.is_empty() => {
@@ -220,8 +426,7 @@ impl TuiApp {
                             } else if msg == "/about" {
                                 self.message_log.add_system("MowisAI v1.0 — multi-agent conductor system");
                             } else {
-                                self.message_log.add_user(&msg);
-                                self.handle_conversation(&msg);
+                                self.send_message(msg).await;
                             }
                         }
                         self.input.clear();
@@ -240,106 +445,32 @@ impl TuiApp {
         }
     }
 
-    fn handle_conversation(&mut self, msg: &str) {
-        let lower = msg.to_lowercase();
+    async fn send_message(&mut self, msg: String) {
+        self.message_log.add_user(&msg);
 
-        if self.plan_preview.is_awaiting_approval() {
-            if lower.contains("approve") || lower.contains("yes") {
-                self.plan_preview.approve();
-                self.message_log.add_conductor("Plan approved! Starting execution...");
-                self.captain_panel.set_status("running");
-                self.overlay_visible = true;
-                self.message_log.add_system("Captain started execution.");
-                // In real app: send UserApproved to conductor
-            } else if lower.contains("cancel") {
-                self.plan_preview.cancel();
-                self.captain_panel.clear();
-                self.critic_panel.clear();
-                self.message_log.add_conductor("Plan cancelled.");
-            } else {
-                self.message_log.add_conductor("Type 'approve' or 'cancel'.");
+        if let Some(ref tx) = self.conductor_tx {
+            self.message_log.add_thinking("Conductor is thinking...");
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            if let Err(e) = tx.send(ConductorCommand::UserMessage {
+                text: msg,
+                reply_tx,
+            }).await {
+                self.message_log.add_system(&format!("Failed to send to conductor: {}", e));
             }
-            return;
-        }
-
-        // Simulate conductor response
-        if lower.contains("hello") || lower.contains("hi") || lower.contains("hey") {
-            self.message_log.add_conductor(
-                "Hey! I'm MowisAI, your multi-agent coding assistant. What would you like to work on?",
-            );
-        } else if lower.contains("build") || lower.contains("create") || lower.contains("make")
-            || lower.contains("implement") || lower.contains("fix")
-        {
-            self.draft_plan(msg);
         } else {
-            self.message_log.add_conductor(&format!(
-                "I understand you said: '{}'. Could you tell me what you'd like to work on?",
-                msg
-            ));
+            self.message_log.add_system("Orchestrator not started. Run setup first.");
         }
-    }
-
-    fn draft_plan(&mut self, goal: &str) {
-        self.message_log.add_thinking("Analyzing your request and drafting a plan...");
-
-        let tasks = if goal.to_lowercase().contains("api") {
-            vec![
-                TaskInfo { id: "t1".into(), title: "Set up project structure".into(), deps: vec![], tier: "fast".into(), budget: 10 },
-                TaskInfo { id: "t2".into(), title: "Implement API routes".into(), deps: vec!["t1".into()], tier: "mid".into(), budget: 20 },
-                TaskInfo { id: "t3".into(), title: "Add data models".into(), deps: vec!["t1".into()], tier: "mid".into(), budget: 15 },
-                TaskInfo { id: "t4".into(), title: "Write tests".into(), deps: vec!["t2".into(), "t3".into()], tier: "fast".into(), budget: 20 },
-            ]
-        } else {
-            vec![
-                TaskInfo { id: "t1".into(), title: "Analyze requirements".into(), deps: vec![], tier: "mid".into(), budget: 10 },
-                TaskInfo { id: "t2".into(), title: "Set up project".into(), deps: vec!["t1".into()], tier: "fast".into(), budget: 10 },
-                TaskInfo { id: "t3".into(), title: "Implement core".into(), deps: vec!["t2".into()], tier: "mid".into(), budget: 25 },
-                TaskInfo { id: "t4".into(), title: "Add tests".into(), deps: vec!["t3".into()], tier: "fast".into(), budget: 15 },
-            ]
-        };
-
-        let plan_id = format!("plan-{}", chrono::Utc::now().format("%H%M%S"));
-        let overview = format!("## Plan: {}\n\nThis plan breaks down your request into {} tasks.\nEach task runs in an isolated sandbox.", goal, tasks.len());
-
-        self.plan_preview.set_plan(
-            plan_id.clone(),
-            1,
-            overview,
-            tasks,
-            "ubuntu-24.04".into(),
-            8192,
-        );
-
-        self.message_log.add_plan_link(&plan_id, 1);
-
-        // Critic reviews
-        self.critic_panel.set_reviewing(&plan_id, 1);
-        self.message_log.add_system("Critic reviewing plan...");
-
-        // Simulate critic verdict
-        self.critic_panel.set_verdict(
-            "approve",
-            vec![
-                CriticIssue { severity: "info".into(), section: "tasks.toml".into(), message: "Task dependencies are valid".into(), suggested_fix: None },
-                CriticIssue { severity: "warn".into(), section: "sandbox.toml".into(), message: "Consider more RAM for large builds".into(), suggested_fix: Some("Set ram_mb = 16384".into()) },
-            ],
-            "Plan is well-structured with clear task boundaries.".into(),
-        );
-
-        self.message_log.add_critic_verdict("approve", "Plan is well-structured with clear task boundaries.");
-        self.plan_preview.set_awaiting();
-        self.message_log.add_awaiting_approval(&plan_id);
     }
 
     fn draw(&mut self, f: &mut Frame) {
         match &self.screen {
-            Screen::Splash { frame, .. } => {
+            AppScreen::Splash { frame } => {
                 render_splash(f, *frame);
             }
-            Screen::Setup => {
+            AppScreen::Setup => {
                 self.setup.draw(f);
             }
-            Screen::Main => {
+            AppScreen::Main => {
                 self.draw_main(f);
             }
         }
@@ -349,13 +480,12 @@ impl TuiApp {
         let area = f.size();
 
         if self.overlay_visible {
-            // Overlay view: PlanPreview + CriticPanel + CaptainPanel
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(10),  // panels
-                    Constraint::Length(1), // divider
-                    Constraint::Length(1), // footer
+                    Constraint::Min(10),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
                 ])
                 .split(area);
 
@@ -372,7 +502,6 @@ impl TuiApp {
             self.critic_panel.render(f, panel_chunks[1], self.critic_expanded);
             self.captain_panel.render(f, panel_chunks[2]);
 
-            // Footer
             let footer = Paragraph::new(Line::from(vec![
                 Span::styled("Tab", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
                 Span::raw(" Main • "),
@@ -385,21 +514,19 @@ impl TuiApp {
             ]));
             f.render_widget(footer, chunks[2]);
         } else {
-            // Main chat view
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),  // header
-                    Constraint::Length(3),  // status
-                    Constraint::Min(1),    // message log
-                    Constraint::Length(1),  // divider
-                    Constraint::Length(1),  // input
-                    Constraint::Length(1),  // divider
-                    Constraint::Length(1),  // footer
+                    Constraint::Length(3),
+                    Constraint::Length(2),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
                 ])
                 .split(area);
 
-            // Header
             let header = Paragraph::new(vec![
                 Line::from(vec![
                     Span::raw("Welcome to "),
@@ -410,28 +537,20 @@ impl TuiApp {
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(PURPLE)));
             f.render_widget(header, chunks[0]);
 
-            // Status
             let status = Paragraph::new(vec![
                 Line::from(vec![
-                    Span::styled("● ", Style::default().fg(PURPLE)),
+                    Span::styled("● ", Style::default().fg(GREEN)),
                     Span::raw("Connected to MowisAI"),
-                ]),
-                Line::from(vec![
-                    Span::styled("● ", Style::default().fg(PURPLE)),
-                    Span::raw("Session active"),
                 ]),
             ]);
             f.render_widget(status, chunks[1]);
 
-            // Message log
             self.message_log.render(f, chunks[2]);
 
-            // Divider
             let divider = Paragraph::new("─".repeat(chunks[3].width as usize))
                 .style(Style::default().fg(PURPLE));
             f.render_widget(divider, chunks[3]);
 
-            // Input
             let input_text = if self.input.is_empty() {
                 Span::styled("Type a message, / for commands", Style::default().fg(DIM))
             } else {
@@ -440,12 +559,10 @@ impl TuiApp {
             let input = Paragraph::new(input_text);
             f.render_widget(input, chunks[4]);
 
-            // Divider
             let divider2 = Paragraph::new("─".repeat(chunks[5].width as usize))
                 .style(Style::default().fg(PURPLE));
             f.render_widget(divider2, chunks[5]);
 
-            // Footer
             let footer = Paragraph::new(Line::from(vec![
                 Span::styled("Tab", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
                 Span::raw(" Overlay • "),
@@ -458,7 +575,6 @@ impl TuiApp {
             ]));
             f.render_widget(footer, chunks[6]);
 
-            // Slash menu overlay
             if self.slash_menu.visible {
                 self.slash_menu.render(f, chunks[4]);
             }

@@ -234,9 +234,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         None => {
-            // No subcommand: launch TUI (splash → setup → main)
+            // No subcommand: launch TUI (splash → setup → main with real orchestration)
             let mut app = mowis_host::tui::TuiApp::new();
-            app.run()?;
+            app.run_async().await?;
         }
         Some(Cmd::Chat { cid, port, project }) => {
             // Load or create config

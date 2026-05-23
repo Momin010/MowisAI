@@ -475,6 +475,21 @@ impl CaptainPanel {
         self.events.push(CaptainEvent::CrewDone { agent_id: agent_id.into(), summary: summary.into() });
     }
 
+    pub fn add_crew_failed(&mut self, agent_id: &str, reason: &str) {
+        self.events.push(CaptainEvent::CrewFailed { agent_id: agent_id.into(), reason: reason.into() });
+    }
+
+    pub fn add_merge_completed(&mut self, agent_id: &str, changed_paths: &[&str]) {
+        self.events.push(CaptainEvent::MergeCompleted {
+            agent_id: agent_id.into(),
+            changed_paths: changed_paths.iter().map(|s| s.to_string()).collect(),
+        });
+    }
+
+    pub fn add_captain_started(&mut self, sandbox_id: &str) {
+        self.events.push(CaptainEvent::CaptainStarted { sandbox_id: sandbox_id.into() });
+    }
+
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let status_color = match self.status.as_str() {
             "running" => GREEN,
