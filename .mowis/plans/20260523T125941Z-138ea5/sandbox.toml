@@ -1,5 +1,0 @@
-image_rootfs = ".mowis-cache/rootfs/ubuntu-24.04"
-ram_mb = 8192
-cpu_millis = 4000
-overlay_ram_mb = 1024
-overlay_cpu_millis = 1000
