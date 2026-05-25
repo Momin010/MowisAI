@@ -7,3 +7,4 @@ claude
 C:\Users\Public\MowisAI\.claude\worktrees
 node_modules
 .cargo
+.mowis/

@@ -403,12 +403,69 @@ impl Conductor {
     /// Dispatch a Conductor tool call.
     fn execute_conductor_tool(&self, tc: &crate::providers::ToolCall) -> serde_json::Value {
         match tc.name.as_str() {
+            "start_build" => self.execute_start_build(),
             "save_to_host" => {
                 let dest = tc.args.get("destination").and_then(|d| d.as_str());
                 self.execute_save_to_host(dest)
             }
             other => serde_json::json!({ "error": format!("unknown tool: {}", other) }),
         }
+    }
+
+    /// Actually dispatch the Captain to execute the current plan. This is the
+    /// ONLY way the Conductor starts a build — without calling it, no work
+    /// happens (the model must never merely claim a build is running). The
+    /// Captain runs in its own task and streams progress events to the bus,
+    /// which the UI renders.
+    fn execute_start_build(&self) -> serde_json::Value {
+        let plan_id = match &self.current_plan {
+            Some(p) => p.clone(),
+            None => {
+                return serde_json::json!({
+                    "error": "no plan has been drafted yet — draft a plan first"
+                })
+            }
+        };
+        let workspace = self
+            .workspace
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let cfg = self.cfg.clone();
+        let bus = self.bus.clone();
+        let plan_for_task = plan_id.clone();
+
+        // Fire-and-forget: the Captain's events (CaptainStarted, CrewStarted,
+        // CrewToolSummary, PlanCompleted/Failed) flow to the bus and the UI.
+        tokio::spawn(async move {
+            match crate::captain::SimpleCaptain::new_in(
+                &cfg,
+                plan_for_task.clone(),
+                bus.clone(),
+                workspace,
+            ) {
+                Ok(captain) => {
+                    if let Err(e) = captain.run().await {
+                        bus.emit(Event::PlanFailed {
+                            plan_id: plan_for_task,
+                            reason: e.to_string(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    bus.emit(Event::PlanFailed {
+                        plan_id: plan_for_task,
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        });
+
+        tracing::info!(plan = %plan_id.0, "conductor dispatched captain");
+        serde_json::json!({
+            "started": true,
+            "plan_id": plan_id.0,
+            "note": "Captain dispatched; build is now running. Progress will stream to the UI."
+        })
     }
 
     /// Copy the session sandbox to the user's machine. This is the only path by
@@ -686,7 +743,13 @@ impl Conductor {
 }
 
 fn conductor_tool_schemas() -> Vec<serde_json::Value> {
-    vec![serde_json::json!({
+    vec![
+    serde_json::json!({
+        "name": "start_build",
+        "description": "Dispatch the Captain to actually execute the most recently drafted plan (spawns the crews that write the code). Call this when the user approves the plan or tells you to build/start/go ahead — even if the Critic raised issues, because the user is the final approval gate. You MUST call this to begin work; never claim a build has started unless you have called it. Takes no arguments.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+    }),
+    serde_json::json!({
         "name": "save_to_host",
         "description": "Save everything built in the session sandbox to the user's machine. Call this ONLY when the user explicitly asks to save, export, download, or keep the project. Do not call it on your own initiative.",
         "parameters": {

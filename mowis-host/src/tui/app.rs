@@ -137,6 +137,19 @@ impl TuiApp {
             }
         };
 
+        // Give the conductor a per-session sandbox: crews build here (via the
+        // start_build tool), and save_to_host copies from here to the user's
+        // project. Without this the build/save tools have nowhere to operate.
+        let session_id = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+        let workspace = std::path::PathBuf::from(".mowis/sessions")
+            .join(&session_id)
+            .join("workspace");
+        let _ = std::fs::create_dir_all(&workspace);
+        let workspace = workspace.canonicalize().unwrap_or(workspace);
+        let save_dest =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        conductor.set_workspace(workspace, save_dest);
+
         // Create our own command channel
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<ConductorCommand>(64);
         self.conductor_tx = Some(cmd_tx);
