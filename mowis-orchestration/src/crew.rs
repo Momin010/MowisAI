@@ -93,7 +93,16 @@ impl Crew {
             )
             .await
             {
-                Ok(r) => r,
+                Ok(r) => {
+                    self.bus.emit(Event::TokensUsed {
+                        agent_id: self.agent_id.clone(),
+                        role: "crew".to_string(),
+                        input_tokens: r.usage.input_tokens,
+                        output_tokens: r.usage.output_tokens,
+                        model: self.llm_config.model.clone(),
+                    });
+                    r
+                }
                 Err(e) => {
                     tracing::error!(agent = %self.agent_id, error = %e, "LLM call failed");
                     return Ok(CrewOutcome::Failed {

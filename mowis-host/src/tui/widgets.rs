@@ -1129,6 +1129,60 @@ impl AtMenu {
     }
 }
 
+// ── Token Meter ────────────────────────────────────────────────
+
+#[derive(Debug, Default, Clone)]
+pub struct TokenMeter {
+    pub total_input: u32,
+    pub total_output: u32,
+    pub api_calls: u32,
+    pub tool_calls: u32,
+}
+
+impl TokenMeter {
+    pub fn record_tokens(&mut self, input: u32, output: u32) {
+        self.total_input += input;
+        self.total_output += output;
+        self.api_calls += 1;
+    }
+
+    pub fn record_tool_call(&mut self) {
+        self.tool_calls += 1;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.api_calls == 0
+    }
+
+    pub fn fmt_spans(&self) -> Vec<Span<'static>> {
+        if self.is_empty() {
+            return vec![];
+        }
+        vec![
+            Span::styled("  ↑".to_string(), Style::default().fg(DIM)),
+            Span::styled(fmt_k(self.total_input), Style::default().fg(Color::White)),
+            Span::styled(" ↓".to_string(), Style::default().fg(DIM)),
+            Span::styled(fmt_k(self.total_output), Style::default().fg(Color::White)),
+            Span::styled(format!("  ⚡{}", self.api_calls), Style::default().fg(DIM)),
+            if self.tool_calls > 0 {
+                Span::styled(format!("  🔧{}", self.tool_calls), Style::default().fg(DIM))
+            } else {
+                Span::raw("".to_string())
+            },
+        ]
+    }
+}
+
+fn fmt_k(n: u32) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f32 / 1_000_000.0)
+    } else if n >= 1000 {
+        format!("{:.1}k", n as f32 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 #[cfg(test)]
 mod scroll_tests {
     use super::*;

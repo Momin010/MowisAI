@@ -316,7 +316,7 @@ impl Conductor {
             }
         });
 
-        let response = crate::providers::generate_chat_streaming(
+        let (response, usage) = crate::providers::generate_chat_streaming(
             &llm_config,
             &system_prompt,
             &history,
@@ -328,8 +328,15 @@ impl Conductor {
         // Wait for forward task to finish
         let _ = forward_handle.await;
 
-        // Emit stream done
+        // Emit stream done and token accounting
         bus.emit(crate::events::Event::StreamDone);
+        bus.emit(crate::events::Event::TokensUsed {
+            agent_id: "conductor".to_string(),
+            role: "conductor".to_string(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            model: llm_config.model.clone(),
+        });
 
         self.conversation.push(response.clone());
         Ok(response)
@@ -378,6 +385,13 @@ impl Conductor {
             )
             .await?;
             let _ = fwd.await;
+            self.bus.emit(Event::TokensUsed {
+                agent_id: "conductor".to_string(),
+                role: "conductor".to_string(),
+                input_tokens: round.usage.input_tokens,
+                output_tokens: round.usage.output_tokens,
+                model: llm_config.model.clone(),
+            });
 
             if round.tool_calls.is_empty() {
                 final_text = round.text.unwrap_or_default();
@@ -573,8 +587,15 @@ impl Conductor {
             })
             .collect();
 
-        let response =
+        let (response, usage) =
             crate::providers::generate_chat(&llm_config, &system_prompt, &history, 0.7).await?;
+        self.bus.emit(Event::TokensUsed {
+            agent_id: "conductor".to_string(),
+            role: "conductor".to_string(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            model: llm_config.model.clone(),
+        });
         self.conversation.push(response.clone());
 
         if let Some(toml_start) = response.find("<plan>") {

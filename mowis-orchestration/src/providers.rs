@@ -98,9 +98,16 @@ impl AgentConversation {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
 pub struct AgentRoundResult {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    pub usage: TokenUsage,
 }
 
 impl AgentRoundResult {
@@ -569,7 +576,11 @@ async fn call_agent_round_gemini(
     let resp_json: serde_json::Value = response.json().await?;
     let text = extract_gemini_text(&resp_json).ok();
     let tool_calls = extract_gemini_tool_calls(&resp_json);
-    Ok(AgentRoundResult { text, tool_calls })
+    let usage = TokenUsage {
+        input_tokens: resp_json["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0) as u32,
+        output_tokens: resp_json["usageMetadata"]["candidatesTokenCount"].as_u64().unwrap_or(0) as u32,
+    };
+    Ok(AgentRoundResult { text, tool_calls, usage })
 }
 
 fn extract_gemini_tool_calls(resp: &serde_json::Value) -> Vec<ToolCall> {
@@ -710,7 +721,11 @@ async fn call_agent_round_openai_compat(
                 .collect()
         })
         .unwrap_or_default();
-    Ok(AgentRoundResult { text, tool_calls })
+    let usage = TokenUsage {
+        input_tokens: resp_json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+        output_tokens: resp_json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+    };
+    Ok(AgentRoundResult { text, tool_calls, usage })
 }
 
 async fn call_agent_round_anthropic(
@@ -813,7 +828,11 @@ async fn call_agent_round_anthropic(
                 .collect()
         })
         .unwrap_or_default();
-    Ok(AgentRoundResult { text, tool_calls })
+    let usage = TokenUsage {
+        input_tokens: resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
+        output_tokens: resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
+    };
+    Ok(AgentRoundResult { text, tool_calls, usage })
 }
 
 pub async fn generate_chat(
@@ -821,7 +840,7 @@ pub async fn generate_chat(
     system_prompt: &str,
     history: &[serde_json::Value],
     temperature: f64,
-) -> Result<String> {
+) -> Result<(String, TokenUsage)> {
     let provider_name = format!("{}", llm_config.provider);
     with_retry(
         &format!("generate_chat/{}", provider_name),
@@ -836,7 +855,7 @@ async fn generate_chat_inner(
     system_prompt: &str,
     history: &[serde_json::Value],
     temperature: f64,
-) -> Result<String> {
+) -> Result<(String, TokenUsage)> {
     match llm_config.provider {
         Provider::VertexAi | Provider::Gemini => {
             generate_chat_gemini(llm_config, system_prompt, history, temperature).await
@@ -855,7 +874,7 @@ async fn generate_chat_gemini(
     system_prompt: &str,
     history: &[serde_json::Value],
     temperature: f64,
-) -> Result<String> {
+) -> Result<(String, TokenUsage)> {
     let (url, auth_header) = gemini_url_and_auth(llm_config)?;
     let contents: Vec<serde_json::Value> = history
         .iter()
@@ -895,7 +914,12 @@ async fn generate_chat_gemini(
         return Err(anyhow::anyhow!("Gemini API error ({}): {}", status, body));
     }
     let resp_json: serde_json::Value = response.json().await?;
-    extract_gemini_text(&resp_json)
+    let text = extract_gemini_text(&resp_json)?;
+    let usage = TokenUsage {
+        input_tokens: resp_json["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0) as u32,
+        output_tokens: resp_json["usageMetadata"]["candidatesTokenCount"].as_u64().unwrap_or(0) as u32,
+    };
+    Ok((text, usage))
 }
 
 async fn generate_chat_openai_compat(
@@ -903,7 +927,7 @@ async fn generate_chat_openai_compat(
     system_prompt: &str,
     history: &[serde_json::Value],
     temperature: f64,
-) -> Result<String> {
+) -> Result<(String, TokenUsage)> {
     let (url, api_key) = openai_compat_url_and_key(llm_config)?;
     let mut messages = vec![serde_json::json!({"role": "system", "content": system_prompt})];
     for msg in history {
@@ -931,14 +955,19 @@ async fn generate_chat_openai_compat(
         return Err(anyhow::anyhow!("{} API error ({}): {}", llm_config.provider, status, text));
     }
     let resp_json: serde_json::Value = response.json().await?;
-    resp_json
+    let text = resp_json
         .get("choices")
         .and_then(|c| c.get(0))
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
         .ok_or_else(|| anyhow::anyhow!("{}: unexpected response in chat", llm_config.provider))
-        .map(|s| s.to_string())
+        .map(|s| s.to_string())?;
+    let usage = TokenUsage {
+        input_tokens: resp_json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+        output_tokens: resp_json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+    };
+    Ok((text, usage))
 }
 
 async fn generate_chat_anthropic(
@@ -946,7 +975,7 @@ async fn generate_chat_anthropic(
     system_prompt: &str,
     history: &[serde_json::Value],
     temperature: f64,
-) -> Result<String> {
+) -> Result<(String, TokenUsage)> {
     let api_key = llm_config
         .api_key
         .as_deref()
@@ -983,13 +1012,18 @@ async fn generate_chat_anthropic(
         return Err(anyhow::anyhow!("Anthropic API error ({}): {}", status, text));
     }
     let resp_json: serde_json::Value = response.json().await?;
-    resp_json
+    let text = resp_json
         .get("content")
         .and_then(|c| c.as_array())
         .and_then(|arr| arr.iter().find(|b| b["type"].as_str() == Some("text")))
         .and_then(|b| b["text"].as_str())
         .ok_or_else(|| anyhow::anyhow!("Anthropic: unexpected response in chat"))
-        .map(|s| s.to_string())
+        .map(|s| s.to_string())?;
+    let usage = TokenUsage {
+        input_tokens: resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
+        output_tokens: resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
+    };
+    Ok((text, usage))
 }
 
 // ── Streaming ────────────────────────────────────────────────────────────────
@@ -997,14 +1031,14 @@ async fn generate_chat_anthropic(
 use tokio::sync::mpsc;
 
 /// Stream tokens from the LLM one by one via a channel.
-/// Returns the full accumulated text when done.
+/// Returns the full accumulated text and token usage when done.
 pub async fn generate_chat_streaming(
     llm_config: &LlmConfig,
     system_prompt: &str,
     history: &[serde_json::Value],
     temperature: f64,
     token_tx: mpsc::UnboundedSender<String>,
-) -> Result<String> {
+) -> Result<(String, TokenUsage)> {
     match llm_config.provider {
         Provider::Anthropic => {
             generate_chat_anthropic_streaming(llm_config, system_prompt, history, temperature, token_tx).await
@@ -1014,9 +1048,9 @@ pub async fn generate_chat_streaming(
         }
         Provider::VertexAi | Provider::Gemini => {
             // Gemini streaming is complex; fall back to non-streaming
-            let text = generate_chat(llm_config, system_prompt, history, temperature).await?;
+            let (text, usage) = generate_chat(llm_config, system_prompt, history, temperature).await?;
             let _ = token_tx.send(text.clone());
-            Ok(text)
+            Ok((text, usage))
         }
     }
 }
@@ -1027,7 +1061,7 @@ async fn generate_chat_anthropic_streaming(
     history: &[serde_json::Value],
     temperature: f64,
     token_tx: mpsc::UnboundedSender<String>,
-) -> Result<String> {
+) -> Result<(String, TokenUsage)> {
     let api_key = llm_config
         .api_key
         .as_deref()
@@ -1066,6 +1100,7 @@ async fn generate_chat_anthropic_streaming(
     }
 
     let mut full_text = String::new();
+    let mut stream_usage = TokenUsage::default();
     let mut stream = response.bytes_stream();
     use futures_util::StreamExt;
     let mut buffer = String::new();
@@ -1086,6 +1121,17 @@ async fn generate_chat_anthropic_streaming(
                     continue;
                 }
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    // Capture input tokens from message_start
+                    if event_type == "message_start" {
+                        stream_usage.input_tokens = event["message"]["usage"]["input_tokens"]
+                            .as_u64().unwrap_or(0) as u32;
+                    }
+                    // Capture output tokens from message_delta
+                    if event_type == "message_delta" {
+                        stream_usage.output_tokens = event["usage"]["output_tokens"]
+                            .as_u64().unwrap_or(0) as u32;
+                    }
                     // Anthropic SSE: content_block_delta with text delta
                     if let Some(delta) = event.get("delta") {
                         if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
@@ -1100,7 +1146,7 @@ async fn generate_chat_anthropic_streaming(
         }
     }
 
-    Ok(full_text)
+    Ok((full_text, stream_usage))
 }
 
 async fn generate_chat_openai_streaming(
@@ -1109,7 +1155,7 @@ async fn generate_chat_openai_streaming(
     history: &[serde_json::Value],
     temperature: f64,
     token_tx: mpsc::UnboundedSender<String>,
-) -> Result<String> {
+) -> Result<(String, TokenUsage)> {
     let (url, api_key) = openai_compat_url_and_key(llm_config)?;
 
     let mut messages: Vec<serde_json::Value> =
@@ -1123,7 +1169,8 @@ async fn generate_chat_openai_streaming(
         "messages": messages,
         "max_tokens": 16384u32,
         "temperature": temperature,
-        "stream": true
+        "stream": true,
+        "stream_options": {"include_usage": true},
     });
 
     let client = &*HTTP_CLIENT;
@@ -1144,6 +1191,7 @@ async fn generate_chat_openai_streaming(
     }
 
     let mut full_text = String::new();
+    let mut stream_usage = TokenUsage::default();
     let mut stream = response.bytes_stream();
     use futures_util::StreamExt;
     let mut buffer = String::new();
@@ -1163,6 +1211,11 @@ async fn generate_chat_openai_streaming(
                     continue;
                 }
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    // Capture usage from final usage chunk
+                    if let Some(u) = event.get("usage") {
+                        stream_usage.input_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+                        stream_usage.output_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                    }
                     // OpenAI SSE: choices[0].delta.content
                     if let Some(content) = event
                         .get("choices")
@@ -1181,7 +1234,7 @@ async fn generate_chat_openai_streaming(
         }
     }
 
-    Ok(full_text)
+    Ok((full_text, stream_usage))
 }
 
 /// Streaming variant of `call_agent_round`: streams assistant text to `token_tx`
@@ -1208,8 +1261,7 @@ pub async fn call_agent_round_streaming(
             .await
         }
         _ => {
-            let round =
-                call_agent_round(llm_config, conversation, tool_schemas, system_prompt).await?;
+            let round = call_agent_round(llm_config, conversation, tool_schemas, system_prompt).await?;
             if let Some(t) = &round.text {
                 let _ = token_tx.send(t.clone());
             }
@@ -1274,6 +1326,7 @@ async fn call_agent_round_openai_compat_streaming(
         "temperature": 0.7,
         "max_tokens": 16384u32,
         "stream": true,
+        "stream_options": {"include_usage": true},
     });
 
     let client = &*HTTP_CLIENT;
@@ -1296,6 +1349,7 @@ async fn call_agent_round_openai_compat_streaming(
     // index -> (id, name, accumulated arguments JSON fragment)
     let mut tool_accum: std::collections::BTreeMap<i64, (String, String, String)> =
         std::collections::BTreeMap::new();
+    let mut stream_usage = TokenUsage::default();
     let mut stream = response.bytes_stream();
     use futures_util::StreamExt;
     let mut buffer = String::new();
@@ -1316,6 +1370,11 @@ async fn call_agent_round_openai_compat_streaming(
                     Ok(e) => e,
                     Err(_) => continue,
                 };
+                // Capture usage from the final usage-only chunk
+                if let Some(u) = event.get("usage") {
+                    stream_usage.input_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+                    stream_usage.output_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                }
                 let delta = event
                     .get("choices")
                     .and_then(|c| c.get(0))
@@ -1375,5 +1434,5 @@ async fn call_agent_round_openai_compat_streaming(
     } else {
         Some(full_text)
     };
-    Ok(AgentRoundResult { text, tool_calls })
+    Ok(AgentRoundResult { text, tool_calls, usage: stream_usage })
 }

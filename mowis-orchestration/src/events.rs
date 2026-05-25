@@ -114,6 +114,15 @@ pub enum Event {
         text: String,
     },
     StreamDone,
+
+    // Token accounting
+    TokensUsed {
+        agent_id: String,
+        role: String,
+        input_tokens: u32,
+        output_tokens: u32,
+        model: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

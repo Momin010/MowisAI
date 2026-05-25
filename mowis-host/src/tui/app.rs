@@ -89,6 +89,7 @@ pub struct TuiApp {
     pub input: String,
     pub slash_menu: SlashMenu,
     pub at_menu: AtMenu,
+    pub token_meter: TokenMeter,
     pub should_quit: bool,
     pub conductor_tx: Option<mpsc::Sender<ConductorCommand>>,
     pub event_rx: Option<mpsc::UnboundedReceiver<TuiEvent>>,
@@ -117,6 +118,7 @@ impl TuiApp {
             input: String::new(),
             slash_menu: SlashMenu::new(),
             at_menu: AtMenu::new(),
+            token_meter: TokenMeter::default(),
             should_quit: false,
             conductor_tx: None,
             event_rx: Some(event_rx),
@@ -322,8 +324,12 @@ impl TuiApp {
 
     fn handle_orch_event(&mut self, event: OrchEvent) {
         match event {
+            OrchEvent::TokensUsed { input_tokens, output_tokens, .. } => {
+                self.token_meter.record_tokens(input_tokens, output_tokens);
+            }
             OrchEvent::CrewToolSummary { agent_id, text, tool_name: _, success } => {
                 self.captain_panel.add_tool_summary(&agent_id, &text, success);
+                self.token_meter.record_tool_call();
             }
             OrchEvent::CrewStarted { task_id, agent_id, .. } => {
                 self.captain_panel.add_crew_started(&agent_id, &task_id.0);
@@ -682,13 +688,14 @@ impl TuiApp {
                 ])
                 .split(area);
 
-            // ── Title bar — brand only, no status clutter ─────────────
-            let title_line = Line::from(vec![
+            // ── Title bar — brand + live token meter ─────────────────
+            let mut title_spans = vec![
                 Span::styled("◈  ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
                 Span::styled("MowisAI", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            ]);
+            ];
+            title_spans.extend(self.token_meter.fmt_spans());
             f.render_widget(
-                Paragraph::new(title_line).style(Style::default().bg(Color::Black)),
+                Paragraph::new(Line::from(title_spans)).style(Style::default().bg(Color::Black)),
                 chunks[0],
             );
 
