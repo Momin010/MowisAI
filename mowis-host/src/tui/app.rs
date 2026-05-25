@@ -6,7 +6,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -23,6 +23,38 @@ use mowis_orchestration::config::OrchConfig;
 use mowis_orchestration::conductor::{Conductor, ConductorCommand, ConductorReply};
 use mowis_orchestration::critic::Critic;
 use mowis_orchestration::events::{Event as OrchEvent, EventBus};
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() { break; }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' { break; }
+                        if c == '\x1b' {
+                            if chars.peek() == Some(&'\\') { chars.next(); }
+                            break;
+                        }
+                    }
+                }
+                Some(_) => { chars.next(); }
+                None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 const PURPLE: Color = Color::Rgb(109, 40, 217);
 const CYAN: Color = Color::Rgb(34, 211, 238);
@@ -255,7 +287,7 @@ impl TuiApp {
                     // into multiple messages by the Enter handler.
                     Event::Paste(text) => match self.screen {
                         AppScreen::Main => {
-                            self.input.push_str(&text);
+                            self.input.push_str(&strip_ansi(&text));
                             if self.input.starts_with('/') {
                                 self.slash_menu.filter(&self.input);
                             }
@@ -557,7 +589,7 @@ impl TuiApp {
     }
 
     fn draw_main(&mut self, f: &mut Frame) {
-        let area = f.size();
+        let area = f.size().inner(Margin { horizontal: 1, vertical: 0 });
 
         if self.overlay_visible {
             let chunks = Layout::default()
