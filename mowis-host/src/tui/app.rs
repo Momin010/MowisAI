@@ -589,7 +589,7 @@ impl TuiApp {
     }
 
     fn draw_main(&mut self, f: &mut Frame) {
-        let area = f.size().inner(Margin { horizontal: 1, vertical: 0 });
+        let area = f.size().inner(&Margin { horizontal: 1, vertical: 0 });
 
         if self.overlay_visible {
             let chunks = Layout::default()
