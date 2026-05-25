@@ -409,15 +409,14 @@ impl MessageLog {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(BORDER));
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-
-        // 1-cell horizontal breathing room inside the border
-        let content_area = inner.inner(&Margin { horizontal: 1, vertical: 0 });
+        // No visible border — the layout margins are the boundary.
+        // Shrink 1 row from the top so the first message doesn't sit flush against
+        // whatever is above (title bar / divider).
+        let content_area = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
 
         let mut spans: Vec<Line> = Vec::new();
         for line in &self.lines {
@@ -467,11 +466,8 @@ impl MessageLog {
                 spans.push(Line::raw(""));
             }
             spans.push(
-                Line::from(Span::styled(
-                    "start a conversation",
-                    Style::default().fg(BORDER),
-                ))
-                .alignment(Alignment::Center),
+                Line::from(Span::styled("start a conversation", Style::default().fg(BORDER)))
+                    .alignment(Alignment::Center),
             );
         }
 
@@ -481,15 +477,12 @@ impl MessageLog {
         self.viewport_height = visible_height;
 
         let max_scroll = content_rows.saturating_sub(visible_height);
-        let scroll = if self.auto_scroll {
-            max_scroll
-        } else {
-            self.scroll_offset.min(max_scroll)
-        };
+        let scroll = if self.auto_scroll { max_scroll } else { self.scroll_offset.min(max_scroll) };
 
         let log = Paragraph::new(spans)
             .wrap(Wrap { trim: false })
-            .scroll((scroll as u16, 0));
+            .scroll((scroll as u16, 0))
+            .style(Style::default().bg(Color::Black));
         f.render_widget(log, content_area);
     }
 }
@@ -982,22 +975,22 @@ impl SlashMenu {
         self.filtered = COMMANDS.iter().map(|(c, d)| (c.to_string(), d.to_string())).collect();
     }
 
-    pub fn hide(&mut self) {
-        self.visible = false;
-    }
+    pub fn hide(&mut self) { self.visible = false; }
 
     pub fn filter(&mut self, text: &str) {
-        if text.is_empty() {
-            self.filtered = COMMANDS.iter().map(|(c, d)| (c.to_string(), d.to_string())).collect();
-        } else {
-            self.filtered = COMMANDS
-                .iter()
-                .filter(|(cmd, _)| cmd.starts_with(text))
-                .map(|(c, d)| (c.to_string(), d.to_string()))
-                .collect();
-        }
+        self.filtered = COMMANDS
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(text))
+            .map(|(c, d)| (c.to_string(), d.to_string()))
+            .collect();
         self.selected = 0;
         self.visible = !self.filtered.is_empty();
+    }
+
+    pub fn move_up(&mut self) { if self.selected > 0 { self.selected -= 1; } }
+    pub fn move_down(&mut self) { if self.selected + 1 < self.filtered.len() { self.selected += 1; } }
+    pub fn current(&self) -> Option<&str> {
+        self.filtered.get(self.selected).map(|(cmd, _)| cmd.as_str())
     }
 
     pub fn render(&self, f: &mut Frame, input_area: Rect) {
@@ -1019,7 +1012,7 @@ impl SlashMenu {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(PURPLE))
-            .style(Style::default().bg(Color::Rgb(13, 13, 26)));
+            .style(Style::default().bg(Color::Black));
 
         let inner = block.inner(menu_area);
         f.render_widget(block, menu_area);
@@ -1042,7 +1035,96 @@ impl SlashMenu {
             ]));
         }
 
-        let menu = Paragraph::new(lines);
+        let menu = Paragraph::new(lines).style(Style::default().bg(Color::Black));
+        f.render_widget(menu, inner);
+    }
+}
+
+// ── @ Menu ─────────────────────────────────────────────────────
+
+const AT_TARGETS: &[(&str, &str)] = &[
+    ("@conductor", "Send to Conductor"),
+    ("@captain",   "Send to Captain"),
+    ("@critic",    "Request a review"),
+    ("@crew",      "Broadcast to Crew"),
+];
+
+pub struct AtMenu {
+    pub visible: bool,
+    selected: usize,
+    filtered: Vec<(String, String)>,
+}
+
+impl AtMenu {
+    pub fn new() -> Self {
+        Self {
+            visible: false,
+            selected: 0,
+            filtered: AT_TARGETS.iter().map(|(c, d)| (c.to_string(), d.to_string())).collect(),
+        }
+    }
+
+    pub fn show(&mut self) {
+        self.visible = true;
+        self.selected = 0;
+        self.filtered = AT_TARGETS.iter().map(|(c, d)| (c.to_string(), d.to_string())).collect();
+    }
+
+    pub fn hide(&mut self) { self.visible = false; }
+
+    pub fn filter(&mut self, text: &str) {
+        self.filtered = AT_TARGETS
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(text))
+            .map(|(c, d)| (c.to_string(), d.to_string()))
+            .collect();
+        self.selected = 0;
+        self.visible = !self.filtered.is_empty();
+    }
+
+    pub fn move_up(&mut self) { if self.selected > 0 { self.selected -= 1; } }
+    pub fn move_down(&mut self) { if self.selected + 1 < self.filtered.len() { self.selected += 1; } }
+    pub fn current(&self) -> Option<&str> {
+        self.filtered.get(self.selected).map(|(cmd, _)| cmd.as_str())
+    }
+
+    pub fn render(&self, f: &mut Frame, input_area: Rect) {
+        if !self.visible || self.filtered.is_empty() { return; }
+
+        let menu_height = self.filtered.len() as u16 + 2;
+        let menu_area = Rect {
+            x: input_area.x,
+            y: input_area.y.saturating_sub(menu_height),
+            width: 44.min(input_area.width),
+            height: menu_height,
+        };
+
+        f.render_widget(Clear, menu_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(CYAN))
+            .style(Style::default().bg(Color::Black));
+        let inner = block.inner(menu_area);
+        f.render_widget(block, menu_area);
+
+        let lines: Vec<Line> = self.filtered.iter().enumerate().map(|(i, (cmd, desc))| {
+            let (cmd_style, desc_style) = if i == self.selected {
+                (
+                    Style::default().bg(CYAN).fg(Color::Black).add_modifier(Modifier::BOLD),
+                    Style::default().bg(CYAN).fg(Color::Black),
+                )
+            } else {
+                (Style::default().fg(CYAN), Style::default().fg(DIM))
+            };
+            Line::from(vec![
+                Span::styled(format!("  {:<16}", cmd), cmd_style),
+                Span::styled(format!(" {}", desc), desc_style),
+            ])
+        }).collect();
+
+        let menu = Paragraph::new(lines).style(Style::default().bg(Color::Black));
         f.render_widget(menu, inner);
     }
 }

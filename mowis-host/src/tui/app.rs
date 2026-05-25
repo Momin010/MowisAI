@@ -88,6 +88,7 @@ pub struct TuiApp {
     pub critic_expanded: bool,
     pub input: String,
     pub slash_menu: SlashMenu,
+    pub at_menu: AtMenu,
     pub should_quit: bool,
     pub conductor_tx: Option<mpsc::Sender<ConductorCommand>>,
     pub event_rx: Option<mpsc::UnboundedReceiver<TuiEvent>>,
@@ -115,6 +116,7 @@ impl TuiApp {
             critic_expanded: false,
             input: String::new(),
             slash_menu: SlashMenu::new(),
+            at_menu: AtMenu::new(),
             should_quit: false,
             conductor_tx: None,
             event_rx: Some(event_rx),
@@ -486,6 +488,24 @@ impl TuiApp {
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         self.should_quit = true;
                     }
+                    // ── Menu navigation (must come before general Up/Down/Tab) ──
+                    KeyCode::Up if self.slash_menu.visible => { self.slash_menu.move_up(); }
+                    KeyCode::Down if self.slash_menu.visible => { self.slash_menu.move_down(); }
+                    KeyCode::Up if self.at_menu.visible => { self.at_menu.move_up(); }
+                    KeyCode::Down if self.at_menu.visible => { self.at_menu.move_down(); }
+                    KeyCode::Tab if self.slash_menu.visible => {
+                        if let Some(cmd) = self.slash_menu.current().map(|s| s.to_string()) {
+                            self.input = cmd;
+                            self.slash_menu.hide();
+                        }
+                    }
+                    KeyCode::Tab if self.at_menu.visible => {
+                        if let Some(cmd) = self.at_menu.current().map(|s| format!("{} ", s)) {
+                            self.input = cmd;
+                            self.at_menu.hide();
+                        }
+                    }
+                    // ── General navigation ────────────────────────────────────
                     KeyCode::Tab => {
                         self.overlay_visible = !self.overlay_visible;
                     }
@@ -495,37 +515,55 @@ impl TuiApp {
                     KeyCode::Char('c') if self.overlay_visible && self.input.is_empty() => {
                         self.critic_expanded = !self.critic_expanded;
                     }
-                    KeyCode::Up if self.input.is_empty() => {
-                        self.message_log.scroll_up();
-                    }
-                    KeyCode::Down if self.input.is_empty() => {
-                        self.message_log.scroll_down();
-                    }
-                    KeyCode::PageUp => {
-                        for _ in 0..10 { self.message_log.scroll_up(); }
-                    }
-                    KeyCode::PageDown => {
-                        for _ in 0..10 { self.message_log.scroll_down(); }
-                    }
+                    KeyCode::Up if self.input.is_empty() => { self.message_log.scroll_up(); }
+                    KeyCode::Down if self.input.is_empty() => { self.message_log.scroll_down(); }
+                    KeyCode::PageUp => { for _ in 0..10 { self.message_log.scroll_up(); } }
+                    KeyCode::PageDown => { for _ in 0..10 { self.message_log.scroll_down(); } }
+                    // ── Trigger menus on / and @ ──────────────────────────────
                     KeyCode::Char('/') if self.input.is_empty() => {
                         self.input.push('/');
                         self.slash_menu.show();
                     }
+                    KeyCode::Char('@') if self.input.is_empty() => {
+                        self.input.push('@');
+                        self.at_menu.show();
+                    }
+                    // ── Regular character input ───────────────────────────────
                     KeyCode::Char(c) => {
                         self.input.push(c);
                         if self.input.starts_with('/') {
                             self.slash_menu.filter(&self.input);
+                        } else if self.input.starts_with('@') {
+                            self.at_menu.filter(&self.input);
                         }
                     }
                     KeyCode::Backspace => {
                         self.input.pop();
                         if self.input.starts_with('/') {
                             self.slash_menu.filter(&self.input);
+                        } else if self.input.starts_with('@') {
+                            self.at_menu.filter(&self.input);
                         } else if self.input.is_empty() {
                             self.slash_menu.hide();
+                            self.at_menu.hide();
                         }
                     }
                     KeyCode::Enter => {
+                        // Slash menu: Enter executes the highlighted command
+                        if self.slash_menu.visible {
+                            if let Some(cmd) = self.slash_menu.current().map(|s| s.to_string()) {
+                                self.input = cmd;
+                            }
+                            self.slash_menu.hide();
+                        }
+                        // @ menu: Enter inserts the target into input (user still types message)
+                        if self.at_menu.visible {
+                            if let Some(cmd) = self.at_menu.current().map(|s| format!("{} ", s)) {
+                                self.input = cmd;
+                            }
+                            self.at_menu.hide();
+                            return; // don't send yet — let user finish the message
+                        }
                         let msg = self.input.trim().to_string();
                         if !msg.is_empty() {
                             if msg == "/help" {
@@ -535,17 +573,20 @@ impl TuiApp {
                             } else if msg == "/quit" {
                                 self.should_quit = true;
                             } else if msg == "/about" {
-                                self.message_log.add_system("MowisAI v1.0 — multi-agent conductor system");
+                                self.message_log.add_system("MowisAI v1.0 — multi-agent conductor");
                             } else {
                                 self.send_message(msg).await;
                             }
                         }
                         self.input.clear();
                         self.slash_menu.hide();
+                        self.at_menu.hide();
                     }
                     KeyCode::Esc => {
                         if self.slash_menu.visible {
                             self.slash_menu.hide();
+                        } else if self.at_menu.visible {
+                            self.at_menu.hide();
                         } else {
                             self.input.clear();
                         }
@@ -588,7 +629,14 @@ impl TuiApp {
     }
 
     fn draw_main(&mut self, f: &mut Frame) {
-        let area = f.size().inner(&Margin { horizontal: 1, vertical: 0 });
+        // Pitch-black background across the whole terminal
+        f.render_widget(
+            Block::default().style(Style::default().bg(Color::Black)),
+            f.size(),
+        );
+
+        // 2-cell gutters on each side guarantee no text ever reaches the edge
+        let area = f.size().inner(&Margin { horizontal: 2, vertical: 0 });
 
         if self.overlay_visible {
             let chunks = Layout::default()
@@ -627,57 +675,49 @@ impl TuiApp {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),  // title bar
-                    Constraint::Min(1),     // message log (has its own rounded block)
-                    Constraint::Length(3),  // input block (border + 1 content row + border)
-                    Constraint::Length(1),  // footer hints
+                    Constraint::Length(1),  // title
+                    Constraint::Min(1),     // message log — no border, layout is the boundary
+                    Constraint::Length(3),  // input block
+                    Constraint::Length(1),  // footer
                 ])
                 .split(area);
 
-            // ── Title bar ────────────────────────────────────────────
-            let (status_label, status_color) = if self.orchestrator_started {
-                ("ready ●", GREEN)
-            } else {
-                ("starting ●", DIM)
-            };
-            let right_len = status_label.chars().count();
-            let left = "◈  MowisAI  ·  multi-agent conductor";
-            let left_len = left.chars().count();
-            let pad = (chunks[0].width as usize).saturating_sub(left_len + right_len);
+            // ── Title bar — brand only, no status clutter ─────────────
             let title_line = Line::from(vec![
                 Span::styled("◈  ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
                 Span::styled("MowisAI", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled("  ·  multi-agent conductor", Style::default().fg(DIM)),
-                Span::raw(" ".repeat(pad)),
-                Span::styled(status_label, Style::default().fg(status_color)),
             ]);
-            f.render_widget(Paragraph::new(title_line), chunks[0]);
+            f.render_widget(
+                Paragraph::new(title_line).style(Style::default().bg(Color::Black)),
+                chunks[0],
+            );
 
-            // ── Message log ──────────────────────────────────────────
+            // ── Message log — no visible border ───────────────────────
             self.message_log.render(f, chunks[1]);
 
-            // ── Input block ──────────────────────────────────────────
+            // ── Input block — invisible border until active ───────────
             let active = !self.input.is_empty();
+            let border_col = if active { PURPLE } else { Color::Black };
             let input_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(if active { PURPLE } else { BORDER }));
+                .border_style(Style::default().fg(border_col))
+                .style(Style::default().bg(Color::Black));
             let input_inner = input_block.inner(chunks[2]);
             f.render_widget(input_block, chunks[2]);
 
             let line_count = self.input.split('\n').count();
             let char_count = self.input.chars().count();
-            // available width = inner width minus "❯ " prefix (2 chars) minus 1 for cursor
             let avail = input_inner.width.saturating_sub(3) as usize;
             let compact = line_count > 1 || char_count > avail;
 
             let (input_span, text_cols) = if self.input.is_empty() {
-                (Span::styled("Type a message…  / for commands", Style::default().fg(DIM)), 0usize)
+                (Span::styled("Message  ·  / commands  ·  @ agents", Style::default().fg(DIM)), 0usize)
             } else if compact {
                 let label = if line_count > 1 {
-                    format!("[ {} lines · {} chars  ·  Enter to send, Esc to clear ]", line_count, char_count)
+                    format!("[ {} lines · {} chars  ·  Enter ↵  Esc ✕ ]", line_count, char_count)
                 } else {
-                    format!("[ {} chars  ·  Enter to send, Esc to clear ]", char_count)
+                    format!("[ {} chars  ·  Enter ↵  Esc ✕ ]", char_count)
                 };
                 let w = label.chars().count();
                 (Span::styled(label, Style::default().fg(CYAN)), w)
@@ -689,28 +729,32 @@ impl TuiApp {
                 Span::styled("❯ ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
                 input_span,
             ]);
-            f.render_widget(Paragraph::new(prompt_line), input_inner);
+            f.render_widget(
+                Paragraph::new(prompt_line).style(Style::default().bg(Color::Black)),
+                input_inner,
+            );
 
-            // Cursor: after "❯ " (2 cols) + text, clamped to inner width
             let max_col = input_inner.width.saturating_sub(1) as usize;
             let cursor_x = input_inner.x + (2 + text_cols).min(max_col) as u16;
             f.set_cursor(cursor_x, input_inner.y);
 
-            // ── Footer hints ─────────────────────────────────────────
+            // ── Footer hints ──────────────────────────────────────────
             let sep = Span::styled("  ·  ", Style::default().fg(BORDER));
             let key = |k: &'static str| Span::styled(k, Style::default().fg(PURPLE).add_modifier(Modifier::BOLD));
             let lbl = |l: &'static str| Span::styled(l, Style::default().fg(DIM));
-            let footer = Paragraph::new(Line::from(vec![
-                key("tab"), lbl(" overlay"), sep.clone(),
-                key("p"), lbl(" plan"), sep.clone(),
-                key("c"), lbl(" critic"), sep.clone(),
-                key("ctrl+c"), lbl(" quit"),
-            ]));
-            f.render_widget(footer, chunks[3]);
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    key("tab"), lbl(" overlay"), sep.clone(),
+                    key("p"), lbl(" plan"), sep.clone(),
+                    key("c"), lbl(" critic"), sep.clone(),
+                    key("ctrl+c"), lbl(" quit"),
+                ])).style(Style::default().bg(Color::Black)),
+                chunks[3],
+            );
 
-            if self.slash_menu.visible {
-                self.slash_menu.render(f, chunks[2]);
-            }
+            // Popup menus render above the input block
+            if self.slash_menu.visible { self.slash_menu.render(f, chunks[2]); }
+            if self.at_menu.visible    { self.at_menu.render(f, chunks[2]); }
         }
     }
 }
