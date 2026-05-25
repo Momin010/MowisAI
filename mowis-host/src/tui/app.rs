@@ -6,10 +6,10 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
     Frame, Terminal,
 };
 use std::io;
@@ -56,12 +56,11 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-const PURPLE: Color = Color::Rgb(109, 40, 217);
-const CYAN: Color = Color::Rgb(34, 211, 238);
-const GREEN: Color = Color::Rgb(34, 197, 94);
-const YELLOW: Color = Color::Rgb(234, 179, 8);
-const RED: Color = Color::Rgb(239, 68, 68);
-const DIM: Color = Color::Rgb(102, 102, 102);
+const PURPLE: Color = Color::Rgb(139, 92, 246);
+const CYAN:   Color = Color::Rgb(34, 211, 238);
+const GREEN:  Color = Color::Rgb(74, 222, 128);
+const DIM:    Color = Color::Rgb(71, 85, 105);
+const BORDER: Color = Color::Rgb(51, 65, 85);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppScreen {
@@ -614,112 +613,103 @@ impl TuiApp {
             self.critic_panel.render(f, panel_chunks[1], self.critic_expanded);
             self.captain_panel.render(f, panel_chunks[2]);
 
+            let sep = Span::styled("  ·  ", Style::default().fg(BORDER));
+            let key = |k: &'static str| Span::styled(k, Style::default().fg(PURPLE).add_modifier(Modifier::BOLD));
+            let lbl = |l: &'static str| Span::styled(l, Style::default().fg(DIM));
             let footer = Paragraph::new(Line::from(vec![
-                Span::styled("Tab", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                Span::raw(" Main • "),
-                Span::styled("P", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                Span::raw(" Plan • "),
-                Span::styled("C", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                Span::raw(" Critic • "),
-                Span::styled("Ctrl+c", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                Span::raw(" Exit"),
+                key("tab"), lbl(" main"), sep.clone(),
+                key("p"), lbl(" plan"), sep.clone(),
+                key("c"), lbl(" critic"), sep.clone(),
+                key("ctrl+c"), lbl(" quit"),
             ]));
             f.render_widget(footer, chunks[2]);
         } else {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
-                    Constraint::Length(2),
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
+                    Constraint::Length(1),  // title bar
+                    Constraint::Min(1),     // message log (has its own rounded block)
+                    Constraint::Length(3),  // input block (border + 1 content row + border)
+                    Constraint::Length(1),  // footer hints
                 ])
                 .split(area);
 
-            let header = Paragraph::new(vec![
-                Line::from(vec![
-                    Span::raw("Welcome to "),
-                    Span::styled("MowisAI", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                ]),
-                Line::from(Span::styled("multi-agent conductor system", Style::default().fg(DIM))),
-            ])
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(PURPLE)));
-            f.render_widget(header, chunks[0]);
-
-            let status = Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled("● ", Style::default().fg(GREEN)),
-                    Span::raw("Connected to MowisAI"),
-                ]),
+            // ── Title bar ────────────────────────────────────────────
+            let (status_label, status_color) = if self.orchestrator_started {
+                ("ready ●", GREEN)
+            } else {
+                ("starting ●", DIM)
+            };
+            let right_len = status_label.chars().count();
+            let left = "◈  MowisAI  ·  multi-agent conductor";
+            let left_len = left.chars().count();
+            let pad = (chunks[0].width as usize).saturating_sub(left_len + right_len);
+            let title_line = Line::from(vec![
+                Span::styled("◈  ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
+                Span::styled("MowisAI", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled("  ·  multi-agent conductor", Style::default().fg(DIM)),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(status_label, Style::default().fg(status_color)),
             ]);
-            f.render_widget(status, chunks[1]);
+            f.render_widget(Paragraph::new(title_line), chunks[0]);
 
-            self.message_log.render(f, chunks[2]);
+            // ── Message log ──────────────────────────────────────────
+            self.message_log.render(f, chunks[1]);
 
-            let divider = Paragraph::new("─".repeat(chunks[3].width as usize))
-                .style(Style::default().fg(PURPLE));
-            f.render_widget(divider, chunks[3]);
+            // ── Input block ──────────────────────────────────────────
+            let active = !self.input.is_empty();
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(if active { PURPLE } else { BORDER }));
+            let input_inner = input_block.inner(chunks[2]);
+            f.render_widget(input_block, chunks[2]);
 
-            // Render the input. Large or multi-line input (e.g. a paste or a
-            // dictation blob) is collapsed into a compact pill so it never
-            // overflows the one-line input bar.
-            let input_area = chunks[4];
             let line_count = self.input.split('\n').count();
             let char_count = self.input.chars().count();
-            let too_wide = char_count > input_area.width.saturating_sub(1) as usize;
-            let compact = line_count > 1 || too_wide;
+            // available width = inner width minus "❯ " prefix (2 chars) minus 1 for cursor
+            let avail = input_inner.width.saturating_sub(3) as usize;
+            let compact = line_count > 1 || char_count > avail;
 
-            let (input_span, cursor_cols) = if self.input.is_empty() {
-                (
-                    Span::styled("Type a message, / for commands", Style::default().fg(DIM)),
-                    0usize,
-                )
+            let (input_span, text_cols) = if self.input.is_empty() {
+                (Span::styled("Type a message…  / for commands", Style::default().fg(DIM)), 0usize)
             } else if compact {
                 let label = if line_count > 1 {
-                    format!(
-                        "[ pasted text — {} lines, {} chars · Enter to send, Esc to clear ]",
-                        line_count, char_count
-                    )
+                    format!("[ {} lines · {} chars  ·  Enter to send, Esc to clear ]", line_count, char_count)
                 } else {
-                    format!(
-                        "[ pasted text — {} chars · Enter to send, Esc to clear ]",
-                        char_count
-                    )
+                    format!("[ {} chars  ·  Enter to send, Esc to clear ]", char_count)
                 };
                 let w = label.chars().count();
                 (Span::styled(label, Style::default().fg(CYAN)), w)
             } else {
                 (Span::raw(self.input.as_str()), char_count)
             };
-            let input = Paragraph::new(Line::from(input_span));
-            f.render_widget(input, input_area);
 
-            // Cursor sits just after the rendered text/pill, clamped to the bar.
-            let max_col = input_area.width.saturating_sub(1) as usize;
-            let cursor_x = input_area.x + cursor_cols.min(max_col) as u16;
-            f.set_cursor(cursor_x, input_area.y);
+            let prompt_line = Line::from(vec![
+                Span::styled("❯ ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
+                input_span,
+            ]);
+            f.render_widget(Paragraph::new(prompt_line), input_inner);
 
-            let divider2 = Paragraph::new("─".repeat(chunks[5].width as usize))
-                .style(Style::default().fg(PURPLE));
-            f.render_widget(divider2, chunks[5]);
+            // Cursor: after "❯ " (2 cols) + text, clamped to inner width
+            let max_col = input_inner.width.saturating_sub(1) as usize;
+            let cursor_x = input_inner.x + (2 + text_cols).min(max_col) as u16;
+            f.set_cursor(cursor_x, input_inner.y);
 
+            // ── Footer hints ─────────────────────────────────────────
+            let sep = Span::styled("  ·  ", Style::default().fg(BORDER));
+            let key = |k: &'static str| Span::styled(k, Style::default().fg(PURPLE).add_modifier(Modifier::BOLD));
+            let lbl = |l: &'static str| Span::styled(l, Style::default().fg(DIM));
             let footer = Paragraph::new(Line::from(vec![
-                Span::styled("Tab", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                Span::raw(" Overlay • "),
-                Span::styled("P", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                Span::raw(" Plan • "),
-                Span::styled("C", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                Span::raw(" Critic • "),
-                Span::styled("Ctrl+c", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                Span::raw(" Exit"),
+                key("tab"), lbl(" overlay"), sep.clone(),
+                key("p"), lbl(" plan"), sep.clone(),
+                key("c"), lbl(" critic"), sep.clone(),
+                key("ctrl+c"), lbl(" quit"),
             ]));
-            f.render_widget(footer, chunks[6]);
+            f.render_widget(footer, chunks[3]);
 
             if self.slash_menu.visible {
-                self.slash_menu.render(f, chunks[4]);
+                self.slash_menu.render(f, chunks[2]);
             }
         }
     }

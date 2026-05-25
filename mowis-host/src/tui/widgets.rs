@@ -1,17 +1,19 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Alignment, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
-const PURPLE: Color = Color::Rgb(109, 40, 217);
-const CYAN: Color = Color::Rgb(34, 211, 238);
-const GREEN: Color = Color::Rgb(34, 197, 94);
-const YELLOW: Color = Color::Rgb(234, 179, 8);
-const RED: Color = Color::Rgb(239, 68, 68);
-const DIM: Color = Color::Rgb(102, 102, 102);
+const PURPLE: Color = Color::Rgb(139, 92, 246);
+const CYAN:   Color = Color::Rgb(34, 211, 238);
+const GREEN:  Color = Color::Rgb(74, 222, 128);
+const YELLOW: Color = Color::Rgb(251, 191, 36);
+const RED:    Color = Color::Rgb(248, 113, 113);
+const DIM:    Color = Color::Rgb(71, 85, 105);
+const INDIGO: Color = Color::Rgb(99, 102, 241);
+const BORDER: Color = Color::Rgb(51, 65, 85);
 
 fn markdown_to_lines(text: &str, prefix: &str, prefix_color: Color) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -280,8 +282,8 @@ impl MessageLog {
             });
         }
         self.lines.push(LogLine {
-            prefix: "• ".into(),
-            prefix_color: PURPLE,
+            prefix: "▸ ".into(),
+            prefix_color: INDIGO,
             text: text.to_string(),
             italic: false,
             dim: false,
@@ -407,23 +409,27 @@ impl MessageLog {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        // 1-cell horizontal breathing room inside the border
+        let content_area = inner.inner(&Margin { horizontal: 1, vertical: 0 });
+
         let mut spans: Vec<Line> = Vec::new();
         for line in &self.lines {
-            // Use markdown rendering for conductor messages (◈ prefix)
             if line.prefix == "◈ " && line.prefix_color == GREEN {
-                let md_lines = markdown_to_lines(&line.text, "◈ ", GREEN);
-                for md_line in md_lines {
+                for md_line in markdown_to_lines(&line.text, "◈ ", GREEN) {
                     spans.push(md_line);
                 }
             } else {
                 let prefix_style = Style::default().fg(line.prefix_color);
                 let mut text_style = Style::default().fg(Color::White);
-                if line.italic {
-                    text_style = text_style.add_modifier(Modifier::ITALIC);
-                }
-                if line.dim {
-                    text_style = text_style.fg(DIM);
-                }
+                if line.italic { text_style = text_style.add_modifier(Modifier::ITALIC); }
+                if line.dim    { text_style = text_style.fg(DIM); }
                 spans.push(Line::from(vec![
                     Span::styled(line.prefix.clone(), prefix_style),
                     Span::styled(line.text.clone(), text_style),
@@ -431,16 +437,13 @@ impl MessageLog {
             }
         }
 
-        // Show spinner at bottom if thinking
         if self.thinking {
             spans.push(Line::from(Span::styled(
-                format!("  {} thinking...", self.spinner_char()),
+                format!("  {} thinking…", self.spinner_char()),
                 Style::default().fg(YELLOW).add_modifier(Modifier::ITALIC),
             )));
         }
 
-        // Show streaming text if active (with markdown rendering), hiding the
-        // <plan> block so raw task TOML never floods the chat.
         if self.streaming && !self.streaming_text.is_empty() {
             let (visible, drafting) = Self::strip_plan_block(&self.streaming_text);
             if !visible.trim().is_empty() {
@@ -456,10 +459,24 @@ impl MessageLog {
             }
         }
 
-        // Cache content/viewport height (in rendered rows) so the scroll
-        // handlers can clamp correctly between frames.
-        let visible_height = area.height as usize;
-        let content_rows = Self::estimate_rows(&spans, area.width);
+        // Empty state: centered hint when there is nothing to show
+        if spans.is_empty() {
+            let h = content_area.height as usize;
+            let pad = h.saturating_sub(3) / 2;
+            for _ in 0..pad {
+                spans.push(Line::raw(""));
+            }
+            spans.push(
+                Line::from(Span::styled(
+                    "start a conversation",
+                    Style::default().fg(BORDER),
+                ))
+                .alignment(Alignment::Center),
+            );
+        }
+
+        let visible_height = content_area.height as usize;
+        let content_rows = Self::estimate_rows(&spans, content_area.width);
         self.content_rows = content_rows;
         self.viewport_height = visible_height;
 
@@ -473,7 +490,7 @@ impl MessageLog {
         let log = Paragraph::new(spans)
             .wrap(Wrap { trim: false })
             .scroll((scroll as u16, 0));
-        f.render_widget(log, area);
+        f.render_widget(log, content_area);
     }
 }
 
@@ -619,10 +636,11 @@ impl PlanPreview {
 
         let block = Block::default()
             .title(Line::from(vec![
-                Span::styled("Plan Preview", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(" (P)", Style::default().fg(DIM)),
+                Span::styled(" Plan Preview", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(" (P) ", Style::default().fg(DIM)),
             ]))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color));
 
         let paragraph = Paragraph::new(content).block(block);
@@ -745,10 +763,11 @@ impl CriticPanel {
 
         let block = Block::default()
             .title(Line::from(vec![
-                Span::styled("Critic Review", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(" (C)", Style::default().fg(DIM)),
+                Span::styled(" Critic Review", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(" (C) ", Style::default().fg(DIM)),
             ]))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color));
 
         let paragraph = Paragraph::new(content).block(block);
@@ -920,8 +939,12 @@ impl CaptainPanel {
         }
 
         let block = Block::default()
-            .title(Span::styled("Captain Panel", Style::default().add_modifier(Modifier::BOLD)))
+            .title(Line::from(vec![
+                Span::styled(" Captain Panel", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(" ", Style::default()),
+            ]))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(PURPLE));
 
         let paragraph = Paragraph::new(lines).block(block);
@@ -994,6 +1017,7 @@ impl SlashMenu {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(PURPLE))
             .style(Style::default().bg(Color::Rgb(13, 13, 26)));
 
