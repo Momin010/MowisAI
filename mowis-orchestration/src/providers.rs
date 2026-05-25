@@ -70,6 +70,14 @@ impl AgentConversation {
         self.messages.push(ConvMessage::User(text));
     }
 
+    pub fn push_assistant(&mut self, text: String) {
+        self.messages.push(ConvMessage::AssistantText(text));
+    }
+
+    pub fn push_assistant_tool_calls(&mut self, calls: Vec<ToolCall>) {
+        self.messages.push(ConvMessage::AssistantToolCalls(calls));
+    }
+
     pub fn push_tool_results(&mut self, results: Vec<(ToolCall, serde_json::Value)>) {
         let normalized: Vec<(String, String, serde_json::Value)> = results
             .into_iter()
@@ -1174,4 +1182,198 @@ async fn generate_chat_openai_streaming(
     }
 
     Ok(full_text)
+}
+
+/// Streaming variant of `call_agent_round`: streams assistant text to `token_tx`
+/// as it arrives while still collecting any tool calls. Lets the Conductor keep
+/// token-by-token streaming AND call tools (e.g. `save_to_host`). Providers
+/// without a streaming tool path fall back to a normal round, emitting the full
+/// text once so the UI still updates.
+pub async fn call_agent_round_streaming(
+    llm_config: &LlmConfig,
+    conversation: &AgentConversation,
+    tool_schemas: &[serde_json::Value],
+    system_prompt: &str,
+    token_tx: mpsc::UnboundedSender<String>,
+) -> Result<AgentRoundResult> {
+    match llm_config.provider {
+        Provider::OpenAi | Provider::Grok | Provider::Groq | Provider::Mimo => {
+            call_agent_round_openai_compat_streaming(
+                llm_config,
+                conversation,
+                tool_schemas,
+                system_prompt,
+                token_tx,
+            )
+            .await
+        }
+        _ => {
+            let round =
+                call_agent_round(llm_config, conversation, tool_schemas, system_prompt).await?;
+            if let Some(t) = &round.text {
+                let _ = token_tx.send(t.clone());
+            }
+            Ok(round)
+        }
+    }
+}
+
+async fn call_agent_round_openai_compat_streaming(
+    llm_config: &LlmConfig,
+    conversation: &AgentConversation,
+    tool_schemas: &[serde_json::Value],
+    system_prompt: &str,
+    token_tx: mpsc::UnboundedSender<String>,
+) -> Result<AgentRoundResult> {
+    let (url, api_key) = openai_compat_url_and_key(llm_config)?;
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "system", "content": system_prompt})];
+    for msg in &conversation.messages {
+        match msg {
+            ConvMessage::User(text) => {
+                messages.push(serde_json::json!({"role": "user", "content": text}));
+            }
+            ConvMessage::AssistantText(text) => {
+                messages.push(serde_json::json!({"role": "assistant", "content": text}));
+            }
+            ConvMessage::AssistantToolCalls(calls) => {
+                let tool_calls: Vec<serde_json::Value> = calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": serde_json::to_string(&tc.args).unwrap_or_default()
+                            }
+                        })
+                    })
+                    .collect();
+                messages.push(serde_json::json!({"role": "assistant", "tool_calls": tool_calls}));
+            }
+            ConvMessage::ToolResults(results) => {
+                for (call_id, _name, result) in results {
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": serde_json::to_string(result).unwrap_or_default()
+                    }));
+                }
+            }
+        }
+    }
+    let tools: Vec<serde_json::Value> = tool_schemas
+        .iter()
+        .map(|schema| serde_json::json!({"type": "function", "function": schema}))
+        .collect();
+    let body = serde_json::json!({
+        "model": llm_config.model,
+        "messages": messages,
+        "tools": tools,
+        "temperature": 0.7,
+        "max_tokens": 16384u32,
+        "stream": true,
+    });
+
+    let client = &*HTTP_CLIENT;
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(900))
+        .send()
+        .await
+        .context("OpenAI-compat streaming round failed")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("{} API error ({}): {}", llm_config.provider, status, text));
+    }
+
+    let mut full_text = String::new();
+    // index -> (id, name, accumulated arguments JSON fragment)
+    let mut tool_accum: std::collections::BTreeMap<i64, (String, String, String)> =
+        std::collections::BTreeMap::new();
+    let mut stream = response.bytes_stream();
+    use futures_util::StreamExt;
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading stream chunk")?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(line_end) = buffer.find('\n') {
+            let line = buffer[..line_end].trim().to_string();
+            buffer = buffer[line_end + 1..].to_string();
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    continue;
+                }
+                let event = match serde_json::from_str::<serde_json::Value>(data) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let delta = event
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("delta"));
+                let Some(delta) = delta else { continue };
+
+                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                    if !content.is_empty() {
+                        full_text.push_str(content);
+                        let _ = token_tx.send(content.to_string());
+                    }
+                }
+
+                if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                    for tc in tcs {
+                        let idx = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
+                        let entry = tool_accum.entry(idx).or_default();
+                        if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                            if !id.is_empty() {
+                                entry.0 = id.to_string();
+                            }
+                        }
+                        if let Some(name) = tc
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                        {
+                            if !name.is_empty() {
+                                entry.1 = name.to_string();
+                            }
+                        }
+                        if let Some(args) = tc
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|a| a.as_str())
+                        {
+                            entry.2.push_str(args);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let tool_calls: Vec<ToolCall> = tool_accum
+        .into_iter()
+        .map(|(_, (id, name, args))| ToolCall {
+            id,
+            name,
+            args: serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({})),
+        })
+        .filter(|tc| !tc.name.is_empty())
+        .collect();
+
+    let text = if full_text.is_empty() {
+        None
+    } else {
+        Some(full_text)
+    };
+    Ok(AgentRoundResult { text, tool_calls })
 }

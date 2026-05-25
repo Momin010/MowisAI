@@ -106,13 +106,28 @@ pub struct Issue {
 }
 
 fn parse_verdict(response: &str) -> Result<Verdict> {
-    let parsed: serde_json::Value = serde_json::from_str(response)
-        .unwrap_or_else(|_| serde_json::json!({"verdict": "approve", "summary": response}));
+    // A critic that cannot be parsed must NOT silently approve. When the
+    // response is unintelligible, fall back to requesting a revision so the
+    // plan gets another look rather than sailing through.
+    let parsed: serde_json::Value = match serde_json::from_str(response) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "critic: could not parse verdict JSON, defaulting to revise");
+            return Ok(Verdict::Revise {
+                issues: vec![Issue {
+                    severity: "warn".into(),
+                    section: "overview.md".into(),
+                    message: "Critic response could not be parsed; requesting a revision so the plan is reviewed again.".into(),
+                    suggested_fix: None,
+                }],
+            });
+        }
+    };
 
     let verdict_str = parsed
         .get("verdict")
         .and_then(|v| v.as_str())
-        .unwrap_or("approve");
+        .unwrap_or("revise");
 
     match verdict_str {
         "approve" => Ok(Verdict::Approve),
@@ -129,7 +144,46 @@ fn parse_verdict(response: &str) -> Result<Verdict> {
             let issues = parse_issues(&parsed);
             Ok(Verdict::Block { reason, issues })
         }
-        _ => Ok(Verdict::Approve),
+        // Unknown verdict string: treat as a revision request, never a free pass.
+        _ => Ok(Verdict::Revise {
+            issues: parse_issues(&parsed),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unparseable_response_requests_revision_not_approval() {
+        // A critic whose output we can't parse must never be a free pass.
+        let verdict = parse_verdict("the model rambled without JSON").unwrap();
+        assert!(matches!(verdict, Verdict::Revise { .. }));
+    }
+
+    #[test]
+    fn unknown_verdict_string_requests_revision() {
+        let verdict = parse_verdict(r#"{"verdict": "looks-fine"}"#).unwrap();
+        assert!(matches!(verdict, Verdict::Revise { .. }));
+    }
+
+    #[test]
+    fn explicit_approve_still_approves() {
+        let verdict = parse_verdict(r#"{"verdict": "approve"}"#).unwrap();
+        assert!(matches!(verdict, Verdict::Approve));
+    }
+
+    #[test]
+    fn revise_carries_issues() {
+        let verdict = parse_verdict(
+            r#"{"verdict":"revise","issues":[{"severity":"warn","section":"tasks.toml","message":"too broad"}]}"#,
+        )
+        .unwrap();
+        match verdict {
+            Verdict::Revise { issues } => assert_eq!(issues.len(), 1),
+            _ => panic!("expected revise"),
+        }
     }
 }
 

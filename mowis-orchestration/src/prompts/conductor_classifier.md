@@ -36,3 +36,4 @@ The `task` field is REQUIRED for `hot_patch` and must be omitted for other decis
 - When in doubt, classify as `informational`
 - Only use `scope_change` if the user explicitly wants to change direction
 - `hot_patch` tasks should be self-contained and not conflict with in-flight work
+- If the user asks to save, export, download, or keep the project, classify as `informational` — the Conductor handles saving via its own tool, not via a task.

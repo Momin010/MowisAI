@@ -19,7 +19,6 @@ use mowis_orchestration::config::{ModelRef, OrchConfig, ProviderCreds};
 use mowis_orchestration::conductor::Conductor;
 use mowis_orchestration::critic::Critic;
 use mowis_orchestration::events::{Event, EventBus};
-use mowis_orchestration::plan::PlanId;
 use mowis_orchestration::providers::Provider;
 
 #[derive(Debug, Parser)]
@@ -245,12 +244,37 @@ async fn main() -> Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(log_level)
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_line_number(true)
-        .init();
+
+    // The no-arg TUI runs in the alternate screen; logs written to stdout/stderr
+    // would corrupt its rendering (garbled layout, broken input bar). In that
+    // mode, send logs to a file instead. All other modes log to stdout as usual.
+    let tui_mode = cli.prompt.is_none() && cli.cmd.is_none();
+    if tui_mode {
+        let log_dir = OrchConfig::config_dir();
+        let _ = std::fs::create_dir_all(&log_dir);
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_dir.join("mowis.log"))
+        {
+            Ok(file) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(log_level)
+                    .with_ansi(false)
+                    .with_writer(move || file.try_clone().expect("clone log file handle"))
+                    .init();
+            }
+            // If we can't open the log file, stay silent rather than corrupt the TUI.
+            Err(_) => {}
+        }
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(log_level)
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_line_number(true)
+            .init();
+    }
 
     // Handle -p flag (autonomous mode) first
     if let Some(ref prompt) = cli.prompt {
@@ -709,6 +733,24 @@ async fn run_chat(
     if let Some(ref p) = project {
         println!("Project: {}", p.display());
     }
+
+    // Per-session sandbox workspace. Crews build here across every plan in this
+    // session, so follow-up requests iterate on the same files. Nothing is
+    // written to the user's project until they explicitly ask to save.
+    let session_id = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+    let session_workspace = std::path::PathBuf::from(".mowis/sessions")
+        .join(&session_id)
+        .join("workspace");
+    std::fs::create_dir_all(&session_workspace)?;
+    let session_workspace = session_workspace.canonicalize()?;
+
+    // The Conductor's save_to_host tool copies the sandbox here on request.
+    let save_dest = project
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    conductor.set_workspace(session_workspace.clone(), save_dest);
+
+    println!("Session sandbox: {}", session_workspace.display());
     println!("Type your message and press Enter. Type 'quit' to exit.\n");
 
     let stdin = std::io::stdin();
@@ -729,57 +771,49 @@ async fn run_chat(
             break;
         }
 
-        match conductor.handle_user_message(line.to_string()).await {
-            Ok(mowis_orchestration::conductor::ConductorReply::Chat { reply }) => {
-                println!("\n{}\n", reply);
-            }
-            Ok(mowis_orchestration::conductor::ConductorReply::PlanDrafted {
-                plan_id, ..
-            }) => {
-                println!("\nType 'approve' to approve or 'cancel' to cancel.\n");
-
-                print!("> ");
-                std::io::stdout().flush()?;
-                let mut approval = String::new();
-                stdin.read_line(&mut approval)?;
-                let approval = approval.trim();
-                if approval == "approve" || approval == "y" || approval == "yes" {
-                    bus.emit(Event::UserApproved {
-                        plan_id: plan_id.clone(),
-                    });
-                    println!("Plan approved! Captain starting...\n");
-
-                    let captain = SimpleCaptain::new(&cfg, plan_id, bus.clone())?;
-                    match captain.run().await {
-                        Ok(mowis_orchestration::captain::CaptainOutcome::Completed {
-                            sandbox_id,
-                        }) => {
-                            println!("\n✓ Plan completed! Sandbox: {}", sandbox_id);
-                        }
-                        Ok(mowis_orchestration::captain::CaptainOutcome::Failed {
-                            reason, ..
-                        }) => {
-                            eprintln!("\n✗ Plan failed: {}", reason);
-                        }
-                        Ok(mowis_orchestration::captain::CaptainOutcome::Aborted) => {
-                            println!("\nPlan aborted.");
-                        }
+        // Resolve the conductor's reply into an optional plan to build.
+        use mowis_orchestration::conductor::ConductorReply;
+        let plan_to_run: Option<mowis_orchestration::plan::PlanId> =
+            match conductor.handle_user_message(line.to_string()).await {
+                Ok(ConductorReply::Chat { reply }) => {
+                    println!("\n{}\n", reply);
+                    None
+                }
+                Ok(ConductorReply::PlanDrafted { plan_id, .. })
+                | Ok(ConductorReply::PlanRevised { plan_id, .. })
+                | Ok(ConductorReply::Awaiting { plan_id }) => Some(plan_id),
+                Ok(ConductorReply::ScopeChanged { new_plan_id }) => {
+                    println!("\n(Replacing the previous plan with a new one.)\n");
+                    Some(new_plan_id)
+                }
+                Ok(ConductorReply::HotPatched { task, .. }) => {
+                    // A follow-up tweak: wrap it in a one-task plan that runs on
+                    // the existing workspace.
+                    match conductor.materialize_task_as_plan(task).await {
+                        Ok(pid) => Some(pid),
                         Err(e) => {
-                            eprintln!("\nCaptain error: {}", e);
+                            eprintln!("Error preparing follow-up: {}", e);
+                            None
                         }
                     }
-                } else {
-                    bus.emit(Event::UserCancelled {
-                        plan_id,
-                    });
-                    println!("Plan cancelled.\n");
                 }
-            }
-            Ok(other) => {
-                println!("{:?}", other);
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
+                Ok(ConductorReply::Error { message }) => {
+                    eprintln!("Error: {}", message);
+                    None
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    None
+                }
+            };
+
+        if let Some(plan_id) = plan_to_run {
+            if ask_approval(&stdin)? {
+                run_plan_and_report(&cfg, &mut conductor, plan_id, &bus, &session_workspace)
+                    .await?;
+            } else {
+                bus.emit(Event::UserCancelled { plan_id });
+                println!("Cancelled.\n");
             }
         }
     }
@@ -787,6 +821,68 @@ async fn run_chat(
     bus.emit(Event::ConversationEnded);
     print_handle.abort();
     critic_handle.abort();
+    Ok(())
+}
+
+/// Prompt the user to approve a drafted plan. Returns true to build.
+fn ask_approval(stdin: &std::io::Stdin) -> Result<bool> {
+    use std::io::Write;
+    println!("\nType 'approve' to build it, or anything else to cancel.");
+    print!("> ");
+    std::io::stdout().flush()?;
+    let mut approval = String::new();
+    stdin.read_line(&mut approval)?;
+    let approval = approval.trim();
+    Ok(approval == "approve" || approval == "y" || approval == "yes")
+}
+
+/// Run an approved plan in the session workspace, then have the Conductor report
+/// what was built and offer next steps. Output stays in the sandbox.
+async fn run_plan_and_report(
+    cfg: &OrchConfig,
+    conductor: &mut mowis_orchestration::conductor::Conductor,
+    plan_id: mowis_orchestration::plan::PlanId,
+    bus: &EventBus,
+    work_dir: &std::path::Path,
+) -> Result<()> {
+    use mowis_orchestration::captain::CaptainOutcome;
+    use mowis_orchestration::plan::Plan;
+
+    bus.emit(Event::UserApproved {
+        plan_id: plan_id.clone(),
+    });
+    println!("Plan approved! Captain starting...\n");
+
+    let captain =
+        SimpleCaptain::new_in(cfg, plan_id.clone(), bus.clone(), work_dir.to_path_buf())?;
+    match captain.run().await {
+        Ok(CaptainOutcome::Completed { .. }) => {
+            let summary = match Plan::load(&cfg.plans_dir, &plan_id) {
+                Ok(p) => p
+                    .task_graph()
+                    .tasks
+                    .iter()
+                    .map(|t| format!("- {}", t.title))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Err(_) => "(build completed)".to_string(),
+            };
+            println!("\n✓ Build staged in sandbox: {}\n", work_dir.display());
+            match conductor.announce_completion(&summary).await {
+                Ok(msg) => println!("{}\n", msg),
+                Err(e) => eprintln!("(could not summarize build: {})", e),
+            }
+        }
+        Ok(CaptainOutcome::Failed { reason, .. }) => {
+            eprintln!("\n✗ Plan failed: {}", reason);
+        }
+        Ok(CaptainOutcome::Aborted) => {
+            println!("\nPlan aborted.");
+        }
+        Err(e) => {
+            eprintln!("\nCaptain error: {}", e);
+        }
+    }
     Ok(())
 }
 
@@ -959,9 +1055,16 @@ async fn run_autonomous(cfg: OrchConfig, prompt: String, use_vm: bool, verbose: 
     });
     println!("[init] Critic ready");
 
-    // Step 5: Send the prompt to conductor
+    // Step 5: Send the prompt to conductor.
+    // Autonomous mode is non-interactive: the converse-first Conductor would
+    // otherwise stop to ask clarifying questions, so we authorize it to make
+    // reasonable assumptions and draft a plan immediately.
     println!("\n[conductor] Processing prompt...\n");
-    let reply = conductor.handle_user_message(prompt.clone()).await?;
+    let autonomous_prompt = format!(
+        "{}\n\n[Autonomous mode: the user is not available to answer questions. Make reasonable assumptions about any unspecified details and draft a plan now. Keep the scope to exactly what was asked.]",
+        prompt
+    );
+    let reply = conductor.handle_user_message(autonomous_prompt).await?;
 
     match reply {
         ConductorReply::PlanDrafted { plan_id, version } => {
@@ -976,9 +1079,10 @@ async fn run_autonomous(cfg: OrchConfig, prompt: String, use_vm: bool, verbose: 
             bus.emit(Event::UserApproved { plan_id: plan_id.clone() });
             bus.emit(Event::PlanApproved { plan_id: plan_id.clone() });
 
-            // Run captain
+            // Run captain — crews build inside the sandbox work_dir, which is
+            // copied to the user's directory only after a successful completion.
             println!("[captain] Starting execution...\n");
-            let captain = SimpleCaptain::new(&cfg, plan_id, bus.clone())?;
+            let captain = SimpleCaptain::new_in(&cfg, plan_id, bus.clone(), work_dir.clone())?;
             match captain.run().await {
                 Ok(mowis_orchestration::captain::CaptainOutcome::Completed { sandbox_id }) => {
                     println!("\n[done] ✓ Plan completed successfully! Sandbox: {}", sandbox_id);

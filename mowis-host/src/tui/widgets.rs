@@ -136,13 +136,19 @@ fn parse_inline_markdown(text: &str) -> Vec<Span<'static>> {
 
 pub struct MessageLog {
     lines: Vec<LogLine>,
+    /// Scroll position measured in rendered rows from the top of the content.
     scroll_offset: usize,
     pub thinking: bool,
     spinner_frame: usize,
     pub streaming: bool,
     pub had_streaming: bool,
     streaming_text: String,
+    /// When true, the view is pinned to the bottom (latest messages).
     pub auto_scroll: bool,
+    /// Content height (in rendered rows) and viewport height from the last
+    /// render. Cached so the scroll handlers can clamp without re-rendering.
+    content_rows: usize,
+    viewport_height: usize,
 }
 
 struct LogLine {
@@ -155,22 +161,33 @@ struct LogLine {
 
 impl MessageLog {
     pub fn new() -> Self {
-        Self { lines: Vec::new(), scroll_offset: 0, thinking: false, spinner_frame: 0, streaming: false, had_streaming: false, streaming_text: String::new(), auto_scroll: true }
+        Self { lines: Vec::new(), scroll_offset: 0, thinking: false, spinner_frame: 0, streaming: false, had_streaming: false, streaming_text: String::new(), auto_scroll: true, content_rows: 0, viewport_height: 0 }
+    }
+
+    /// Maximum scroll offset (in rendered rows) — the offset that shows the
+    /// last line at the bottom of the viewport.
+    fn max_scroll(&self) -> usize {
+        self.content_rows.saturating_sub(self.viewport_height)
     }
 
     pub fn scroll_up(&mut self) {
-        self.auto_scroll = false;
-        if self.scroll_offset > 0 {
-            self.scroll_offset -= 1;
+        // If pinned to the bottom, anchor at the current bottom before moving
+        // up — otherwise the first keypress would jump to the very top.
+        if self.auto_scroll {
+            self.scroll_offset = self.max_scroll();
+            self.auto_scroll = false;
         }
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
     pub fn scroll_down(&mut self) {
-        if self.scroll_offset < self.lines.len() {
-            self.scroll_offset += 1;
+        if self.auto_scroll {
+            return; // already at the bottom
         }
-        // Re-enable auto-scroll if we're at the bottom
-        if self.scroll_offset >= self.lines.len().saturating_sub(10) {
+        let max = self.max_scroll();
+        self.scroll_offset = (self.scroll_offset + 1).min(max);
+        // Reaching the bottom re-pins the view so new messages keep following.
+        if self.scroll_offset >= max {
             self.auto_scroll = true;
         }
     }
@@ -203,15 +220,39 @@ impl MessageLog {
     pub fn finish_streaming(&mut self) {
         if self.streaming {
             self.streaming = false;
-            // Store as a special log line that will be rendered with markdown
-            self.lines.push(LogLine {
-                prefix: "◈ ".into(),
-                prefix_color: GREEN,
-                text: self.streaming_text.clone(),
-                italic: false,
-                dim: false,
-            });
+            // Drop the <plan> block — the raw task TOML belongs in the plan
+            // panel, not dumped into the chat. Keep any surrounding prose.
+            let (visible, _) = Self::strip_plan_block(&self.streaming_text);
+            let visible = visible.trim().to_string();
+            if !visible.is_empty() {
+                self.lines.push(LogLine {
+                    prefix: "◈ ".into(),
+                    prefix_color: GREEN,
+                    text: visible,
+                    italic: false,
+                    dim: false,
+                });
+            }
             self.streaming_text.clear();
+        }
+    }
+
+    /// Hide the `<plan>...</plan>` block from chat display. Returns the visible
+    /// text (prose around the block) and whether a plan block is currently open
+    /// but not yet closed (i.e. still streaming).
+    fn strip_plan_block(text: &str) -> (String, bool) {
+        match text.find("<plan>") {
+            None => (text.to_string(), false),
+            Some(start) => {
+                let before = text[..start].trim_end();
+                match text[start..].find("</plan>") {
+                    Some(end_rel) => {
+                        let after = &text[start + end_rel + "</plan>".len()..];
+                        (format!("{}{}", before, after), false)
+                    }
+                    None => (before.to_string(), true),
+                }
+            }
         }
     }
 
@@ -297,7 +338,7 @@ impl MessageLog {
             italic: true,
             dim: true,
         });
-        self.scroll_offset = self.lines.len();
+        self.auto_scroll = true;
     }
 
     pub fn stop_thinking(&mut self) {
@@ -352,7 +393,20 @@ impl MessageLog {
         self.lines.clear();
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    /// Estimate how many rendered rows a set of lines occupies once wrapped to
+    /// `width`. Used to anchor scrolling to the true bottom of the content.
+    fn estimate_rows(spans: &[Line], width: u16) -> usize {
+        let w = (width.max(1)) as usize;
+        spans
+            .iter()
+            .map(|line| {
+                let lw = line.width();
+                if lw == 0 { 1 } else { (lw + w - 1) / w }
+            })
+            .sum()
+    }
+
+    pub fn render(&mut self, f: &mut Frame, area: Rect) {
         let mut spans: Vec<Line> = Vec::new();
         for line in &self.lines {
             // Use markdown rendering for conductor messages (◈ prefix)
@@ -385,25 +439,35 @@ impl MessageLog {
             )));
         }
 
-        // Show streaming text if active (with markdown rendering)
+        // Show streaming text if active (with markdown rendering), hiding the
+        // <plan> block so raw task TOML never floods the chat.
         if self.streaming && !self.streaming_text.is_empty() {
-            let md_lines = markdown_to_lines(&self.streaming_text, "◈ ", GREEN);
-            for line in md_lines {
-                spans.push(line);
+            let (visible, drafting) = Self::strip_plan_block(&self.streaming_text);
+            if !visible.trim().is_empty() {
+                for line in markdown_to_lines(&visible, "◈ ", GREEN) {
+                    spans.push(line);
+                }
+            }
+            if drafting {
+                spans.push(Line::from(Span::styled(
+                    format!("  {} drafting plan…", self.spinner_char()),
+                    Style::default().fg(CYAN).add_modifier(Modifier::ITALIC),
+                )));
             }
         }
 
-        // Auto-scroll to bottom or use manual scroll
-        let total_lines = spans.len();
+        // Cache content/viewport height (in rendered rows) so the scroll
+        // handlers can clamp correctly between frames.
         let visible_height = area.height as usize;
-        let scroll = if self.auto_scroll || total_lines <= visible_height {
-            if total_lines > visible_height {
-                total_lines - visible_height
-            } else {
-                0
-            }
+        let content_rows = Self::estimate_rows(&spans, area.width);
+        self.content_rows = content_rows;
+        self.viewport_height = visible_height;
+
+        let max_scroll = content_rows.saturating_sub(visible_height);
+        let scroll = if self.auto_scroll {
+            max_scroll
         } else {
-            self.scroll_offset
+            self.scroll_offset.min(max_scroll)
         };
 
         let log = Paragraph::new(spans)
@@ -956,5 +1020,90 @@ impl SlashMenu {
 
         let menu = Paragraph::new(lines);
         f.render_widget(menu, inner);
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    // Build a log with a known content height and viewport, as render() would cache.
+    fn log_with(content_rows: usize, viewport: usize) -> MessageLog {
+        let mut log = MessageLog::new();
+        log.content_rows = content_rows;
+        log.viewport_height = viewport;
+        log
+    }
+
+    #[test]
+    fn first_scroll_up_anchors_at_bottom_not_top() {
+        // 100 rows of content, 20 visible => max scroll is 80.
+        let mut log = log_with(100, 20);
+        assert!(log.auto_scroll);
+        log.scroll_up();
+        // Must land just above the bottom (79), NOT jump to the top (0).
+        assert!(!log.auto_scroll);
+        assert_eq!(log.scroll_offset, 79);
+    }
+
+    #[test]
+    fn scroll_up_then_down_returns_and_repins() {
+        let mut log = log_with(100, 20); // max scroll = 80
+        log.scroll_up(); // 79
+        log.scroll_up(); // 78
+        assert_eq!(log.scroll_offset, 78);
+        log.scroll_down(); // 79
+        assert_eq!(log.scroll_offset, 79);
+        log.scroll_down(); // 80 -> re-pins to bottom
+        assert!(log.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_up_clamps_at_top() {
+        let mut log = log_with(25, 20); // max scroll = 5
+        for _ in 0..20 {
+            log.scroll_up();
+        }
+        assert_eq!(log.scroll_offset, 0);
+        assert!(!log.auto_scroll);
+    }
+
+    #[test]
+    fn content_shorter_than_viewport_has_no_scroll() {
+        let mut log = log_with(5, 20); // everything fits, max scroll = 0
+        log.scroll_up();
+        assert_eq!(log.scroll_offset, 0);
+    }
+}
+
+#[cfg(test)]
+mod plan_strip_tests {
+    use super::*;
+
+    #[test]
+    fn no_plan_passes_through() {
+        let (v, drafting) = MessageLog::strip_plan_block("Just a normal reply.");
+        assert_eq!(v, "Just a normal reply.");
+        assert!(!drafting);
+    }
+
+    #[test]
+    fn closed_plan_block_is_removed_keeping_prose() {
+        let text = "Here is the plan.\n<plan>\n[[task]]\nid=\"t1\"\n</plan>\nDone!";
+        let (v, drafting) = MessageLog::strip_plan_block(text);
+        assert!(!v.contains("[[task]]"));
+        assert!(!v.contains("<plan>"));
+        assert!(v.contains("Here is the plan."));
+        assert!(v.contains("Done!"));
+        assert!(!drafting);
+    }
+
+    #[test]
+    fn open_plan_block_reports_drafting_and_hides_toml() {
+        let text = "Spinning this up.\n<plan>\n[[task]]\nid=\"t1\"\ndescription=\"lots of code";
+        let (v, drafting) = MessageLog::strip_plan_block(text);
+        assert_eq!(v, "Spinning this up.");
+        assert!(!v.contains("[[task]]"));
+        assert!(drafting);
     }
 }

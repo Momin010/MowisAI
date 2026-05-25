@@ -47,12 +47,51 @@ pub fn execute_tool_local(tool_name: &str, input: &Value, work_dir: &PathBuf) ->
     }
 }
 
+/// Resolve a crew-supplied path *inside* the sandbox `work_dir`.
+///
+/// `work_dir` is treated as the sandbox root: an absolute path like
+/// `/index.html` maps to `work_dir/index.html` (crews say "/" to mean the
+/// project root, not the host filesystem root), and `..` components can never
+/// climb above `work_dir`. Without this, absolute paths escaped the sandbox and
+/// wrote to the host filesystem root.
 fn resolve_path(path: &str, work_dir: &PathBuf) -> PathBuf {
-    let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        work_dir.join(p)
+    use std::path::Component;
+    let mut rel: Vec<std::ffi::OsString> = Vec::new();
+    for comp in PathBuf::from(path).components() {
+        match comp {
+            // Drop any prefix/root/`.` — re-root everything into work_dir.
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+            // `..` pops within the sandbox but is clamped at the root.
+            Component::ParentDir => {
+                rel.pop();
+            }
+            Component::Normal(c) => rel.push(c.to_os_string()),
+        }
+    }
+    let mut out = work_dir.clone();
+    for c in rel {
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolute_paths_are_jailed_into_work_dir() {
+        let wd = PathBuf::from("/tmp/sandbox");
+        assert_eq!(resolve_path("/index.html", &wd), PathBuf::from("/tmp/sandbox/index.html"));
+        assert_eq!(resolve_path("index.html", &wd), PathBuf::from("/tmp/sandbox/index.html"));
+        assert_eq!(resolve_path("src/app.js", &wd), PathBuf::from("/tmp/sandbox/src/app.js"));
+    }
+
+    #[test]
+    fn parent_dir_cannot_escape_sandbox() {
+        let wd = PathBuf::from("/tmp/sandbox");
+        assert_eq!(resolve_path("../../etc/passwd", &wd), PathBuf::from("/tmp/sandbox/etc/passwd"));
+        assert_eq!(resolve_path("a/../b.txt", &wd), PathBuf::from("/tmp/sandbox/b.txt"));
     }
 }
 

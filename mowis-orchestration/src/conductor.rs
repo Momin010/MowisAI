@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::OrchConfig;
@@ -16,6 +17,10 @@ pub struct Conductor {
     conversation: Vec<String>,
     current_plan: Option<PlanId>,
     digest: SummaryDigestBuffer,
+    /// Session sandbox the crews build in. `save_to_host` copies from here.
+    workspace: Option<PathBuf>,
+    /// Where `save_to_host` writes to (the user's project dir, default cwd).
+    save_dest: PathBuf,
 }
 
 #[derive(Debug)]
@@ -98,8 +103,17 @@ impl Conductor {
             conversation: Vec::new(),
             current_plan: None,
             digest: SummaryDigestBuffer::new(512),
+            workspace: None,
+            save_dest: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         };
         Ok((conductor, cmd_tx))
+    }
+
+    /// Point the Conductor at the session sandbox (`workspace`) and the
+    /// destination its `save_to_host` tool should copy into (`save_dest`).
+    pub fn set_workspace(&mut self, workspace: PathBuf, save_dest: PathBuf) {
+        self.workspace = Some(workspace);
+        self.save_dest = save_dest;
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -161,8 +175,8 @@ impl Conductor {
             match self.classify_message(&msg).await {
                 Ok(classifier) => match classifier.decision {
                     ClassifierDecision::Informational => {
-                        // Just answer in chat
-                        let reply = self.chat_reply().await?;
+                        // Just answer in chat (with save_to_host available).
+                        let reply = self.conversational_turn().await?;
                         return Ok(ConductorReply::Chat { reply });
                     }
                     ClassifierDecision::HotPatch => {
@@ -216,7 +230,7 @@ impl Conductor {
         }
 
         // No plan running or classifier failed — normal flow
-        let reply = self.chat_reply().await?;
+        let reply = self.conversational_turn().await?;
 
         // Check if the LLM wants to draft a plan (contains <plan> tag)
         if reply.contains("<plan>") {
@@ -321,6 +335,111 @@ impl Conductor {
         Ok(response)
     }
 
+    /// A conversational turn that can call Conductor tools (currently
+    /// `save_to_host`). Replaces plain text chat so the Conductor can act on
+    /// requests like "save it" by invoking a real tool, not just talking.
+    async fn conversational_turn(&mut self) -> Result<String> {
+        let llm_config = self.cfg.llm_for(&crate::plan::Tier::Conductor)?;
+        let system_prompt = include_str!("prompts/conductor.md")
+            .replace("{{repo_root}}", ".")
+            .replace("{{conversation_id}}", "stdin-session");
+
+        // Seed the agent conversation from history (even = user, odd = assistant).
+        let mut convo = crate::providers::AgentConversation::new();
+        for (i, msg) in self.conversation.iter().enumerate() {
+            if i % 2 == 0 {
+                convo.push_user(msg.clone());
+            } else {
+                convo.push_assistant(msg.clone());
+            }
+        }
+
+        let tools = conductor_tool_schemas();
+        let mut final_text = String::new();
+
+        // Bounded tool loop so a misbehaving model can't spin forever.
+        for _ in 0..5 {
+            // Forward streamed tokens to the event bus so the UI renders the
+            // reply token-by-token (the streaming the TUI shows).
+            let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let fwd_bus = self.bus.clone();
+            let fwd = tokio::spawn(async move {
+                while let Some(t) = token_rx.recv().await {
+                    fwd_bus.emit(Event::StreamToken { text: t });
+                }
+            });
+
+            let round = crate::providers::call_agent_round_streaming(
+                &llm_config,
+                &convo,
+                &tools,
+                &system_prompt,
+                token_tx,
+            )
+            .await?;
+            let _ = fwd.await;
+
+            if round.tool_calls.is_empty() {
+                final_text = round.text.unwrap_or_default();
+                break;
+            }
+
+            // Record the assistant's tool-call turn, run each tool, feed results
+            // back, then loop so the model can stream a reply after the tool runs.
+            convo.push_assistant_tool_calls(round.tool_calls.clone());
+            let mut results = Vec::new();
+            for tc in &round.tool_calls {
+                let result = self.execute_conductor_tool(tc);
+                results.push((tc.clone(), result));
+            }
+            convo.push_tool_results(results);
+        }
+
+        self.bus.emit(Event::StreamDone);
+        self.conversation.push(final_text.clone());
+        Ok(final_text)
+    }
+
+    /// Dispatch a Conductor tool call.
+    fn execute_conductor_tool(&self, tc: &crate::providers::ToolCall) -> serde_json::Value {
+        match tc.name.as_str() {
+            "save_to_host" => {
+                let dest = tc.args.get("destination").and_then(|d| d.as_str());
+                self.execute_save_to_host(dest)
+            }
+            other => serde_json::json!({ "error": format!("unknown tool: {}", other) }),
+        }
+    }
+
+    /// Copy the session sandbox to the user's machine. This is the only path by
+    /// which sandbox output reaches the host — it runs only when the model calls
+    /// the `save_to_host` tool, which the prompt restricts to explicit requests.
+    fn execute_save_to_host(&self, dest_override: Option<&str>) -> serde_json::Value {
+        let workspace = match &self.workspace {
+            Some(w) => w,
+            None => return serde_json::json!({ "error": "no session sandbox is configured" }),
+        };
+        let dest = match dest_override {
+            Some(d) if !d.trim().is_empty() => self.save_dest.join(d.trim()),
+            _ => self.save_dest.clone(),
+        };
+        match copy_tree(workspace, &dest) {
+            Ok(count) => {
+                self.bus.emit(Event::ConductorReply {
+                    kind: ConductorReplyKind::Chat,
+                    text: format!("Saved {} files to {}", count, dest.display()),
+                });
+                tracing::info!(files = count, dest = %dest.display(), "saved sandbox to host");
+                serde_json::json!({
+                    "saved": true,
+                    "files": count,
+                    "destination": dest.display().to_string()
+                })
+            }
+            Err(e) => serde_json::json!({ "error": format!("save failed: {}", e) }),
+        }
+    }
+
     async fn classify_message(&self, msg: &str) -> Result<ClassifierOutput> {
         let llm_config = self.cfg.llm_for(&crate::plan::Tier::Crew)?; // cheap tier
 
@@ -372,9 +491,17 @@ impl Conductor {
         let mut plan = Plan::new_draft(plan_id.clone(), user_msg, "stdin-session");
 
         let llm_config = self.cfg.llm_for(&crate::plan::Tier::Conductor)?;
-        let system_prompt = include_str!("prompts/conductor.md")
-            .replace("{{repo_root}}", ".")
-            .replace("{{conversation_id}}", "stdin-session");
+        // draft_plan is only reached once the decision to build is made (a
+        // classifier NewPlan/ScopeChange). The base prompt is converse-first and
+        // withholds plans until confirmation, so append an override authorizing
+        // an immediate plan — otherwise the model may return questions and we'd
+        // emit an empty plan.
+        let system_prompt = format!(
+            "{}\n\n---\n[Build authorized: the user wants this built now. Output the <plan>...</plan> block directly. Do NOT ask further questions or reply conversationally.]",
+            include_str!("prompts/conductor.md")
+                .replace("{{repo_root}}", ".")
+                .replace("{{conversation_id}}", "stdin-session")
+        );
 
         let history: Vec<serde_json::Value> = self
             .conversation
@@ -518,12 +645,131 @@ impl Conductor {
         Ok(())
     }
 
+    /// After a build finishes, produce a message that tells the user what was
+    /// built and offers to iterate further or save to their machine. The output
+    /// lives only in the session sandbox until the user explicitly asks to save,
+    /// so this must NOT claim anything has been persisted.
+    pub async fn announce_completion(&mut self, built_summary: &str) -> Result<String> {
+        self.conversation.push(format!(
+            "[System] The build finished. The output is staged in the session sandbox and has NOT been saved to the user's machine yet. What was built:\n{}\n\nTell the user briefly what you built, then ask whether they want to change or add anything, or save it to their project. Do not claim it has been saved.",
+            built_summary
+        ));
+        let reply = self.chat_reply().await?;
+        Ok(self.strip_tool_calls(&reply))
+    }
+
+    /// Wrap a single task (e.g. a hot-patch from mid-conversation) into a
+    /// throwaway one-task plan so the Captain can run it on the session
+    /// workspace. Returns the new plan id and sets it as the current plan.
+    pub async fn materialize_task_as_plan(&mut self, task: TaskNode) -> Result<PlanId> {
+        let plan_id_str = format!(
+            "{}-{:06x}",
+            chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+            rand_hex()
+        );
+        let plan_id = PlanId(plan_id_str);
+        let mut plan = Plan::new_draft(plan_id.clone(), &task.title, "stdin-session");
+        plan.overview = format!("Follow-up task: {}", task.title);
+        plan.task_graph = crate::plan::TaskGraph { tasks: vec![task] };
+        plan.save()?;
+        self.current_plan = Some(plan_id.clone());
+        Ok(plan_id)
+    }
+
     pub fn current_plan(&self) -> Option<&PlanId> {
         self.current_plan.as_ref()
     }
 
     pub fn cmd_sender(&self) -> mpsc::Sender<ConductorCommand> {
         self.cmd_tx.clone()
+    }
+}
+
+fn conductor_tool_schemas() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "name": "save_to_host",
+        "description": "Save everything built in the session sandbox to the user's machine. Call this ONLY when the user explicitly asks to save, export, download, or keep the project. Do not call it on your own initiative.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "destination": {
+                    "type": "string",
+                    "description": "Optional subfolder name (under the user's project directory) to save into. Omit to save directly into the project directory."
+                }
+            },
+            "required": []
+        }
+    })]
+}
+
+/// Recursively copy `src` into `dst`, skipping build/VCS artifacts. Returns the
+/// number of files copied.
+fn copy_tree(src: &Path, dst: &Path) -> Result<usize> {
+    fn skip(name: &str) -> bool {
+        matches!(name, "node_modules" | "target" | ".git" | "dist" | ".mowis")
+    }
+    fn recurse(src: &Path, dst: &Path, count: &mut usize) -> Result<()> {
+        if !src.exists() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if skip(&name) {
+                continue;
+            }
+            let from = entry.path();
+            let to = dst.join(&name);
+            if entry.file_type()?.is_dir() {
+                recurse(&from, &to, count)?;
+            } else {
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&from, &to)?;
+                *count += 1;
+            }
+        }
+        Ok(())
+    }
+    let mut count = 0;
+    recurse(src, dst, &mut count)?;
+    Ok(count)
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+
+    #[test]
+    fn copy_tree_copies_files_and_skips_artifacts() {
+        let base = std::env::temp_dir().join(format!("mowis-copytree-{}", rand_hex()));
+        let src = base.join("src");
+        let dst = base.join("dst");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::create_dir_all(src.join("node_modules")).unwrap();
+        std::fs::write(src.join("index.html"), b"<html>").unwrap();
+        std::fs::write(src.join("nested/app.js"), b"console.log(1)").unwrap();
+        std::fs::write(src.join("node_modules/junk.js"), b"// skip me").unwrap();
+
+        let count = copy_tree(&src, &dst).unwrap();
+
+        assert_eq!(count, 2, "should copy 2 real files, skipping node_modules");
+        assert!(dst.join("index.html").exists());
+        assert!(dst.join("nested/app.js").exists());
+        assert!(!dst.join("node_modules").exists(), "node_modules must be skipped");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn copy_tree_on_missing_source_is_a_noop() {
+        let missing = std::env::temp_dir().join("mowis-does-not-exist-xyz");
+        let dst = std::env::temp_dir().join(format!("mowis-dst-{}", rand_hex()));
+        let count = copy_tree(&missing, &dst).unwrap();
+        assert_eq!(count, 0);
+        let _ = std::fs::remove_dir_all(&dst);
     }
 }
 

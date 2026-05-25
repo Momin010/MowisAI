@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -191,7 +191,7 @@ impl TuiApp {
     pub async fn run_async(&mut self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -201,7 +201,8 @@ impl TuiApp {
         execute!(
             terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         )?;
         terminal.show_cursor()?;
 
@@ -218,14 +219,40 @@ impl TuiApp {
 
             // Wait for terminal input with short timeout
             if crossterm::event::poll(Duration::from_millis(16))? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key(key.code, key.modifiers).await;
-                    if self.should_quit {
-                        if let Some(ref tx) = self.conductor_tx {
-                            let _ = tx.send(ConductorCommand::EndConversation).await;
+                match event::read()? {
+                    Event::Key(key) => {
+                        self.handle_key(key.code, key.modifiers).await;
+                        if self.should_quit {
+                            if let Some(ref tx) = self.conductor_tx {
+                                let _ = tx.send(ConductorCommand::EndConversation).await;
+                            }
+                            return Ok(());
                         }
-                        return Ok(());
                     }
+                    // Mouse wheel scrolls the message log on the main screen.
+                    Event::Mouse(me) if matches!(self.screen, AppScreen::Main) => {
+                        match me.kind {
+                            MouseEventKind::ScrollUp => self.message_log.scroll_up(),
+                            MouseEventKind::ScrollDown => self.message_log.scroll_down(),
+                            _ => {}
+                        }
+                    }
+                    // Bracketed paste: the whole clipboard/dictation blob arrives
+                    // as ONE event (newlines included), so it never gets split
+                    // into multiple messages by the Enter handler.
+                    Event::Paste(text) => match self.screen {
+                        AppScreen::Main => {
+                            self.input.push_str(&text);
+                            if self.input.starts_with('/') {
+                                self.slash_menu.filter(&self.input);
+                            }
+                        }
+                        AppScreen::Setup if self.setup.step == 2 => {
+                            self.setup.api_key.push_str(text.trim());
+                        }
+                        _ => {}
+                    },
+                    _ => {}
                 }
             }
 
@@ -591,18 +618,44 @@ impl TuiApp {
                 .style(Style::default().fg(PURPLE));
             f.render_widget(divider, chunks[3]);
 
-            let input_text = if self.input.is_empty() {
-                Span::styled("Type a message, / for commands", Style::default().fg(DIM))
-            } else {
-                Span::raw(&self.input)
-            };
-            let input = Paragraph::new(input_text);
-            f.render_widget(input, chunks[4]);
+            // Render the input. Large or multi-line input (e.g. a paste or a
+            // dictation blob) is collapsed into a compact pill so it never
+            // overflows the one-line input bar.
+            let input_area = chunks[4];
+            let line_count = self.input.split('\n').count();
+            let char_count = self.input.chars().count();
+            let too_wide = char_count > input_area.width.saturating_sub(1) as usize;
+            let compact = line_count > 1 || too_wide;
 
-            // Show cursor in input field
-            let cursor_x = chunks[4].x + self.input.len() as u16 + 1;
-            let cursor_y = chunks[4].y;
-            f.set_cursor(cursor_x, cursor_y);
+            let (input_span, cursor_cols) = if self.input.is_empty() {
+                (
+                    Span::styled("Type a message, / for commands", Style::default().fg(DIM)),
+                    0usize,
+                )
+            } else if compact {
+                let label = if line_count > 1 {
+                    format!(
+                        "[ pasted text — {} lines, {} chars · Enter to send, Esc to clear ]",
+                        line_count, char_count
+                    )
+                } else {
+                    format!(
+                        "[ pasted text — {} chars · Enter to send, Esc to clear ]",
+                        char_count
+                    )
+                };
+                let w = label.chars().count();
+                (Span::styled(label, Style::default().fg(CYAN)), w)
+            } else {
+                (Span::raw(self.input.as_str()), char_count)
+            };
+            let input = Paragraph::new(Line::from(input_span));
+            f.render_widget(input, input_area);
+
+            // Cursor sits just after the rendered text/pill, clamped to the bar.
+            let max_col = input_area.width.saturating_sub(1) as usize;
+            let cursor_x = input_area.x + cursor_cols.min(max_col) as u16;
+            f.set_cursor(cursor_x, input_area.y);
 
             let divider2 = Paragraph::new("─".repeat(chunks[5].width as usize))
                 .style(Style::default().fg(PURPLE));

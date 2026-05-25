@@ -444,11 +444,7 @@ impl Captain {
 /// Simple synchronous constructor for backward compatibility with mowis-host chat
 impl Captain {
     pub fn new_simple(cfg: &OrchConfig, plan_id: PlanId, bus: EventBus) -> Result<SimpleCaptain> {
-        Ok(SimpleCaptain {
-            cfg: cfg.clone(),
-            plan_id,
-            bus,
-        })
+        SimpleCaptain::new(cfg, plan_id, bus)
     }
 }
 
@@ -456,14 +452,31 @@ pub struct SimpleCaptain {
     cfg: OrchConfig,
     plan_id: PlanId,
     bus: EventBus,
+    /// Directory crews read from and write to. This is the session sandbox
+    /// workspace — crews never touch the user's project directly.
+    work_dir: PathBuf,
 }
 
 impl SimpleCaptain {
+    /// Construct a captain whose crews operate in the current directory.
+    /// Prefer `new_in` to point crews at an isolated session workspace.
     pub fn new(cfg: &OrchConfig, plan_id: PlanId, bus: EventBus) -> Result<Self> {
+        let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::new_in(cfg, plan_id, bus, work_dir)
+    }
+
+    /// Construct a captain whose crews operate inside `work_dir`.
+    pub fn new_in(
+        cfg: &OrchConfig,
+        plan_id: PlanId,
+        bus: EventBus,
+        work_dir: PathBuf,
+    ) -> Result<Self> {
         Ok(Self {
             cfg: cfg.clone(),
             plan_id,
             bus,
+            work_dir,
         })
     }
 
@@ -500,8 +513,7 @@ impl SimpleCaptain {
                     sandbox_id.clone(),
                     agent_id.clone(),
                 );
-                let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                tool_gateway.set_transport(Box::new(crate::tools::LocalTransport::new(work_dir))).await;
+                tool_gateway.set_transport(Box::new(crate::tools::LocalTransport::new(self.work_dir.clone()))).await;
 
                 let crew_task = CrewTask {
                     task_id: task_node.id.clone(),
