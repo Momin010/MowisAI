@@ -176,7 +176,10 @@ impl Conductor {
                 Ok(classifier) => match classifier.decision {
                     ClassifierDecision::Informational => {
                         // Just answer in chat (with save_to_host available).
-                        let reply = self.conversational_turn().await?;
+                        let (reply, build_dispatched) = self.conversational_turn().await?;
+                        if build_dispatched {
+                            return Ok(ConductorReply::Chat { reply: self.strip_tool_calls(&reply) });
+                        }
                         return Ok(ConductorReply::Chat { reply });
                     }
                     ClassifierDecision::HotPatch => {
@@ -230,7 +233,13 @@ impl Conductor {
         }
 
         // No plan running or classifier failed — normal flow
-        let reply = self.conversational_turn().await?;
+        let (reply, build_dispatched) = self.conversational_turn().await?;
+
+        // If start_build was called, the captain is already running — don't also
+        // trigger draft_plan_from_response which would spawn a second captain.
+        if build_dispatched {
+            return Ok(ConductorReply::Chat { reply: self.strip_tool_calls(&reply) });
+        }
 
         // Check if the LLM wants to draft a plan (contains <plan> tag)
         if reply.contains("<plan>") {
@@ -343,9 +352,9 @@ impl Conductor {
     }
 
     /// A conversational turn that can call Conductor tools (currently
-    /// `save_to_host`). Replaces plain text chat so the Conductor can act on
-    /// requests like "save it" by invoking a real tool, not just talking.
-    async fn conversational_turn(&mut self) -> Result<String> {
+    /// `save_to_host` and `start_build`). Returns the final text and a flag
+    /// indicating whether `start_build` was successfully dispatched this turn.
+    async fn conversational_turn(&mut self) -> Result<(String, bool)> {
         let llm_config = self.cfg.llm_for(&crate::plan::Tier::Conductor)?;
         let system_prompt = include_str!("prompts/conductor.md")
             .replace("{{repo_root}}", ".")
@@ -363,11 +372,10 @@ impl Conductor {
 
         let tools = conductor_tool_schemas();
         let mut final_text = String::new();
+        let mut build_dispatched = false;
 
         // Bounded tool loop so a misbehaving model can't spin forever.
         for _ in 0..5 {
-            // Forward streamed tokens to the event bus so the UI renders the
-            // reply token-by-token (the streaming the TUI shows).
             let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let fwd_bus = self.bus.clone();
             let fwd = tokio::spawn(async move {
@@ -398,20 +406,27 @@ impl Conductor {
                 break;
             }
 
-            // Record the assistant's tool-call turn, run each tool, feed results
-            // back, then loop so the model can stream a reply after the tool runs.
             convo.push_assistant_tool_calls(round.tool_calls.clone());
             let mut results = Vec::new();
             for tc in &round.tool_calls {
                 let result = self.execute_conductor_tool(tc);
+                if tc.name == "start_build" && result["started"].as_bool() == Some(true) {
+                    build_dispatched = true;
+                }
                 results.push((tc.clone(), result));
             }
             convo.push_tool_results(results);
+
+            // Captain is running — don't loop further and spawn duplicates
+            if build_dispatched {
+                final_text = round.text.unwrap_or_default();
+                break;
+            }
         }
 
         self.bus.emit(Event::StreamDone);
         self.conversation.push(final_text.clone());
-        Ok(final_text)
+        Ok((final_text, build_dispatched))
     }
 
     /// Dispatch a Conductor tool call.
@@ -478,7 +493,8 @@ impl Conductor {
         serde_json::json!({
             "started": true,
             "plan_id": plan_id.0,
-            "note": "Captain dispatched; build is now running. Progress will stream to the UI."
+            "note": "Captain dispatched; build is now running. Progress will stream to the UI.",
+            "warning": "DO NOT call start_build again — the captain is already running. Your NEXT response must be ONLY plain text confirming the build has started. No more tool calls."
         })
     }
 
