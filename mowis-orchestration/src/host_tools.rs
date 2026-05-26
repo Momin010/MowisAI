@@ -218,10 +218,16 @@ fn run_command(input: &Value, work_dir: &PathBuf) -> Result<Value> {
 
     tracing::info!(cmd = cmd, cwd = %resolved_cwd.display(), "running command");
 
+    // Provide a git identity so that any `git commit` invoked through run_command
+    // works on a bare machine where user.email/user.name are not configured.
     let output = Command::new("/bin/sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(&resolved_cwd)
+        .env("GIT_AUTHOR_NAME", "MowisAI")
+        .env("GIT_AUTHOR_EMAIL", "agent@mowis.ai")
+        .env("GIT_COMMITTER_NAME", "MowisAI")
+        .env("GIT_COMMITTER_EMAIL", "agent@mowis.ai")
         .output()
         .with_context(|| format!("run_command: {}", cmd))?;
 
@@ -338,7 +344,7 @@ fn git_commit(input: &Value, work_dir: &PathBuf) -> Result<Value> {
     let message = input.get("message").and_then(Value::as_str).unwrap_or("auto-commit");
     let resolved = resolve_path(path, work_dir);
     let output = Command::new("git")
-        .args(["commit", "-m", message])
+        .args(["-c", "user.email=agent@mowis.ai", "-c", "user.name=MowisAI", "commit", "-m", message])
         .current_dir(&resolved)
         .output()?;
     Ok(json!({
