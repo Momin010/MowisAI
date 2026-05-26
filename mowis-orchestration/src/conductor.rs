@@ -401,8 +401,16 @@ impl Conductor {
                 model: llm_config.model.clone(),
             });
 
+            // Preserve the best text we've seen across rounds — the model may
+            // include the plan text in round 1 alongside a tool call, then only
+            // retry the tool call in later rounds (without repeating the text).
+            if let Some(ref text) = round.text {
+                if !text.is_empty() {
+                    final_text = text.clone();
+                }
+            }
+
             if round.tool_calls.is_empty() {
-                final_text = round.text.unwrap_or_default();
                 break;
             }
 
@@ -419,7 +427,6 @@ impl Conductor {
 
             // Captain is running — don't loop further and spawn duplicates
             if build_dispatched {
-                final_text = round.text.unwrap_or_default();
                 break;
             }
         }
