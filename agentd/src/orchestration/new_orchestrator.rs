@@ -30,49 +30,7 @@ pub enum OrchestratorEvent {
 }
 
 use super::agent_execution::AgentExecutor;
-
-// Stub for removed complexity_classifier (deleted per mowis-orchestration spec §14.1)
-#[derive(Debug, Clone, PartialEq)]
-pub enum ComplexityMode {
-    Simple,
-    Standard,
-    Full,
-}
-
-impl std::fmt::Display for ComplexityMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ComplexityMode::Simple => write!(f, "simple"),
-            ComplexityMode::Standard => write!(f, "standard"),
-            ComplexityMode::Full => write!(f, "full"),
-        }
-    }
-}
-
-fn classify_complexity(_prompt: &str, _dir_tree: &str) -> ComplexityScore {
-    ComplexityScore {
-        mode: ComplexityMode::Standard,
-        confidence: 0.8,
-        reasoning: "default".into(),
-        score: 0.5,
-        file_count: 0,
-        domain_count: 0,
-        broad_scope: false,
-        cross_service: false,
-    }
-}
-
-pub struct ComplexityScore {
-    pub mode: ComplexityMode,
-    pub confidence: f64,
-    pub reasoning: String,
-    pub score: f64,
-    pub file_count: usize,
-    pub domain_count: usize,
-    pub broad_scope: bool,
-    pub cross_service: bool,
-}
-
+use super::types::{classify_complexity, ComplexityMode};
 use super::health::HealthMonitor;
 use super::merge_reviewer::{AgentContribution, ConflictDetector, MergeReviewerAgent, parse_unified_diff};
 use super::planner::{plan_task, plan_task_standard, scan_directory_tree_pub};

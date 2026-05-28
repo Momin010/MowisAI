@@ -23,8 +23,9 @@ pub mod workspace;
 pub mod streaming;
 
 // Re-export main types
-pub use new_orchestrator::{NewOrchestrator, OrchestratorConfig, FinalOutput, OrchestratorEvent, ComplexityMode};
+pub use new_orchestrator::{NewOrchestrator, OrchestratorConfig, FinalOutput, OrchestratorEvent};
 pub use agent_execution::{set_verbose, is_verbose};
+pub use types::{ComplexityMode, ComplexityScore, classify_complexity};
 pub use cost_tracker::{CostTracker, BudgetConfig, CostSummary};
 pub use workspace::{Workspace, detect_workspace, get_dir_tree};
 
