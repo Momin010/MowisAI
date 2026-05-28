@@ -22,6 +22,8 @@ pub struct Captain {
     completed:     HashMap<TaskId, CrewOutcome>,
     failed:        HashMap<TaskId, CrewOutcome>,
     injected_tasks: Vec<InjectedTask>,
+    /// Directory crews read from and write to.
+    work_dir:      PathBuf,
 }
 
 #[derive(Debug)]
@@ -79,6 +81,7 @@ impl Captain {
     pub fn new(
         cfg: &OrchConfig,
         bus: EventBus,
+        work_dir: PathBuf,
     ) -> (Self, mpsc::Sender<CaptainCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let captain = Self {
@@ -91,6 +94,7 @@ impl Captain {
             completed: HashMap::new(),
             failed: HashMap::new(),
             injected_tasks: Vec::new(),
+            work_dir,
         };
         (captain, cmd_tx)
     }
@@ -194,7 +198,7 @@ impl Captain {
                     sandbox_id.clone(),
                     agent_id.clone(),
                 );
-                let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let work_dir = self.work_dir.clone();
                 tool_gateway.set_transport(Box::new(crate::tools::LocalTransport::new(work_dir))).await;
 
                 let crew_task = CrewTask {
@@ -323,7 +327,7 @@ impl Captain {
                     sandbox_id.to_string(),
                     agent_id.clone(),
                 );
-                let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let work_dir = self.work_dir.clone();
                 tool_gateway.set_transport(Box::new(crate::tools::LocalTransport::new(work_dir))).await;
 
             let crew_task = CrewTask {
@@ -443,8 +447,8 @@ impl Captain {
 
 /// Simple synchronous constructor for backward compatibility with mowis-host chat
 impl Captain {
-    pub fn new_simple(cfg: &OrchConfig, plan_id: PlanId, bus: EventBus) -> Result<SimpleCaptain> {
-        SimpleCaptain::new(cfg, plan_id, bus)
+    pub fn new_simple(cfg: &OrchConfig, plan_id: PlanId, bus: EventBus, work_dir: PathBuf) -> Result<SimpleCaptain> {
+        SimpleCaptain::new_in(cfg, plan_id, bus, work_dir)
     }
 }
 
@@ -455,6 +459,9 @@ pub struct SimpleCaptain {
     /// Directory crews read from and write to. This is the session sandbox
     /// workspace — crews never touch the user's project directly.
     work_dir: PathBuf,
+    /// Factory producing the transport each crew uses. Defaults to local
+    /// (in-process file ops); swap for `VsockToolTransport` in OS Security mode.
+    transport_factory: crate::tools::TransportFactory,
 }
 
 impl SimpleCaptain {
@@ -465,24 +472,54 @@ impl SimpleCaptain {
         Self::new_in(cfg, plan_id, bus, work_dir)
     }
 
-    /// Construct a captain whose crews operate inside `work_dir`.
+    /// Construct a captain whose crews operate inside `work_dir` using the
+    /// default local (in-process) tool transport.
     pub fn new_in(
         cfg: &OrchConfig,
         plan_id: PlanId,
         bus: EventBus,
         work_dir: PathBuf,
     ) -> Result<Self> {
+        Self::new_in_with_transport(cfg, plan_id, bus, work_dir, crate::tools::local_transport_factory())
+    }
+
+    /// Same as `new_in` but with a custom transport factory (e.g. vsock for OS Security mode).
+    pub fn new_in_with_transport(
+        cfg: &OrchConfig,
+        plan_id: PlanId,
+        bus: EventBus,
+        work_dir: PathBuf,
+        transport_factory: crate::tools::TransportFactory,
+    ) -> Result<Self> {
         Ok(Self {
             cfg: cfg.clone(),
             plan_id,
             bus,
             work_dir,
+            transport_factory,
         })
     }
 
     pub async fn run(self) -> Result<CaptainOutcome> {
         let plan = Plan::load(&self.cfg.plans_dir, &self.plan_id)?;
         let sandbox_id = format!("conv-{}", self.plan_id.0);
+
+        let task_graph = plan.task_graph();
+
+        // Guard: empty task graph means the plan had no parseable tasks.
+        if task_graph.tasks.is_empty() {
+            tracing::error!(plan = %self.plan_id.0, "plan has no tasks — nothing to execute");
+            self.bus.emit(Event::PlanFailed {
+                plan_id: self.plan_id.clone(),
+                reason: "Plan has no tasks — the plan block was empty or could not be parsed. Please provide a valid plan.".into(),
+            });
+            return Ok(CaptainOutcome::Failed {
+                reason: "Plan has no tasks".into(),
+                sandbox_id,
+            });
+        }
+
+        tracing::info!(plan = %self.plan_id.0, tasks = task_graph.tasks.len(), "starting plan execution");
 
         self.bus.emit(Event::CaptainStarted {
             plan_id: self.plan_id.clone(),
@@ -513,7 +550,7 @@ impl SimpleCaptain {
                     sandbox_id.clone(),
                     agent_id.clone(),
                 );
-                tool_gateway.set_transport(Box::new(crate::tools::LocalTransport::new(self.work_dir.clone()))).await;
+                tool_gateway.set_transport((self.transport_factory)(self.work_dir.clone())).await;
 
                 let crew_task = CrewTask {
                     task_id: task_node.id.clone(),

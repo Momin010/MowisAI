@@ -292,7 +292,12 @@ impl MessageLog {
 
     pub fn add_conductor(&mut self, text: &str) {
         self.thinking = false;
-        // Add blank line before conductor message for spacing
+        // Strip any <plan>…</plan> block — it belongs in the plan panel, not the chat.
+        let (visible, _) = Self::strip_plan_block(text);
+        let visible = visible.trim();
+        if visible.is_empty() {
+            return;
+        }
         if !self.lines.is_empty() {
             self.lines.push(LogLine {
                 prefix: String::new(),
@@ -305,7 +310,7 @@ impl MessageLog {
         self.lines.push(LogLine {
             prefix: "◈ ".into(),
             prefix_color: GREEN,
-            text: text.to_string(),
+            text: visible.to_string(),
             italic: false,
             dim: false,
         });
@@ -379,6 +384,17 @@ impl MessageLog {
                 dim: true,
             });
         }
+    }
+
+    pub fn add_agent_event(&mut self, prefix: &str, prefix_color: Color, text: &str) {
+        self.lines.push(LogLine {
+            prefix: format!("{} ", prefix),
+            prefix_color,
+            text: text.to_string(),
+            italic: false,
+            dim: false,
+        });
+        self.auto_scroll = true;
     }
 
     pub fn add_awaiting_approval(&mut self, plan_id: &str) {

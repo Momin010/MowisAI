@@ -797,6 +797,11 @@ async fn run_chat(
                         }
                     }
                 }
+                Ok(ConductorReply::BuildDispatched { plan_id, reply }) => {
+                    // Captain already running; treat like a drafted plan that's approved.
+                    if !reply.is_empty() { println!("\n{}\n", reply); }
+                    Some(plan_id)
+                }
                 Ok(ConductorReply::Error { message }) => {
                     eprintln!("Error: {}", message);
                     None
@@ -1055,6 +1060,38 @@ async fn run_autonomous(cfg: OrchConfig, prompt: String, use_vm: bool, verbose: 
     });
     println!("[init] Critic ready");
 
+    // Configure the conductor's workspace so start_build writes to work_dir.
+    let output_dir = std::path::PathBuf::from(".");
+    conductor.set_workspace(work_dir.clone(), output_dir.clone());
+
+    // Subscribe to bus for completion signal (separate from the print subscriber).
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<String>>();
+    let done_tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(done_tx)));
+    let bus_done = bus.clone();
+    tokio::spawn(async move {
+        let mut rx = bus_done.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(Event::PlanCompleted { plan_id }) => {
+                    let mut guard = done_tx.lock().await;
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(Ok(plan_id.0));
+                    }
+                    break;
+                }
+                Ok(Event::PlanFailed { reason, .. }) => {
+                    let mut guard = done_tx.lock().await;
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(Err(anyhow::anyhow!(reason)));
+                    }
+                    break;
+                }
+                Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+
     // Step 5: Send the prompt to conductor.
     // Autonomous mode is non-interactive: the converse-first Conductor would
     // otherwise stop to ask clarifying questions, so we authorize it to make
@@ -1066,53 +1103,83 @@ async fn run_autonomous(cfg: OrchConfig, prompt: String, use_vm: bool, verbose: 
     );
     let reply = conductor.handle_user_message(autonomous_prompt).await?;
 
+    // Helper: copy work_dir output to output_dir and report.
+    let finish_build = |sandbox_id: String| {
+        println!("\n[done] ✓ Plan completed! Sandbox: {}", sandbox_id);
+        println!("[output] Copying output to current directory...");
+        match copy_sandbox_output(&work_dir, &output_dir) {
+            Ok(count) => println!("[output] ✓ Copied {} files to {}", count, output_dir.display()),
+            Err(e)    => eprintln!("[output] ✗ Copy failed: {}", e),
+        }
+        let _ = std::fs::remove_dir_all(&work_dir);
+    };
+
     match reply {
+        ConductorReply::BuildDispatched { plan_id, reply: text } => {
+            // Conductor already called start_build — captain is running fire-and-forget.
+            // Print the conductor's summary and wait for PlanCompleted/Failed from bus.
+            if !text.is_empty() {
+                println!("[conductor] {}", text);
+            }
+            println!("[captain] Build dispatched for plan {}. Waiting for completion...\n", plan_id.0);
+            match done_rx.await {
+                Ok(Ok(sandbox_id)) => finish_build(sandbox_id),
+                Ok(Err(e))         => eprintln!("\n[done] ✗ Plan failed: {}", e),
+                Err(_)             => eprintln!("\n[done] Completion signal lost."),
+            }
+        }
         ConductorReply::PlanDrafted { plan_id, version } => {
             println!("[conductor] Plan drafted: {} v{}", plan_id.0, version);
             println!("[critic] Waiting for review...\n");
 
-            // Wait for critic to review
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            // Wait for critic verdict event (up to 30s), then auto-approve
+            let bus_critic = bus.clone();
+            let critic_plan_id = plan_id.clone();
+            let verdict_result = {
+                let mut rx = bus_critic.subscribe();
+                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+                let mut got_verdict = false;
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => {
+                            println!("[critic] Timed out waiting for review, auto-approving...");
+                            break;
+                        }
+                        event = rx.recv() => {
+                            match event {
+                                Ok(Event::CriticVerdict { plan_id: v_pid, version: v_ver, verdict }) if v_pid == critic_plan_id && v_ver == version => {
+                                    let v = match &verdict {
+                                        mowis_orchestration::critic::Verdict::Approve => "APPROVE",
+                                        mowis_orchestration::critic::Verdict::Revise { .. } => "REVISE",
+                                        mowis_orchestration::critic::Verdict::Block { .. } => "BLOCK",
+                                    };
+                                    println!("[critic] Verdict: {} — proceeding anyway (user override in autonomous mode)", v);
+                                    got_verdict = true;
+                                    break;
+                                }
+                                Ok(Event::ConversationEnded) => break,
+                                Err(_) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                got_verdict
+            };
+            // If critic didn't emit a verdict in time, that's fine — auto-approve
+            if !verdict_result {
+                println!("[auto] Auto-approving plan (no critic verdict received)...\n");
+            }
 
-            // Auto-approve
-            println!("[auto] Auto-approving plan...\n");
             bus.emit(Event::UserApproved { plan_id: plan_id.clone() });
             bus.emit(Event::PlanApproved { plan_id: plan_id.clone() });
 
-            // Run captain — crews build inside the sandbox work_dir, which is
-            // copied to the user's directory only after a successful completion.
+            // Run captain — crews build inside the sandbox work_dir.
             println!("[captain] Starting execution...\n");
-            let captain = SimpleCaptain::new_in(&cfg, plan_id, bus.clone(), work_dir.clone())?;
+            let captain = SimpleCaptain::new_in(&cfg, plan_id.clone(), bus.clone(), work_dir.clone())?;
             match captain.run().await {
                 Ok(mowis_orchestration::captain::CaptainOutcome::Completed { sandbox_id }) => {
-                    println!("\n[done] ✓ Plan completed successfully! Sandbox: {}", sandbox_id);
-
-                    // Copy output from sandbox to local filesystem
-                    println!("[output] Copying output to current directory...");
-                    let output_dir = std::path::PathBuf::from(".");
-                    match copy_sandbox_output(&work_dir, &output_dir) {
-                        Ok(count) => {
-                            println!("[output] ✓ Copied {} files to {}", count, output_dir.display());
-                            // List what was copied
-                            if verbose {
-                                for entry in walkdir::WalkDir::new(&output_dir).max_depth(3) {
-                                    if let Ok(e) = entry {
-                                        let path = e.path();
-                                        if path.starts_with(&work_dir) { continue; }
-                                        if path.is_file() {
-                                            println!("[output]   {}", path.display());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[output] ✗ Failed to copy output: {}", e);
-                        }
-                    }
-
-                    // Clean up work directory
-                    let _ = std::fs::remove_dir_all(&work_dir);
+                    finish_build(sandbox_id);
                 }
                 Ok(mowis_orchestration::captain::CaptainOutcome::Failed { reason, sandbox_id }) => {
                     eprintln!("\n[done] ✗ Plan failed: {} (sandbox: {})", reason, sandbox_id);
@@ -1132,7 +1199,7 @@ async fn run_autonomous(cfg: OrchConfig, prompt: String, use_vm: bool, verbose: 
             eprintln!("[error] {}", message);
         }
         _ => {
-            println!("[conductor] {:?}", reply);
+            println!("[conductor] (other reply)");
         }
     }
 

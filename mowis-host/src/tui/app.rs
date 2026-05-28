@@ -6,7 +6,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Margin},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -59,6 +59,7 @@ fn strip_ansi(s: &str) -> String {
 const PURPLE: Color = Color::Rgb(139, 92, 246);
 const CYAN:   Color = Color::Rgb(34, 211, 238);
 const GREEN:  Color = Color::Rgb(74, 222, 128);
+const RED:    Color = Color::Rgb(248, 113, 113);
 const DIM:    Color = Color::Rgb(71, 85, 105);
 const BORDER: Color = Color::Rgb(51, 65, 85);
 
@@ -67,6 +68,17 @@ pub enum AppScreen {
     Splash { frame: u64 },
     Setup,
     Main,
+}
+
+/// Which panel is docked in the sidebar right now.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SidebarPanel {
+    /// Plan preview (shown while the conductor is drafting / critic is reviewing).
+    Plan,
+    /// Critic review detail (shown after a verdict arrives).
+    Critic,
+    /// Captain activity feed (shown once the build starts; Plan+Critic disappear).
+    Captain,
 }
 
 pub enum TuiEvent {
@@ -83,13 +95,17 @@ pub struct TuiApp {
     pub plan_preview: PlanPreview,
     pub critic_panel: CriticPanel,
     pub captain_panel: CaptainPanel,
-    pub overlay_visible: bool,
-    pub plan_expanded: bool,
-    pub critic_expanded: bool,
+    /// Which panel is showing in the sidebar (None = sidebar hidden).
+    pub sidebar: Option<SidebarPanel>,
+    /// True once the captain has started running tasks.
+    pub is_building: bool,
+    /// True once any plan has been drafted (enables sidebar Tab cycling).
+    pub plan_drafted: bool,
     pub input: String,
     pub slash_menu: SlashMenu,
     pub at_menu: AtMenu,
     pub token_meter: TokenMeter,
+    pub cursor_pos: usize,
     pub should_quit: bool,
     pub conductor_tx: Option<mpsc::Sender<ConductorCommand>>,
     pub event_rx: Option<mpsc::UnboundedReceiver<TuiEvent>>,
@@ -112,13 +128,14 @@ impl TuiApp {
             plan_preview: PlanPreview::new(),
             critic_panel: CriticPanel::new(),
             captain_panel: CaptainPanel::new(),
-            overlay_visible: false,
-            plan_expanded: false,
-            critic_expanded: false,
+            sidebar: None,
+            is_building: false,
+            plan_drafted: false,
             input: String::new(),
             slash_menu: SlashMenu::new(),
             at_menu: AtMenu::new(),
             token_meter: TokenMeter::default(),
+            cursor_pos: 0,
             should_quit: false,
             conductor_tx: None,
             event_rx: Some(event_rx),
@@ -258,7 +275,7 @@ impl TuiApp {
     }
 
     async fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-        let tick_rate = Duration::from_millis(500);
+        let tick_rate = Duration::from_millis(100);
         let mut event_rx = self.event_rx.take().unwrap();
         let mut last_tick = std::time::Instant::now();
 
@@ -290,7 +307,17 @@ impl TuiApp {
                     // into multiple messages by the Enter handler.
                     Event::Paste(text) => match self.screen {
                         AppScreen::Main => {
-                            self.input.push_str(&strip_ansi(&text));
+                            // Collapse newlines → spaces so pasted paragraphs
+                            // don't escape the single-line input box.
+                            let sanitized = strip_ansi(&text)
+                                .replace('\r', "")
+                                .replace('\n', " ");
+                            let byte_pos = self.input.char_indices()
+                                .nth(self.cursor_pos)
+                                .map(|(i, _)| i)
+                                .unwrap_or(self.input.len());
+                            self.input.insert_str(byte_pos, &sanitized);
+                            self.cursor_pos += sanitized.chars().count();
                             if self.input.starts_with('/') {
                                 self.slash_menu.filter(&self.input);
                             }
@@ -333,16 +360,18 @@ impl TuiApp {
             }
             OrchEvent::CrewStarted { task_id, agent_id, .. } => {
                 self.captain_panel.add_crew_started(&agent_id, &task_id.0);
+                self.message_log.add_agent_event("▶", CYAN, &format!("[{}]  {}", agent_id, task_id.0));
             }
             OrchEvent::CrewDone { agent_id, summary, .. } => {
                 self.captain_panel.add_crew_done(&agent_id, &summary);
+                let preview = if summary.chars().count() > 80 { format!("{}…", summary.chars().take(77).collect::<String>()) } else { summary.clone() };
+                self.message_log.add_agent_event("■", GREEN, &format!("[{}]  {}", agent_id, preview));
             }
             OrchEvent::CrewFailed { agent_id, reason, .. } => {
                 self.captain_panel.add_crew_failed(&agent_id, &reason);
+                self.message_log.add_agent_event("✗", RED, &format!("[{}]  {}", agent_id, reason));
             }
             OrchEvent::PlanDrafted { plan_id, version } => {
-                self.message_log.add_plan_link(&plan_id.0, version);
-                // Set plan preview with basic info
                 self.plan_preview.set_plan(
                     plan_id.0.clone(),
                     version,
@@ -351,9 +380,14 @@ impl TuiApp {
                     "N/A".into(),
                     0,
                 );
+                // Auto-show the plan in the sidebar.
+                self.plan_drafted = true;
+                self.sidebar = Some(SidebarPanel::Plan);
             }
             OrchEvent::PlanRevised { plan_id, version } => {
                 self.message_log.add_system(&format!("Plan {} revised to v{}", plan_id.0, version));
+                // Stay on Plan panel so the user sees the updated draft.
+                if !self.is_building { self.sidebar = Some(SidebarPanel::Plan); }
             }
             OrchEvent::CriticVerdict { plan_id: _, version: _, verdict } => {
                 let verdict_str = match &verdict {
@@ -382,6 +416,8 @@ impl TuiApp {
                 };
                 self.critic_panel.set_verdict(verdict_str, issues, String::new());
                 self.message_log.add_critic_verdict(verdict_str, "");
+                // Auto-show critic verdict so the user sees it immediately.
+                if !self.is_building { self.sidebar = Some(SidebarPanel::Critic); }
             }
             OrchEvent::CriticReviewing { plan_id, version } => {
                 self.critic_panel.set_reviewing(&plan_id.0, version);
@@ -389,14 +425,29 @@ impl TuiApp {
             OrchEvent::CaptainStarted { sandbox_id, .. } => {
                 self.captain_panel.set_status("running");
                 self.captain_panel.add_captain_started(&sandbox_id);
-                self.overlay_visible = true;
+                // Build has started: plan+critic panels retire, captain takes the sidebar.
+                self.is_building = true;
+                self.sidebar = Some(SidebarPanel::Captain);
             }
             OrchEvent::MergeCompleted { agent_id, .. } => {
                 self.captain_panel.add_merge_completed(&agent_id, &[]);
             }
             OrchEvent::PlanCompleted { .. } => {
                 self.captain_panel.set_status("completed");
-                self.message_log.add_system("Plan completed successfully!");
+                self.message_log.add_system("Build complete.");
+                // Reset so the conductor can reason about a fresh follow-up.
+                self.is_building = false;
+                self.message_log.had_streaming = false;
+                if let Some(ref tx) = self.conductor_tx {
+                    let (reply_tx, _) = tokio::sync::oneshot::channel();
+                    let _ = tx.try_send(ConductorCommand::UserMessage {
+                        text: "[System: The build completed successfully. All tasks finished. \
+                               The output is staged in the session sandbox — it has NOT been saved \
+                               to the user's machine yet. Briefly acknowledge this and offer to: \
+                               save it, iterate on it, or add features.]".to_string(),
+                        reply_tx,
+                    });
+                }
             }
             OrchEvent::PlanFailed { reason, .. } => {
                 self.captain_panel.set_status("failed");
@@ -425,6 +476,12 @@ impl TuiApp {
             ConductorReply::Chat { reply } => {
                 if !reply.is_empty() && !was_streaming {
                     // Only add if we didn't already stream it
+                    self.message_log.add_conductor(&reply);
+                }
+            }
+            ConductorReply::BuildDispatched { plan_id: _, reply } => {
+                // Captain already running — show the conductor's summary.
+                if !reply.is_empty() {
                     self.message_log.add_conductor(&reply);
                 }
             }
@@ -491,8 +548,38 @@ impl TuiApp {
             }
             AppScreen::Main => {
                 match code {
+                    // ── Quit ─────────────────────────────────────────────────
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         self.should_quit = true;
+                    }
+                    // ── Ctrl line-editing shortcuts ───────────────────────────
+                    KeyCode::Char('a') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.cursor_pos = 0;
+                    }
+                    KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.cursor_pos = self.input.chars().count();
+                    }
+                    KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        let chars: Vec<char> = self.input.chars().collect();
+                        self.input = chars[..self.cursor_pos].iter().collect();
+                    }
+                    KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        let chars: Vec<char> = self.input.chars().collect();
+                        self.input = chars[self.cursor_pos..].iter().collect();
+                        self.cursor_pos = 0;
+                    }
+                    // ── Cursor movement ───────────────────────────────────────
+                    KeyCode::Left if !self.slash_menu.visible && !self.at_menu.visible => {
+                        if self.cursor_pos > 0 { self.cursor_pos -= 1; }
+                    }
+                    KeyCode::Right if !self.slash_menu.visible && !self.at_menu.visible => {
+                        if self.cursor_pos < self.input.chars().count() { self.cursor_pos += 1; }
+                    }
+                    KeyCode::Home => {
+                        self.cursor_pos = 0;
+                    }
+                    KeyCode::End => {
+                        self.cursor_pos = self.input.chars().count();
                     }
                     // ── Menu navigation (must come before general Up/Down/Tab) ──
                     KeyCode::Up if self.slash_menu.visible => { self.slash_menu.move_up(); }
@@ -502,24 +589,34 @@ impl TuiApp {
                     KeyCode::Tab if self.slash_menu.visible => {
                         if let Some(cmd) = self.slash_menu.current().map(|s| s.to_string()) {
                             self.input = cmd;
+                            self.cursor_pos = self.input.chars().count();
                             self.slash_menu.hide();
                         }
                     }
                     KeyCode::Tab if self.at_menu.visible => {
                         if let Some(cmd) = self.at_menu.current().map(|s| format!("{} ", s)) {
                             self.input = cmd;
+                            self.cursor_pos = self.input.chars().count();
                             self.at_menu.hide();
                         }
                     }
-                    // ── General navigation ────────────────────────────────────
+                    // ── Sidebar cycling (phase-aware) ─────────────────────────
                     KeyCode::Tab => {
-                        self.overlay_visible = !self.overlay_visible;
-                    }
-                    KeyCode::Char('p') if self.overlay_visible && self.input.is_empty() => {
-                        self.plan_expanded = !self.plan_expanded;
-                    }
-                    KeyCode::Char('c') if self.overlay_visible && self.input.is_empty() => {
-                        self.critic_expanded = !self.critic_expanded;
+                        if self.is_building {
+                            // Build phase: toggle Captain panel only.
+                            self.sidebar = match self.sidebar {
+                                Some(SidebarPanel::Captain) => None,
+                                _ => Some(SidebarPanel::Captain),
+                            };
+                        } else if self.plan_drafted {
+                            // Planning phase: cycle Hidden → Plan → Critic → Hidden.
+                            self.sidebar = match &self.sidebar {
+                                None => Some(SidebarPanel::Plan),
+                                Some(SidebarPanel::Plan) => Some(SidebarPanel::Critic),
+                                Some(SidebarPanel::Critic) | Some(SidebarPanel::Captain) => None,
+                            };
+                        }
+                        // If no plan has been drafted yet, Tab does nothing.
                     }
                     KeyCode::Up if self.input.is_empty() => { self.message_log.scroll_up(); }
                     KeyCode::Down if self.input.is_empty() => { self.message_log.scroll_down(); }
@@ -528,15 +625,20 @@ impl TuiApp {
                     // ── Trigger menus on / and @ ──────────────────────────────
                     KeyCode::Char('/') if self.input.is_empty() => {
                         self.input.push('/');
+                        self.cursor_pos = 1;
                         self.slash_menu.show();
                     }
                     KeyCode::Char('@') if self.input.is_empty() => {
                         self.input.push('@');
+                        self.cursor_pos = 1;
                         self.at_menu.show();
                     }
                     // ── Regular character input ───────────────────────────────
                     KeyCode::Char(c) => {
-                        self.input.push(c);
+                        let mut chars: Vec<char> = self.input.chars().collect();
+                        chars.insert(self.cursor_pos, c);
+                        self.input = chars.into_iter().collect();
+                        self.cursor_pos += 1;
                         if self.input.starts_with('/') {
                             self.slash_menu.filter(&self.input);
                         } else if self.input.starts_with('@') {
@@ -544,7 +646,12 @@ impl TuiApp {
                         }
                     }
                     KeyCode::Backspace => {
-                        self.input.pop();
+                        if self.cursor_pos > 0 {
+                            let mut chars: Vec<char> = self.input.chars().collect();
+                            chars.remove(self.cursor_pos - 1);
+                            self.input = chars.into_iter().collect();
+                            self.cursor_pos -= 1;
+                        }
                         if self.input.starts_with('/') {
                             self.slash_menu.filter(&self.input);
                         } else if self.input.starts_with('@') {
@@ -559,6 +666,7 @@ impl TuiApp {
                         if self.slash_menu.visible {
                             if let Some(cmd) = self.slash_menu.current().map(|s| s.to_string()) {
                                 self.input = cmd;
+                                self.cursor_pos = self.input.chars().count();
                             }
                             self.slash_menu.hide();
                         }
@@ -566,6 +674,7 @@ impl TuiApp {
                         if self.at_menu.visible {
                             if let Some(cmd) = self.at_menu.current().map(|s| format!("{} ", s)) {
                                 self.input = cmd;
+                                self.cursor_pos = self.input.chars().count();
                             }
                             self.at_menu.hide();
                             return; // don't send yet — let user finish the message
@@ -585,6 +694,7 @@ impl TuiApp {
                             }
                         }
                         self.input.clear();
+                        self.cursor_pos = 0;
                         self.slash_menu.hide();
                         self.at_menu.hide();
                     }
@@ -595,6 +705,7 @@ impl TuiApp {
                             self.at_menu.hide();
                         } else {
                             self.input.clear();
+                            self.cursor_pos = 0;
                         }
                     }
                     _ => {}
@@ -635,133 +746,139 @@ impl TuiApp {
     }
 
     fn draw_main(&mut self, f: &mut Frame) {
-        // Pitch-black background across the whole terminal
+        f.render_widget(Block::default().style(Style::default().bg(Color::Black)), f.size());
+        let full = f.size().inner(&Margin { horizontal: 6, vertical: 1 });
+
+        if self.sidebar.is_some() {
+            // ── Sidebar layout: chat on left, active panel on right ───
+            let horiz = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(30), Constraint::Length(46)])
+                .split(full);
+            self.render_chat(f, horiz[0]);
+            self.render_sidebar(f, horiz[1]);
+        } else {
+            self.render_chat(f, full);
+        }
+    }
+
+    fn render_chat(&mut self, f: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),  // title bar
+                Constraint::Min(1),     // message log
+                Constraint::Length(3),  // input
+                Constraint::Length(1),  // footer
+            ])
+            .split(area);
+
+        // ── Title bar ────────────────────────────────────────────────
+        let mut title_spans = vec![
+            Span::styled("◈  ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
+            Span::styled("MowisAI", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ];
+        title_spans.extend(self.token_meter.fmt_spans());
         f.render_widget(
-            Block::default().style(Style::default().bg(Color::Black)),
-            f.size(),
+            Paragraph::new(Line::from(title_spans)).style(Style::default().bg(Color::Black)),
+            chunks[0],
         );
 
-        // 2-cell gutters on each side guarantee no text ever reaches the edge
-        let area = f.size().inner(&Margin { horizontal: 2, vertical: 0 });
+        // ── Message log ───────────────────────────────────────────────
+        self.message_log.render(f, chunks[1]);
 
-        if self.overlay_visible {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(10),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                ])
-                .split(area);
+        // ── Input block ───────────────────────────────────────────────
+        self.render_input(f, chunks[2]);
 
-            let panel_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(33),
-                    Constraint::Percentage(33),
-                    Constraint::Percentage(34),
-                ])
-                .split(chunks[0]);
-
-            self.plan_preview.render(f, panel_chunks[0], self.plan_expanded);
-            self.critic_panel.render(f, panel_chunks[1], self.critic_expanded);
-            self.captain_panel.render(f, panel_chunks[2]);
-
-            let sep = Span::styled("  ·  ", Style::default().fg(BORDER));
-            let key = |k: &'static str| Span::styled(k, Style::default().fg(PURPLE).add_modifier(Modifier::BOLD));
-            let lbl = |l: &'static str| Span::styled(l, Style::default().fg(DIM));
-            let footer = Paragraph::new(Line::from(vec![
-                key("tab"), lbl(" main"), sep.clone(),
-                key("p"), lbl(" plan"), sep.clone(),
-                key("c"), lbl(" critic"), sep.clone(),
-                key("ctrl+c"), lbl(" quit"),
-            ]));
-            f.render_widget(footer, chunks[2]);
+        // ── Footer hints ──────────────────────────────────────────────
+        let sep = Span::styled("  ·  ", Style::default().fg(BORDER));
+        let key = |k: &'static str| Span::styled(k, Style::default().fg(PURPLE).add_modifier(Modifier::BOLD));
+        let lbl = |l: &'static str| Span::styled(l, Style::default().fg(DIM));
+        let tab_hint = if self.is_building {
+            if self.sidebar.is_some() { "tab  hide captain" } else { "tab  captain panel" }
+        } else if self.plan_drafted {
+            match &self.sidebar {
+                None => "tab  plan preview",
+                Some(SidebarPanel::Plan) => "tab  critic review",
+                Some(SidebarPanel::Critic) => "tab  hide",
+                Some(SidebarPanel::Captain) => "tab  hide",
+            }
         } else {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1),  // title
-                    Constraint::Min(1),     // message log — no border, layout is the boundary
-                    Constraint::Length(3),  // input block
-                    Constraint::Length(1),  // footer
-                ])
-                .split(area);
+            "←→  move cursor"
+        };
+        let footer_line = Line::from(vec![
+            key(tab_hint), sep.clone(),
+            key("↑↓"), lbl(" scroll"), sep.clone(),
+            key("ctrl+c"), lbl(" quit"),
+        ]);
+        f.render_widget(
+            Paragraph::new(footer_line).style(Style::default().bg(Color::Black)),
+            chunks[3],
+        );
 
-            // ── Title bar — brand + live token meter ─────────────────
-            let mut title_spans = vec![
-                Span::styled("◈  ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                Span::styled("MowisAI", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            ];
-            title_spans.extend(self.token_meter.fmt_spans());
-            f.render_widget(
-                Paragraph::new(Line::from(title_spans)).style(Style::default().bg(Color::Black)),
-                chunks[0],
-            );
+        // ── Popup menus (above input) ─────────────────────────────────
+        if self.slash_menu.visible { self.slash_menu.render(f, chunks[2]); }
+        if self.at_menu.visible    { self.at_menu.render(f, chunks[2]); }
+    }
 
-            // ── Message log — no visible border ───────────────────────
-            self.message_log.render(f, chunks[1]);
+    fn render_input(&mut self, f: &mut Frame, area: Rect) {
+        let active = !self.input.is_empty();
+        let border_col = if active { PURPLE } else { Color::Rgb(30, 30, 45) };
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border_col))
+            .style(Style::default().bg(Color::Black));
+        let input_inner = input_block.inner(area);
+        f.render_widget(input_block, area);
 
-            // ── Input block — invisible border until active ───────────
-            let active = !self.input.is_empty();
-            let border_col = if active { PURPLE } else { Color::Black };
-            let input_block = Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(border_col))
-                .style(Style::default().bg(Color::Black));
-            let input_inner = input_block.inner(chunks[2]);
-            f.render_widget(input_block, chunks[2]);
+        let prefix_width: usize = 2; // "❯ "
+        let text_area_width = input_inner.width.saturating_sub(prefix_width as u16) as usize;
 
-            let line_count = self.input.split('\n').count();
-            let char_count = self.input.chars().count();
-            let avail = input_inner.width.saturating_sub(3) as usize;
-            let compact = line_count > 1 || char_count > avail;
-
-            let (input_span, text_cols) = if self.input.is_empty() {
-                (Span::styled("Message  ·  / commands  ·  @ agents", Style::default().fg(DIM)), 0usize)
-            } else if compact {
-                let label = if line_count > 1 {
-                    format!("[ {} lines · {} chars  ·  Enter ↵  Esc ✕ ]", line_count, char_count)
-                } else {
-                    format!("[ {} chars  ·  Enter ↵  Esc ✕ ]", char_count)
-                };
-                let w = label.chars().count();
-                (Span::styled(label, Style::default().fg(CYAN)), w)
+        let (text_span, cursor_col) = if self.input.is_empty() {
+            (
+                Span::styled("Message  ·  / commands  ·  @ agents", Style::default().fg(DIM)),
+                0usize,
+            )
+        } else {
+            // Flatten to a single display line — newlines that slipped in
+            // via keyboard or paste would otherwise escape the box.
+            let chars: Vec<char> = self.input
+                .chars()
+                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                .collect();
+            let cursor_char = self.cursor_pos.min(chars.len());
+            let view_start = if text_area_width > 0 && cursor_char >= text_area_width {
+                cursor_char + 1 - text_area_width
             } else {
-                (Span::raw(self.input.as_str()), char_count)
+                0
             };
+            // Guard: view_start must not exceed chars.len()
+            let view_start = view_start.min(chars.len());
+            let visible: String = chars[view_start..].iter().take(text_area_width).collect();
+            let cursor_in_view = cursor_char.saturating_sub(view_start);
+            (Span::raw(visible), cursor_in_view)
+        };
 
-            let prompt_line = Line::from(vec![
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
                 Span::styled("❯ ", Style::default().fg(PURPLE).add_modifier(Modifier::BOLD)),
-                input_span,
-            ]);
-            f.render_widget(
-                Paragraph::new(prompt_line).style(Style::default().bg(Color::Black)),
-                input_inner,
-            );
+                text_span,
+            ])).style(Style::default().bg(Color::Black)),
+            input_inner,
+        );
 
-            let max_col = input_inner.width.saturating_sub(1) as usize;
-            let cursor_x = input_inner.x + (2 + text_cols).min(max_col) as u16;
-            f.set_cursor(cursor_x, input_inner.y);
+        let max_x = input_inner.x + input_inner.width.saturating_sub(1);
+        let cursor_x = (input_inner.x + prefix_width as u16 + cursor_col as u16).min(max_x);
+        f.set_cursor(cursor_x, input_inner.y);
+    }
 
-            // ── Footer hints ──────────────────────────────────────────
-            let sep = Span::styled("  ·  ", Style::default().fg(BORDER));
-            let key = |k: &'static str| Span::styled(k, Style::default().fg(PURPLE).add_modifier(Modifier::BOLD));
-            let lbl = |l: &'static str| Span::styled(l, Style::default().fg(DIM));
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    key("tab"), lbl(" overlay"), sep.clone(),
-                    key("p"), lbl(" plan"), sep.clone(),
-                    key("c"), lbl(" critic"), sep.clone(),
-                    key("ctrl+c"), lbl(" quit"),
-                ])).style(Style::default().bg(Color::Black)),
-                chunks[3],
-            );
-
-            // Popup menus render above the input block
-            if self.slash_menu.visible { self.slash_menu.render(f, chunks[2]); }
-            if self.at_menu.visible    { self.at_menu.render(f, chunks[2]); }
+    fn render_sidebar(&mut self, f: &mut Frame, area: Rect) {
+        match &self.sidebar {
+            Some(SidebarPanel::Plan) => self.plan_preview.render(f, area, true),
+            Some(SidebarPanel::Critic) => self.critic_panel.render(f, area, true),
+            Some(SidebarPanel::Captain) => self.captain_panel.render(f, area),
+            None => {}
         }
     }
 }

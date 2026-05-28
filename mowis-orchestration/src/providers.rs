@@ -127,6 +127,40 @@ static HTTP_CLIENT: once_cell::sync::Lazy<reqwest::Client> = once_cell::sync::La
 
 const MAX_LLM_RETRIES: u32 = 3;
 
+/// Cache hints for provider-level prompt caching.
+/// Anthropic uses explicit breakpoints; OpenAI/Grok/MiMo cache automatically.
+#[derive(Debug, Clone, Default)]
+pub struct CacheHints {
+    /// Cache the system prompt block (Anthropic: adds cache_control).
+    pub cache_system: bool,
+    /// Cache the tool definitions block (Anthropic: adds cache_control to last tool).
+    pub cache_tools: bool,
+    /// Cache history up to and including this message index.
+    pub cache_history_up_to: Option<usize>,
+}
+
+impl CacheHints {
+    /// Standard hints for conductor turns: cache system + tools, no history cutoff.
+    pub fn conductor() -> Self {
+        Self { cache_system: true, cache_tools: true, cache_history_up_to: None }
+    }
+    /// Crew turns: no caching (short-lived, different prompt per task).
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
+/// Build Anthropic system field with cache_control breakpoint.
+fn anthropic_system_with_cache(system_prompt: &str) -> serde_json::Value {
+    serde_json::json!([
+        {
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": { "type": "ephemeral" }
+        }
+    ])
+}
+
 fn is_retryable_error(err: &anyhow::Error) -> bool {
     let msg = err.to_string().to_lowercase();
     msg.contains("timeout")
@@ -175,16 +209,17 @@ pub async fn generate_text(
     json_mode: bool,
     temperature: f64,
 ) -> Result<String> {
-    generate_text_with_limit(llm_config, system_prompt, user_message, json_mode, temperature, 16384).await
+    generate_text_with_hints(llm_config, system_prompt, user_message, json_mode, temperature, 16384, CacheHints::none()).await
 }
 
-pub async fn generate_text_with_limit(
+pub async fn generate_text_with_hints(
     llm_config: &LlmConfig,
     system_prompt: &str,
     user_message: &str,
     json_mode: bool,
     temperature: f64,
     max_tokens: u32,
+    cache_hints: CacheHints,
 ) -> Result<String> {
     let provider_name = format!("{}", llm_config.provider);
     with_retry(
@@ -198,6 +233,7 @@ pub async fn generate_text_with_limit(
                 json_mode,
                 temperature,
                 max_tokens,
+                cache_hints.clone(),
             )
         },
     )
@@ -211,6 +247,7 @@ async fn generate_text_inner(
     json_mode: bool,
     temperature: f64,
     max_tokens: u32,
+    cache_hints: CacheHints,
 ) -> Result<String> {
     match llm_config.provider {
         Provider::VertexAi | Provider::Gemini => {
@@ -220,7 +257,7 @@ async fn generate_text_inner(
             generate_text_openai_compat(llm_config, system_prompt, user_message, json_mode, temperature, max_tokens).await
         }
         Provider::Anthropic => {
-            generate_text_anthropic(llm_config, system_prompt, user_message, temperature, max_tokens).await
+            generate_text_anthropic(llm_config, system_prompt, user_message, temperature, max_tokens, &cache_hints).await
         }
     }
 }
@@ -417,14 +454,20 @@ async fn generate_text_anthropic(
     user_message: &str,
     temperature: f64,
     max_tokens: u32,
+    cache_hints: &CacheHints,
 ) -> Result<String> {
     let api_key = llm_config
         .api_key
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("No Anthropic API key"))?;
+    let system = if cache_hints.cache_system {
+        anthropic_system_with_cache(system_prompt)
+    } else {
+        serde_json::json!(system_prompt)
+    };
     let body = serde_json::json!({
         "model": llm_config.model,
-        "system": system_prompt,
+        "system": system,
         "messages": [{"role": "user", "content": user_message}],
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -433,7 +476,7 @@ async fn generate_text_anthropic(
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-version", "2024-04-01")
         .header("Content-Type", "application/json")
         .json(&body)
         .timeout(std::time::Duration::from_secs(900))
@@ -461,11 +504,21 @@ pub async fn call_agent_round(
     tool_schemas: &[serde_json::Value],
     system_prompt: &str,
 ) -> Result<AgentRoundResult> {
+    call_agent_round_with_hints(llm_config, conversation, tool_schemas, system_prompt, CacheHints::none()).await
+}
+
+pub async fn call_agent_round_with_hints(
+    llm_config: &LlmConfig,
+    conversation: &AgentConversation,
+    tool_schemas: &[serde_json::Value],
+    system_prompt: &str,
+    cache_hints: CacheHints,
+) -> Result<AgentRoundResult> {
     let provider_name = format!("{}", llm_config.provider);
     with_retry(
         &format!("call_agent_round/{}", provider_name),
         MAX_LLM_RETRIES,
-        || call_agent_round_inner(llm_config, conversation, tool_schemas, system_prompt),
+        || call_agent_round_inner(llm_config, conversation, tool_schemas, system_prompt, cache_hints.clone()),
     )
     .await
 }
@@ -475,6 +528,7 @@ async fn call_agent_round_inner(
     conversation: &AgentConversation,
     tool_schemas: &[serde_json::Value],
     system_prompt: &str,
+    cache_hints: CacheHints,
 ) -> Result<AgentRoundResult> {
     match llm_config.provider {
         Provider::VertexAi | Provider::Gemini => {
@@ -484,7 +538,7 @@ async fn call_agent_round_inner(
             call_agent_round_openai_compat(llm_config, conversation, tool_schemas, system_prompt).await
         }
         Provider::Anthropic => {
-            call_agent_round_anthropic(llm_config, conversation, tool_schemas, system_prompt).await
+            call_agent_round_anthropic(llm_config, conversation, tool_schemas, system_prompt, &cache_hints).await
         }
     }
 }
@@ -733,6 +787,7 @@ async fn call_agent_round_anthropic(
     conversation: &AgentConversation,
     tool_schemas: &[serde_json::Value],
     system_prompt: &str,
+    cache_hints: &CacheHints,
 ) -> Result<AgentRoundResult> {
     let api_key = llm_config
         .api_key
@@ -786,9 +841,27 @@ async fn call_agent_round_anthropic(
             })
         })
         .collect();
+    // Apply cache_control to tools if hints say so.
+    let tools = if cache_hints.cache_tools {
+        let mut t = tools;
+        if let Some(last) = t.last_mut() {
+            last.as_object_mut().unwrap().insert(
+                "cache_control".into(),
+                serde_json::json!({"type": "ephemeral"}),
+            );
+        }
+        t
+    } else {
+        tools
+    };
+    let system = if cache_hints.cache_system {
+        anthropic_system_with_cache(system_prompt)
+    } else {
+        serde_json::json!(system_prompt)
+    };
     let body = serde_json::json!({
         "model": llm_config.model,
-        "system": system_prompt,
+        "system": system,
         "messages": messages,
         "tools": tools,
         "max_tokens": 16384u32,
@@ -798,7 +871,7 @@ async fn call_agent_round_anthropic(
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-version", "2024-04-01")
         .header("Content-Type", "application/json")
         .json(&body)
         .timeout(std::time::Duration::from_secs(900))
@@ -841,11 +914,21 @@ pub async fn generate_chat(
     history: &[serde_json::Value],
     temperature: f64,
 ) -> Result<(String, TokenUsage)> {
+    generate_chat_with_hints(llm_config, system_prompt, history, temperature, CacheHints::none()).await
+}
+
+pub async fn generate_chat_with_hints(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[serde_json::Value],
+    temperature: f64,
+    cache_hints: CacheHints,
+) -> Result<(String, TokenUsage)> {
     let provider_name = format!("{}", llm_config.provider);
     with_retry(
         &format!("generate_chat/{}", provider_name),
         MAX_LLM_RETRIES,
-        || generate_chat_inner(llm_config, system_prompt, history, temperature),
+        || generate_chat_inner(llm_config, system_prompt, history, temperature, cache_hints.clone()),
     )
     .await
 }
@@ -855,6 +938,7 @@ async fn generate_chat_inner(
     system_prompt: &str,
     history: &[serde_json::Value],
     temperature: f64,
+    cache_hints: CacheHints,
 ) -> Result<(String, TokenUsage)> {
     match llm_config.provider {
         Provider::VertexAi | Provider::Gemini => {
@@ -864,7 +948,7 @@ async fn generate_chat_inner(
             generate_chat_openai_compat(llm_config, system_prompt, history, temperature).await
         }
         Provider::Anthropic => {
-            generate_chat_anthropic(llm_config, system_prompt, history, temperature).await
+            generate_chat_anthropic(llm_config, system_prompt, history, temperature, &cache_hints).await
         }
     }
 }
@@ -975,6 +1059,7 @@ async fn generate_chat_anthropic(
     system_prompt: &str,
     history: &[serde_json::Value],
     temperature: f64,
+    cache_hints: &CacheHints,
 ) -> Result<(String, TokenUsage)> {
     let api_key = llm_config
         .api_key
@@ -988,9 +1073,14 @@ async fn generate_chat_anthropic(
             serde_json::json!({"role": role, "content": content})
         })
         .collect();
+    let system = if cache_hints.cache_system {
+        anthropic_system_with_cache(system_prompt)
+    } else {
+        serde_json::json!(system_prompt)
+    };
     let body = serde_json::json!({
         "model": llm_config.model,
-        "system": system_prompt,
+        "system": system,
         "messages": messages,
         "max_tokens": 16384u32,
         "temperature": temperature
@@ -999,7 +1089,7 @@ async fn generate_chat_anthropic(
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-version", "2024-04-01")
         .header("Content-Type", "application/json")
         .json(&body)
         .timeout(std::time::Duration::from_secs(900))
@@ -1039,15 +1129,25 @@ pub async fn generate_chat_streaming(
     temperature: f64,
     token_tx: mpsc::UnboundedSender<String>,
 ) -> Result<(String, TokenUsage)> {
+    generate_chat_streaming_with_hints(llm_config, system_prompt, history, temperature, token_tx, CacheHints::none()).await
+}
+
+pub async fn generate_chat_streaming_with_hints(
+    llm_config: &LlmConfig,
+    system_prompt: &str,
+    history: &[serde_json::Value],
+    temperature: f64,
+    token_tx: mpsc::UnboundedSender<String>,
+    cache_hints: CacheHints,
+) -> Result<(String, TokenUsage)> {
     match llm_config.provider {
         Provider::Anthropic => {
-            generate_chat_anthropic_streaming(llm_config, system_prompt, history, temperature, token_tx).await
+            generate_chat_anthropic_streaming(llm_config, system_prompt, history, temperature, token_tx, &cache_hints).await
         }
         Provider::OpenAi | Provider::Grok | Provider::Groq | Provider::Mimo => {
             generate_chat_openai_streaming(llm_config, system_prompt, history, temperature, token_tx).await
         }
         Provider::VertexAi | Provider::Gemini => {
-            // Gemini streaming is complex; fall back to non-streaming
             let (text, usage) = generate_chat(llm_config, system_prompt, history, temperature).await?;
             let _ = token_tx.send(text.clone());
             Ok((text, usage))
@@ -1061,6 +1161,7 @@ async fn generate_chat_anthropic_streaming(
     history: &[serde_json::Value],
     temperature: f64,
     token_tx: mpsc::UnboundedSender<String>,
+    cache_hints: &CacheHints,
 ) -> Result<(String, TokenUsage)> {
     let api_key = llm_config
         .api_key
@@ -1072,9 +1173,14 @@ async fn generate_chat_anthropic_streaming(
         messages.push(msg.clone());
     }
 
+    let system = if cache_hints.cache_system {
+        anthropic_system_with_cache(system_prompt)
+    } else {
+        serde_json::json!(system_prompt)
+    };
     let body = serde_json::json!({
         "model": llm_config.model,
-        "system": system_prompt,
+        "system": system,
         "messages": messages,
         "max_tokens": 16384u32,
         "temperature": temperature,
@@ -1085,7 +1191,7 @@ async fn generate_chat_anthropic_streaming(
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-version", "2024-04-01")
         .header("Content-Type", "application/json")
         .json(&body)
         .timeout(std::time::Duration::from_secs(900))
@@ -1249,6 +1355,17 @@ pub async fn call_agent_round_streaming(
     system_prompt: &str,
     token_tx: mpsc::UnboundedSender<String>,
 ) -> Result<AgentRoundResult> {
+    call_agent_round_streaming_with_hints(llm_config, conversation, tool_schemas, system_prompt, token_tx, CacheHints::none()).await
+}
+
+pub async fn call_agent_round_streaming_with_hints(
+    llm_config: &LlmConfig,
+    conversation: &AgentConversation,
+    tool_schemas: &[serde_json::Value],
+    system_prompt: &str,
+    token_tx: mpsc::UnboundedSender<String>,
+    cache_hints: CacheHints,
+) -> Result<AgentRoundResult> {
     match llm_config.provider {
         Provider::OpenAi | Provider::Grok | Provider::Groq | Provider::Mimo => {
             call_agent_round_openai_compat_streaming(
@@ -1261,7 +1378,7 @@ pub async fn call_agent_round_streaming(
             .await
         }
         _ => {
-            let round = call_agent_round(llm_config, conversation, tool_schemas, system_prompt).await?;
+            let round = call_agent_round_with_hints(llm_config, conversation, tool_schemas, system_prompt, cache_hints).await?;
             if let Some(t) = &round.text {
                 let _ = token_tx.send(t.clone());
             }

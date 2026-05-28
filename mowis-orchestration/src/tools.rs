@@ -6,6 +6,17 @@ use tokio::sync::Mutex;
 
 use crate::plan::Tier;
 
+/// Factory that produces a `ToolTransport` for a given work directory.
+/// Used by the captain to switch between local execution (no VM) and
+/// vsock execution (OS Security mode — Alpine VM + mowis-executor).
+pub type TransportFactory =
+    Arc<dyn Fn(PathBuf) -> Box<dyn ToolTransport> + Send + Sync>;
+
+/// Default factory — produces a `LocalTransport` that runs tools in-process.
+pub fn local_transport_factory() -> TransportFactory {
+    Arc::new(|work_dir| Box::new(LocalTransport::new(work_dir)))
+}
+
 /// Transport for executing tools locally on the host (no VM).
 pub struct LocalTransport {
     work_dir: PathBuf,

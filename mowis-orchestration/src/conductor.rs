@@ -9,7 +9,6 @@ use crate::digest::SummaryDigestBuffer;
 use crate::events::{CaptainStatus, ConductorReplyKind, Event, EventBus};
 use crate::plan::{Plan, PlanId, PlanStatus, TaskId, TaskNode};
 
-#[derive(Debug)]
 pub struct Conductor {
     cfg: OrchConfig,
     bus: EventBus,
@@ -21,6 +20,8 @@ pub struct Conductor {
     workspace: Option<PathBuf>,
     /// Where `save_to_host` writes to (the user's project dir, default cwd).
     save_dest: PathBuf,
+    /// Transport factory passed to the Captain — local by default, vsock for OS Security mode.
+    transport_factory: crate::tools::TransportFactory,
 }
 
 #[derive(Debug)]
@@ -40,6 +41,13 @@ pub enum ConductorCommand {
 #[derive(Debug)]
 pub enum ConductorReply {
     Chat {
+        reply: String,
+    },
+    /// The conductor drafted a plan AND called start_build in one turn.
+    /// The Captain is already running fire-and-forget; callers should wait
+    /// for PlanCompleted / PlanFailed events on the bus.
+    BuildDispatched {
+        plan_id: PlanId,
         reply: String,
     },
     PlanDrafted {
@@ -105,6 +113,7 @@ impl Conductor {
             digest: SummaryDigestBuffer::new(512),
             workspace: None,
             save_dest: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            transport_factory: crate::tools::local_transport_factory(),
         };
         Ok((conductor, cmd_tx))
     }
@@ -116,46 +125,17 @@ impl Conductor {
         self.save_dest = save_dest;
     }
 
+    /// Override the transport the Captain uses (default: local in-process).
+    /// Call this with a vsock factory to enable OS Security mode for the session.
+    pub fn set_transport_factory(&mut self, factory: crate::tools::TransportFactory) {
+        self.transport_factory = factory;
+    }
+
     pub async fn run(mut self) -> Result<()> {
-        let (_cmd_tx, mut cmd_rx) = mpsc::channel::<ConductorCommand>(64);
-
-        // Subscribe to bus for digest
-        let bus_sub = self.bus.subscribe();
-        let mut sub_handle = self.digest.spawn_subscriber(bus_sub);
-
-        // Feed digest events from subscriber into buffer
-        let digest_rx = &mut sub_handle.receiver;
-
-        loop {
-            tokio::select! {
-                Some(cmd) = cmd_rx.recv() => {
-                    match cmd {
-                        ConductorCommand::UserMessage { text, reply_tx } => {
-                            let reply = self.handle_user_message(text).await;
-                            let reply = match reply {
-                                Ok(r) => r,
-                                Err(e) => ConductorReply::Error { message: e.to_string() },
-                            };
-                            let _ = reply_tx.send(reply);
-                        }
-                        ConductorCommand::CriticVerdict { plan_id, version, verdict } => {
-                            if let Err(e) = self.handle_critic_verdict(plan_id, version, verdict).await {
-                                tracing::error!(error = %e, "conductor: error handling critic verdict");
-                            }
-                        }
-                        ConductorCommand::EndConversation => {
-                            self.bus.emit(Event::ConversationEnded);
-                            break;
-                        }
-                    }
-                }
-                Some(event) = digest_rx.recv() => {
-                    self.digest.push(event);
-                }
-            }
-        }
-
-        sub_handle.shutdown().await;
+        // NOTE: run() is not used in practice — callers (TUI, chat, autonomous)
+        // use handle_user_message() directly. The original implementation created
+        // a disconnected channel. Keep this as a no-op for backward compat.
+        tracing::warn!("Conductor::run() is not used — callers should use handle_user_message() directly");
         Ok(())
     }
 
@@ -194,7 +174,7 @@ impl Conductor {
                                     .map(TaskId)
                                     .collect(),
                                 model_tier: crate::plan::ModelTier::Fast,
-                                tool_budget: 30,
+                                tool_budget: 10,
                                 files_hint: vec![],
                             };
                             let plan_id = self.current_plan.clone().unwrap();
@@ -238,7 +218,17 @@ impl Conductor {
         // If start_build was called, the captain is already running — don't also
         // trigger draft_plan_from_response which would spawn a second captain.
         if build_dispatched {
-            return Ok(ConductorReply::Chat { reply: self.strip_tool_calls(&reply) });
+            let clean = self.strip_tool_calls(&reply);
+            // Strip plan blocks from the visible reply — they're already saved to disk.
+            let prose = strip_plan_from_reply(&clean);
+            let plan_id = self.current_plan.clone();
+            if let Some(pid) = plan_id {
+                return Ok(ConductorReply::BuildDispatched {
+                    plan_id: pid,
+                    reply: prose.trim().to_string(),
+                });
+            }
+            return Ok(ConductorReply::Chat { reply: clean });
         }
 
         // Check if the LLM wants to draft a plan (contains <plan> tag)
@@ -325,12 +315,13 @@ impl Conductor {
             }
         });
 
-        let (response, usage) = crate::providers::generate_chat_streaming(
+        let (response, usage) = crate::providers::generate_chat_streaming_with_hints(
             &llm_config,
             &system_prompt,
             &history,
             0.7,
             token_tx,
+            crate::providers::CacheHints::conductor(),
         )
         .await?;
 
@@ -384,12 +375,13 @@ impl Conductor {
                 }
             });
 
-            let round = crate::providers::call_agent_round_streaming(
+            let round = crate::providers::call_agent_round_streaming_with_hints(
                 &llm_config,
                 &convo,
                 &tools,
                 &system_prompt,
                 token_tx,
+                crate::providers::CacheHints::conductor(),
             )
             .await?;
             let _ = fwd.await;
@@ -412,6 +404,20 @@ impl Conductor {
 
             if round.tool_calls.is_empty() {
                 break;
+            }
+
+            // If the model output a <plan> block AND is about to call start_build,
+            // parse and register the plan NOW — before executing the tool call.
+            // Without this, execute_start_build returns "no plan drafted" because
+            // current_plan is only set after the loop exits in handle_user_message.
+            if final_text.contains("<plan>") && self.current_plan.is_none()
+                && round.tool_calls.iter().any(|tc| tc.name == "start_build")
+            {
+                let user_msg = self.conversation.last().cloned().unwrap_or_default();
+                match self.draft_plan_from_response(&final_text, &user_msg).await {
+                    Ok(plan_id) => { self.current_plan = Some(plan_id); }
+                    Err(e) => { tracing::warn!(error = %e, "inline plan parse failed"); }
+                }
             }
 
             convo.push_assistant_tool_calls(round.tool_calls.clone());
@@ -469,15 +475,17 @@ impl Conductor {
         let cfg = self.cfg.clone();
         let bus = self.bus.clone();
         let plan_for_task = plan_id.clone();
+        let transport_factory = self.transport_factory.clone();
 
         // Fire-and-forget: the Captain's events (CaptainStarted, CrewStarted,
         // CrewToolSummary, PlanCompleted/Failed) flow to the bus and the UI.
         tokio::spawn(async move {
-            match crate::captain::SimpleCaptain::new_in(
+            match crate::captain::SimpleCaptain::new_in_with_transport(
                 &cfg,
                 plan_for_task.clone(),
                 bus.clone(),
                 workspace,
+                transport_factory,
             ) {
                 Ok(captain) => {
                     if let Err(e) = captain.run().await {
@@ -611,7 +619,7 @@ impl Conductor {
             .collect();
 
         let (response, usage) =
-            crate::providers::generate_chat(&llm_config, &system_prompt, &history, 0.7).await?;
+            crate::providers::generate_chat_with_hints(&llm_config, &system_prompt, &history, 0.7, crate::providers::CacheHints::conductor()).await?;
         self.bus.emit(Event::TokensUsed {
             agent_id: "conductor".to_string(),
             role: "conductor".to_string(),
@@ -621,12 +629,18 @@ impl Conductor {
         });
         self.conversation.push(response.clone());
 
-        if let Some(toml_start) = response.find("<plan>") {
-            if let Some(toml_end) = response.find("</plan>") {
-                let plan_toml = &response[toml_start + 6..toml_end];
-                if let Ok(task_graph) = toml::from_str::<crate::plan::TaskGraph>(plan_toml) {
-                    plan.task_graph = task_graph;
-                }
+        let mut search2 = response.as_str();
+        let mut blocks2: Vec<&str> = Vec::new();
+        while let Some(s) = search2.find("<plan>") {
+            let after = &search2[s + 6..];
+            if let Some(e) = after.find("</plan>") {
+                blocks2.push(&after[..e]);
+                search2 = &after[e + 7..];
+            } else { break; }
+        }
+        for block in blocks2.into_iter().rev() {
+            if let Ok(tg) = toml::from_str::<crate::plan::TaskGraph>(block) {
+                if !tg.tasks.is_empty() { plan.task_graph = tg; break; }
             }
         }
 
@@ -650,24 +664,38 @@ impl Conductor {
         let plan_id = PlanId(plan_id_str);
         let mut plan = Plan::new_draft(plan_id.clone(), user_msg, "stdin-session");
 
-        if let Some(toml_start) = response.find("<plan>") {
-            // Find the LAST </plan> to avoid matching partial tags in streaming
-            if let Some(toml_end) = response.rfind("</plan>") {
-                let plan_toml = &response[toml_start + 6..toml_end];
-                tracing::debug!(toml = %plan_toml, "parsing plan TOML");
-                match toml::from_str::<crate::plan::TaskGraph>(plan_toml) {
-                    Ok(task_graph) => {
-                        tracing::info!(tasks = task_graph.tasks.len(), "parsed plan tasks");
+        // Extract all <plan>...</plan> blocks and try each from last to first.
+        // The model sometimes outputs the plan twice (e.g. draft then confirm);
+        // taking the last valid block avoids spanning two blocks with find+rfind.
+        let mut search = response;
+        let mut plan_blocks: Vec<&str> = Vec::new();
+        while let Some(start) = search.find("<plan>") {
+            let after = &search[start + 6..];
+            if let Some(end) = after.find("</plan>") {
+                plan_blocks.push(&after[..end]);
+                search = &after[end + 7..];
+            } else {
+                break;
+            }
+        }
+        for plan_toml in plan_blocks.into_iter().rev() {
+            tracing::debug!(toml = %plan_toml, "parsing plan TOML block");
+            match toml::from_str::<crate::plan::TaskGraph>(plan_toml) {
+                Ok(task_graph) if !task_graph.tasks.is_empty() => {
+                    tracing::info!(tasks = task_graph.tasks.len(), "parsed plan tasks");
+                    plan.task_graph = task_graph;
+                    break;
+                }
+                Ok(_) => {
+                    tracing::warn!("parsed plan TOML had 0 tasks, trying previous block");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "plan TOML parse error, trying line-by-line extraction");
+                    let task_graph = extract_tasks_from_text(plan_toml);
+                    if !task_graph.tasks.is_empty() {
+                        tracing::info!(tasks = task_graph.tasks.len(), "extracted tasks from text");
                         plan.task_graph = task_graph;
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to parse plan TOML, trying line-by-line extraction");
-                        // Try to extract tasks line by line
-                        let task_graph = extract_tasks_from_text(plan_toml);
-                        if !task_graph.tasks.is_empty() {
-                            tracing::info!(tasks = task_graph.tasks.len(), "extracted tasks from text");
-                            plan.task_graph = task_graph;
-                        }
+                        break;
                     }
                 }
             }
@@ -912,7 +940,7 @@ fn extract_tasks_from_text(text: &str) -> crate::plan::TaskGraph {
 
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed == "[[task]]" {
+        if trimmed == "[[task]]" || trimmed == "[[tasks]]" {
             if in_task && !current_id.is_empty() {
                 tasks.push(TaskNode {
                     id: TaskId(current_id.clone()),
@@ -930,7 +958,7 @@ fn extract_tasks_from_text(text: &str) -> crate::plan::TaskGraph {
             current_desc.clear();
             current_deps.clear();
             current_tier = ModelTier::Fast;
-            current_budget = 20;
+            current_budget = 8;
             current_hint.clear();
         } else if in_task {
             if let Some(val) = trimmed.strip_prefix("id = ") {
@@ -978,6 +1006,24 @@ fn extract_tasks_from_text(text: &str) -> crate::plan::TaskGraph {
     }
 
     TaskGraph { tasks }
+}
+
+/// Remove any `<plan>...</plan>` blocks from a conductor reply so the
+/// prose before/after is shown to the user without raw TOML leaking in.
+fn strip_plan_from_reply(text: &str) -> String {
+    let mut result = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<plan>") {
+        result.push_str(&rest[..start]);
+        rest = &rest[start + 6..];
+        if let Some(end) = rest.find("</plan>") {
+            rest = &rest[end + 7..];
+        } else {
+            break;
+        }
+    }
+    result.push_str(rest);
+    result
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

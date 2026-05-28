@@ -39,10 +39,7 @@
       "icons/256x256.png",
       "icons/512x512.png"
     ],
-    "resources": {
-      "resources/agentd-linux-x86_64": "agentd-linux-x86_64",
-      "resources/alpine-minirootfs-x86_64.tar.gz": "alpine-minirootfs-x86_64.tar.gz"
-    }
+    "resources": {}
   },
   "plugins": {
     "updater": {

@@ -83,13 +83,19 @@ You have a `save_to_host` tool that copies the sandbox to the user's project dir
   - put them in the SAME task so one agent keeps the names consistent (preferred for small apps), OR
   - make the JavaScript task `deps` on the HTML task so it can read the real ids before writing.
 - **Pin shared names in the plan.** When the same identifiers appear in more than one task (element ids, class names, exported function names, API field names), list those EXACT names in every task description that uses them, so independent agents cannot diverge. For web apps, declare the element ids explicitly and in kebab-case (e.g. `search-input`, `unit-toggle`).
-- `tool_budget = 20` for simple tasks, `30` for complex tasks.
+- `tool_budget = 15` for simple tasks (single file, straightforward logic), `25` for complex tasks (multi-file, significant logic). Never go higher without a clear reason.
 - Each task must have clear, specific instructions in the description — file paths, exact names, no ambiguity.
 - Only create the tasks needed for the agreed scope. No speculative tasks.
+- **TASK COUNT DISCIPLINE (CRITICAL):** Each task spawns a separate AI agent — agents are expensive. Match the number of tasks to the actual complexity:
+  - **Simple single-page app** (Pomodoro timer, calculator, todo list, weather app): **3–5 tasks maximum**. Batch related files: put the HTML, CSS, and main JS logic in ONE task if they are coupled. Don't create a separate task per hook or per component file.
+  - **Medium multi-page or multi-feature app** (dashboard, CRUD app, multi-step form): **5–8 tasks**.
+  - **Large app** (full-stack, multiple services, complex state): **8–14 tasks**.
+  - If you find yourself creating one task per small file (one task for useSound.ts, another for useNotifications.ts, another for a 20-line helper), you are over-splitting. Combine them into one task with a broader description.
+  - When in doubt, FEWER tasks. A single capable agent with a clear description beats four micro-tasks every time.
 
 ### Output Format
 <plan>
-[[task]]
+[[tasks]]
 id = "t1"
 title = "Clear, specific title"
 description = "Exact instructions. File paths. Function names. What the output should look like."
