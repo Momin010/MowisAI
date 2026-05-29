@@ -191,7 +191,7 @@
         </a>
         <div class="sb-daemon-status" id="sb-daemon">
           <span class="sb-daemon-dot" id="sb-daemon-dot"></span>
-          <span id="sb-daemon-label">daemon offline</span>
+          <span id="sb-daemon-label">engine offline</span>
         </div>
       </div>
     </nav>
@@ -523,16 +523,6 @@
 
           <div class="settings-section">Runtime</div>
           <div class="form-row">
-            <label class="form-label">Socket path<span class="form-hint">agentd Unix socket</span></label>
-            <div class="form-ctrl">
-              <input type="text" id="set-socket" class="form-input" value="/tmp/agentd.sock" />
-              <div class="form-actions">
-                <button class="btn-outline sm" id="btn-test-socket">Test connection</button>
-                <span class="socket-status" id="socket-status"></span>
-              </div>
-            </div>
-          </div>
-          <div class="form-row">
             <label class="form-label">Mode<span class="form-hint">Orchestration complexity</span></label>
             <div class="form-ctrl">
               <select id="set-mode" class="form-select">
@@ -541,16 +531,6 @@
                 <option value="standard">Standard — ≤3 agents</option>
                 <option value="full">Full — 7-layer pipeline</option>
               </select>
-              </div>
-          </div>
-          <div class="form-row">
-            <label class="form-label">Engine setup<span class="form-hint">Point to QEMU/WSL after onboarding</span></label>
-            <div class="form-ctrl">
-              <div class="form-actions">
-                <button class="btn-outline sm" id="btn-engine-point">Add QEMU/WSL path</button>
-                <button class="btn-outline sm" id="btn-engine-developer">Developer bootstrap</button>
-              </div>
-              <div class="form-hint">After saving, the app will restart and retry the engine automatically.</div>
             </div>
           </div>
           <div class="form-row">
@@ -734,16 +714,16 @@
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
       </div>
       <div>
-        <div class="engine-modal-title">Developer Mode Bootstrap</div>
-        <div class="engine-modal-subtitle">One-click QEMU setup: boot Alpine, install agentd, bridge to TCP</div>
+        <div class="engine-modal-title">VM Engine Bootstrap</div>
+        <div class="engine-modal-subtitle">Boot a Linux VM via QEMU and connect mowis-executor over TCP</div>
       </div>
     </div>
 
     <div class="engine-modal-body">
       <div class="dev-bootstrap-explain">
-        <div class="dev-bootstrap-step"><span class="dev-step-num">1</span> Start QEMU with your Alpine ISO + disk</div>
-        <div class="dev-bootstrap-step"><span class="dev-step-num">2</span> Auto-login, activate network, mount storage</div>
-        <div class="dev-bootstrap-step"><span class="dev-step-num">3</span> Install socat, start agentd, bridge to TCP</div>
+        <div class="dev-bootstrap-step"><span class="dev-step-num">1</span> Start QEMU with your Linux kernel + initrd</div>
+        <div class="dev-bootstrap-step"><span class="dev-step-num">2</span> mowis-executor boots as PID 1 inside the VM</div>
+        <div class="dev-bootstrap-step"><span class="dev-step-num">3</span> TCP port forwarded from host to executor</div>
         <div class="dev-bootstrap-step"><span class="dev-step-num">4</span> App connects automatically via localhost</div>
       </div>
 

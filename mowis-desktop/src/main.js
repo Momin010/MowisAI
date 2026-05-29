@@ -377,10 +377,10 @@ async function checkDaemonWithGuidance() {
 }
 
 const OFFLINE_GUIDANCE = {
-  windows: `MowisAI needs a Linux engine to run. It will automatically install one via WSL2.\n\nIf setup is taking a while: open PowerShell as Administrator and run <code>wsl --install</code>, then restart the app.`,
+  windows: `MowisAI needs QEMU to run the Linux engine.\n\nInstall it from <strong>qemu.weilnetz.de</strong> or run <code>choco install qemu</code>, then restart the app.`,
   macos: `MowisAI needs QEMU to run the Linux engine.\n\nInstall it with: <code>brew install qemu</code>\n\nThen restart the app.`,
-  linux: `The agentd daemon is not running.\n\nStart it with: <code>sudo agentd socket --path /tmp/agentd.sock</code>`,
-  unknown: `The agent engine is not connected. Check the Settings tab to verify your socket path.`,
+  linux: `The orchestration engine is starting up. If it takes too long, try restarting the app.`,
+  unknown: `The orchestration engine is not connected. Restart the app or check the Settings tab.`,
 };
 
 function showOfflineBanner(os, launcher) {
@@ -433,7 +433,7 @@ function setDaemonStatus(on) {
   const sbLabel = $('sb-daemon-label');
 
   if (sbDot)   sbDot.classList.toggle('on', on);
-  if (sbLabel) sbLabel.textContent = on ? 'daemon online' : 'daemon offline';
+  if (sbLabel) sbLabel.textContent = on ? 'engine online' : 'engine offline';
 }
 
 // ── Tauri event listeners ─────────────────────────────────────────────────────
@@ -609,8 +609,7 @@ async function ensureProvider() {
       if (rowKey) rowKey.classList.toggle('hidden', isVertex);
       if (rowGcp) rowGcp.classList.toggle('hidden', !isVertex);
       if (hintEl) hintEl.textContent = PM_HINTS[prov] || '';
-      populateModelDropdown(prov);
-      populateExecutionModelDropdown(prov, State.config?.execution_model || '');
+      populateModelDropdown(prov, 'pm-model');
     }
 
     provSel.value = State.config?.provider || 'gemini';
@@ -992,14 +991,6 @@ function setupHandlers() {
   $('btn-save-settings')?.addEventListener('click', saveSettings);
   setupSettingsHandlers();
 
-  $('btn-engine-point')?.addEventListener('click', async () => {
-    toast('Point to your QEMU installation', 'info');
-    await handlePointInstallationFlow();
-  });
-  $('btn-engine-developer')?.addEventListener('click', () => {
-    showDeveloperBootstrap();
-  });
-
   $('btn-discard-sandbox')?.addEventListener('click', async () => {
     try {
       await invoke('discard_sandbox');
@@ -1008,15 +999,6 @@ function setupHandlers() {
       toast('Could not discard sandbox: ' + err, 'error');
     }
   });
-  $('btn-test-socket')?.addEventListener('click', async () => {
-    const statusEl = $('socket-status');
-    try {
-      const on = await invoke('check_daemon');
-      if (statusEl) { statusEl.textContent = on ? '✓ Connected' : '✗ Not reachable'; statusEl.className = 'socket-status ' + (on ? 'ok' : 'err'); }
-      toast(on ? 'Daemon connected' : 'Daemon not reachable', on ? 'success' : 'error');
-    } catch { if (statusEl) { statusEl.textContent = '✗ Error'; statusEl.className = 'socket-status err'; } }
-  });
-
   $('btn-browse-sa-key')?.addEventListener('click', async () => {
     try {
       const selected = await openDialogNative({

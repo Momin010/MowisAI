@@ -3,6 +3,12 @@
  */
 
 import { State, $, setText, toast, escHtml, syncCustomSelect, updateSettingsAgentHint } from './state.js';
+
+// Helper: sync a custom select after programmatically changing its options
+function resync(id) {
+  const el = $(id);
+  if (el) syncCustomSelect(el);
+}
 import { invoke } from './bridge.js';
 
 // ── Provider → Model mapping ─────────────────────────────────────────────────
@@ -52,23 +58,28 @@ export const PROVIDER_MODELS = {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-export function populateModelDropdown(provider) {
-  const sel = $('set-model');
+export function populateModelDropdown(provider, targetId = 'set-model') {
+  const sel = $(targetId);
   const custom = $('set-model-custom');
   if (!sel) return;
 
   const models = PROVIDER_MODELS[provider] || [];
+  const includeCustom = targetId === 'set-model';
   sel.innerHTML = models.map(m => `<option value="${m.id}">${m.label}</option>`).join('')
-    + '<option value="__custom">Custom…</option>';
+    + (includeCustom ? '<option value="__custom">Custom…</option>' : '');
 
-  sel.onchange = () => {
-    if (sel.value === '__custom') {
-      custom?.classList.remove('hidden');
-      custom?.focus();
-    } else {
-      custom?.classList.add('hidden');
-    }
-  };
+  if (includeCustom) {
+    sel.onchange = () => {
+      if (sel.value === '__custom') {
+        custom?.classList.remove('hidden');
+        custom?.focus();
+      } else {
+        custom?.classList.add('hidden');
+      }
+    };
+  }
+
+  resync(targetId);
 }
 
 export function populateExecutionModelDropdown(provider, currentVal) {
@@ -78,6 +89,7 @@ export function populateExecutionModelDropdown(provider, currentVal) {
   sel.innerHTML = '<option value="">Same as planning model</option>'
     + models.map(m => `<option value="${m.id}">${m.label}</option>`).join('');
   if (currentVal) sel.value = currentVal;
+  resync('set-execution-model');
 }
 
 export function setVal(id, val) {
@@ -120,7 +132,6 @@ export function loadSettings() {
   setVal('set-gcp', c.gcp_project || '');
   setVal('set-gcp-region', c.gcp_region || 'us-central1');
   setVal('set-sa-key', c.gcp_service_account_key_path || '');
-  setVal('set-socket', c.socket_path || '/tmp/agentd.sock');
   setVal('set-mode', c.mode || 'auto');
   setVal('set-max-agents', c.max_agents || 100);
   const rowGcp = $('row-gcp');
@@ -147,7 +158,6 @@ export async function saveSettings() {
   if (modelVal === '__custom') modelVal = modelCustom?.value?.trim() || '';
 
   const config = {
-    socket_path: getVal('set-socket'),
     max_agents: parseInt(getVal('set-max-agents') || '100'),
     mode: getVal('set-mode'),
     provider: getVal('set-provider'),
