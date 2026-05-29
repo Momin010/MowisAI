@@ -375,7 +375,7 @@ pub async fn boot_os_security_vm(
     bridge.emit_detail("booting", &format!("VM booted: cid={} port={}", handle.guest_cid(), handle.executor_port()), 80, "success", None).await;
 
     bridge.emit_detail("booting", "Waiting for executor to come online…", 85, "info", None).await;
-    let conn = wait_for_executor(handle.guest_cid(), handle.executor_port(), 30).await?;
+    let conn = wait_for_executor(handle.as_ref(), 30).await?;
     bridge.emit_detail("ready", "OS Security mode online", 100, "success", None).await;
 
     Ok((handle, std::sync::Arc::new(conn)))
@@ -390,10 +390,23 @@ fn find_executor_binary() -> Option<PathBuf> {
     candidates.iter().find(|p| p.exists()).cloned()
 }
 
-async fn wait_for_executor(cid: u32, port: u32, max_secs: u64) -> Result<mowis_host::transport::Connection> {
+async fn wait_for_executor(
+    handle: &dyn mowis_host::vmm::VmHandle,
+    max_secs: u64,
+) -> Result<mowis_host::transport::Connection> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs);
     loop {
-        if let Ok(conn) = mowis_host::transport::connect(cid, port).await {
+        let conn_result = if handle.use_tcp() {
+            let host = handle.executor_host();
+            let port = handle.executor_port() as u16;
+            mowis_host::transport::connect_tcp_conn(host, port).await
+        } else {
+            #[cfg(target_os = "linux")]
+            { mowis_host::transport::connect(handle.guest_cid(), handle.executor_port()).await }
+            #[cfg(not(target_os = "linux"))]
+            { Err(anyhow::anyhow!("vsock not available on this platform")) }
+        };
+        if let Ok(conn) = conn_result {
             if conn.ping().await.is_ok() {
                 return Ok(conn);
             }
