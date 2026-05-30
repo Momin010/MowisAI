@@ -1,0 +1,42 @@
+[package]
+name = "mowis-host"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side library + mowisd CLI: VM lifecycle (QEMU/Apple Virt/WSL2), image pull, vsock transport"
+
+[lib]
+name = "mowis_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mowisd"
+path = "src/main.rs"
+
+[dependencies]
+mowis-protocol = { path = "../mowis-protocol" }
+mowis-orchestration = { path = "../mowis-orchestration" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+async-trait = "0.1"
+which = "6"
+dashmap = "5"
+tempfile = "3"
+base64 = "0.21"
+tar = "0.4"
+flate2 = "1"
+ratatui = "0.26"
+crossterm = "0.27"
+chrono = "0.4"
+walkdir = "2"
+
+# vsock transport is Linux-only for the MVP. Apple Virtualization.framework
+# and Hyper-V hvsocket integrations live behind backend-specific feature
+# flags that will be added with their respective vmm backends.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.5"

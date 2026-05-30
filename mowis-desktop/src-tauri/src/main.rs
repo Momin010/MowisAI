@@ -1,21 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod platform;
 mod backend;
-mod sandbox;
-mod types;
-mod state;
 mod bridge_loop;
 mod commands;
+mod orch_bridge;
+mod sandbox;
+mod state;
+mod types;
 
-use backend::BackendBridge;
+use backend::OrchBridge;
 use bridge_loop::start_bridge;
 use commands::*;
 use state::AppState;
 use std::sync::Arc;
 
 fn main() {
-    let bridge = BackendBridge::new();
+    let bridge = OrchBridge::new();
     let state = Arc::new(AppState::new(bridge));
     let state_for_setup = Arc::clone(&state);
 
@@ -57,11 +57,6 @@ fn main() {
             get_sandbox_size,
             get_zero_workspace,
             get_zero_workspace_base,
-            get_developer_config,
-            save_developer_config,
-            validate_developer_config,
-            start_developer_bootstrap,
-            clear_developer_config,
             delete_session_local,
             get_session_workspace,
             export_workspace_to,
@@ -71,4 +66,3 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error running mowis-desktop");
 }
-

@@ -1,4 +1,5 @@
-use crate::backend::BackendBridge;
+use crate::backend::OrchBridge;
+use crate::orch_bridge::OrchSession;
 use crate::sandbox::SandboxInfo;
 use crate::types::*;
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ use tokio::sync::mpsc;
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct AppState {
-    pub bridge: Arc<BackendBridge>,
+    pub bridge: Arc<OrchBridge>,
     pub config: Mutex<Config>,
     pub current_session_id: Mutex<Option<String>>,
     pub messages: Mutex<Vec<ChatMessage>>,
@@ -26,25 +27,29 @@ pub struct AppState {
     pub tool_calls_total: Mutex<u64>,
     pub storage_path: PathBuf,
 
-    // Channel to send commands to the background bridge
+    /// Channel to send BridgeCommands to the background bridge loop.
     pub cmd_tx: Mutex<Option<mpsc::Sender<BridgeCommand>>>,
 
-    // Active soft sandbox for the current session (None when sandbox is off or no session).
+    /// Active soft sandbox for the current session (None when sandbox is off).
     pub active_sandbox: Mutex<Option<SandboxInfo>>,
 
-    // Last workspace path emitted by WorkspaceReady event.
+    /// Last workspace path emitted by WorkspaceReady event.
     pub workspace_path: Mutex<Option<String>>,
-    // Changed file paths relative to workspace_path from last WorkspaceReady.
+    /// Changed file paths from last WorkspaceReady.
     pub workspace_files: Mutex<Vec<String>>,
 
-    // Sandbox IDs active in the current streaming session.
+    /// Sandbox IDs active in the current streaming session.
     pub active_sandbox_ids: Mutex<Vec<String>>,
-    // Per-agent state keyed by agent_id (populated from subscribe_events stream).
+    /// Per-agent state keyed by agent_id.
     pub agent_states: Mutex<HashMap<String, serde_json::Value>>,
+
+    /// Live orchestration session (Conductor + Critic + EventBus).
+    /// Persisted across conversation turns; replaced when a new session starts.
+    pub orch_session: tokio::sync::Mutex<Option<OrchSession>>,
 }
 
 impl AppState {
-    pub fn new(bridge: Arc<BackendBridge>) -> Self {
+    pub fn new(bridge: Arc<OrchBridge>) -> Self {
         let storage_path = default_storage_path();
         let persisted = load_persisted_state(&storage_path);
         let current_session_id = persisted.current_session_id.clone();
@@ -98,6 +103,7 @@ impl AppState {
             workspace_files: Mutex::new(Vec::new()),
             active_sandbox_ids: Mutex::new(Vec::new()),
             agent_states: Mutex::new(HashMap::new()),
+            orch_session: tokio::sync::Mutex::new(None),
         }
     }
 }

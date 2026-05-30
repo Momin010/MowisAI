@@ -109,6 +109,10 @@ pub struct Config {
     /// When empty, falls back to `model` so single-model setups work unchanged.
     #[serde(default)]
     pub execution_model: String,
+    /// Per-session OS Security flag: when true, agents run inside an Alpine VM
+    /// (mowis-executor over vsock) instead of directly on the host filesystem.
+    #[serde(default)]
+    pub os_security: bool,
 }
 
 pub fn default_sandbox_enabled() -> bool {
@@ -132,6 +136,7 @@ impl Default for Config {
             gcp_service_account_key_path: String::new(),
             sandbox_enabled: true,
             execution_model: String::new(),
+            os_security: false,
         }
     }
 }

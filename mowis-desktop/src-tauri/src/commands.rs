@@ -2,7 +2,6 @@ use crate::sandbox;
 use crate::sandbox::SandboxInfo;
 use crate::state::*;
 use crate::types::*;
-use crate::platform;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -23,7 +22,7 @@ pub async fn open_url(url: String) -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Git helpers (used by validate_git_repository and clone_github_repo)
+// Git helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn run_git_command(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
@@ -111,11 +110,7 @@ fn strip_extended_path_prefix(path: PathBuf) -> PathBuf {
 
 fn path_to_string(path: &Path) -> String {
     let s = path.display().to_string();
-    if s.starts_with(r"\\?\") {
-        s[4..].to_string()
-    } else {
-        s
-    }
+    if s.starts_with(r"\\?\") { s[4..].to_string() } else { s }
 }
 
 fn parse_github_repo_url(raw: &str) -> Result<(String, String), String> {
@@ -123,7 +118,6 @@ fn parse_github_repo_url(raw: &str) -> Result<(String, String), String> {
     if trimmed.is_empty() {
         return Err("Paste a GitHub repository URL".to_string());
     }
-
     let path = if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
         rest
     } else if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
@@ -131,7 +125,6 @@ fn parse_github_repo_url(raw: &str) -> Result<(String, String), String> {
     } else {
         return Err("Use a GitHub HTTPS or SSH repository URL".to_string());
     };
-
     let without_fragment = path.split(['#', '?']).next().unwrap_or(path);
     let trimmed_path = without_fragment.trim_matches('/');
     let clean = trimmed_path.strip_suffix(".git").unwrap_or(trimmed_path);
@@ -139,21 +132,16 @@ fn parse_github_repo_url(raw: &str) -> Result<(String, String), String> {
     if parts.len() != 2 || !is_valid_github_segment(parts[0]) || !is_valid_github_segment(parts[1]) {
         return Err("Use a repository URL like https://github.com/owner/repo".to_string());
     }
-
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
 fn is_valid_github_segment(value: &str) -> bool {
     !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+        && value.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
 }
 
 fn is_non_empty_dir(path: &Path) -> Result<bool, String> {
-    if !path.exists() {
-        return Ok(false);
-    }
+    if !path.exists() { return Ok(false); }
     if !path.is_dir() {
         return Err(format!("{} already exists and is not a folder", path.display()));
     }
@@ -183,37 +171,24 @@ pub async fn clone_github_repo(
     if !parent.is_dir() {
         return Err(format!("{} is not a folder", parent.display()));
     }
-
     let target = parent.join(&repo_name);
     if is_non_empty_dir(&target)? {
         return Err(format!("{} already exists and is not empty", target.display()));
     }
-
     let git = which::which("git").map_err(|_| {
         "Git is not installed. Download it from https://git-scm.com/downloads".to_string()
     })?;
     let output = Command::new(git)
-        .arg("clone")
-        .arg(repo_url.trim())
-        .arg(&target)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
+        .arg("clone").arg(repo_url.trim()).arg(&target)
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .output().await
         .map_err(|err| format!("run git clone: {err}"))?;
-
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(if detail.is_empty() {
-            "git clone failed".to_string()
-        } else {
-            detail
-        });
+        return Err(if detail.is_empty() { "git clone failed".to_string() } else { detail });
     }
-
     collect_git_repository_info(target, "github", Some(repo_url.trim().to_string())).await
 }
 
@@ -248,40 +223,8 @@ pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<Config, Strin
 
 #[tauri::command]
 pub async fn save_config(state: State<'_, Arc<AppState>>, config: Config) -> Result<(), String> {
-    *state.config.lock().unwrap() = config.clone();
-    save_state(&state)?;
-
-    // Sync provider config to agentd so orchestration uses the same credentials
-    let bridge = Arc::clone(&state.bridge);
-    if bridge.is_connected() {
-        let payload = serde_json::json!({
-            "request_type": "set_config",
-            "provider": config.provider,
-            "model": config.model,
-            "execution_model": if config.execution_model.is_empty() { None } else { Some(&config.execution_model) },
-            "api_key": if config.api_key.is_empty() { None } else { Some(&config.api_key) },
-            "gcp_project_id": if config.gcp_project.is_empty() { None } else { Some(&config.gcp_project) },
-        });
-        match bridge.send(payload).await {
-            Ok(()) => {
-                match bridge.recv_next().await {
-                    Ok(Some(resp)) => {
-                        if resp.get("status").and_then(|s| s.as_str()) == Some("ok") {
-                            log::info!("[config] Synced provider config to agentd");
-                        } else {
-                            let err = resp["error"].as_str().unwrap_or("unknown error");
-                            log::warn!("[config] agentd rejected config sync: {}", err);
-                        }
-                    }
-                    Ok(None) => log::warn!("[config] agentd closed connection during config sync"),
-                    Err(e) => log::warn!("[config] Failed to read agentd config sync response: {}", e),
-                }
-            }
-            Err(e) => log::warn!("[config] Failed to sync config to agentd: {}", e),
-        }
-    }
-
-    Ok(())
+    *state.config.lock().unwrap() = config;
+    save_state(&state)
 }
 
 #[tauri::command]
@@ -291,7 +234,6 @@ pub async fn get_daemon_status(state: State<'_, Arc<AppState>>) -> Result<bool, 
 
 #[tauri::command]
 pub async fn check_daemon(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
-    // Clone sender outside the lock to avoid holding MutexGuard across .await
     let tx_opt = state.cmd_tx.lock().unwrap().clone();
     if let Some(tx) = tx_opt {
         let _ = tx.send(BridgeCommand::CheckSocket).await;
@@ -313,7 +255,7 @@ pub async fn start_session(
     let cfg = state.config.lock().unwrap().clone();
     let resolved_mode = mode.unwrap_or_else(|| cfg.mode.clone());
 
-    // Discard any sandbox left over from a previous session.
+    // Discard previous sandbox.
     {
         let prev = state.active_sandbox.lock().unwrap().take();
         if let Some(sb) = prev {
@@ -323,56 +265,56 @@ pub async fn start_session(
         }
     }
 
-    // Resolve repo context, optionally redirecting project_path to a sandbox upper_dir.
-    let _project_path_zero = project_path.clone();
+    // Drop any existing orch session so the next message starts fresh.
+    *state.orch_session.lock().await = None;
+
+    // Resolve repo context.
     let repo_context = if resolved_mode == "zero" {
         None
     } else {
         project_path
-        .filter(|path| !path.trim().is_empty())
-        .map(|path| -> Result<RepositoryContext, String> {
-            if cfg.sandbox_enabled {
-                let lower = std::path::Path::new(&path);
-                match sandbox::create_sandbox(lower) {
-                    Ok(info) => {
-                        let upper = info.upper_dir.clone();
-                        log::info!("Sandbox created: id={} upper={}", info.id, upper);
-                        *state.active_sandbox.lock().unwrap() = Some(info);
-                        Ok(RepositoryContext {
-                            project_path: upper,
-                            repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
-                            repo_url,
-                        })
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| -> Result<RepositoryContext, String> {
+                if cfg.sandbox_enabled {
+                    let lower = std::path::Path::new(&path);
+                    match sandbox::create_sandbox(lower) {
+                        Ok(info) => {
+                            let upper = info.upper_dir.clone();
+                            log::info!("Sandbox created: id={} upper={}", info.id, upper);
+                            *state.active_sandbox.lock().unwrap() = Some(info);
+                            Ok(RepositoryContext {
+                                project_path: upper,
+                                repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
+                                repo_url,
+                            })
+                        }
+                        Err(err) => {
+                            log::warn!("Sandbox creation failed ({err}), falling back to direct access");
+                            Ok(RepositoryContext {
+                                project_path: path,
+                                repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
+                                repo_url,
+                            })
+                        }
                     }
-                    Err(err) => {
-                        log::warn!("Sandbox creation failed ({err}), falling back to direct access");
-                        Ok(RepositoryContext {
-                            project_path: path,
-                            repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
-                            repo_url,
-                        })
-                    }
+                } else {
+                    Ok(RepositoryContext {
+                        project_path: path,
+                        repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
+                        repo_url,
+                    })
                 }
-            } else {
-                Ok(RepositoryContext {
-                    project_path: path,
-                    repo_source: repo_source.unwrap_or_else(|| "local".to_string()),
-                    repo_url,
-                })
-            }
-        })
-        .transpose()?
+            })
+            .transpose()?
     };
-    let started_at = now();
 
-    // Reset state
+    let started_at = now();
     *state.current_session_id.lock().unwrap() = Some(session_id.clone());
     state.messages.lock().unwrap().clear();
     state.tasks.lock().unwrap().clear();
     *state.tokens_total.lock().unwrap() = 0;
     *state.tool_calls_total.lock().unwrap() = 0;
 
-    // Push user message
     state.messages.lock().unwrap().push(ChatMessage::User {
         content: prompt.clone(),
         ts: started_at,
@@ -403,6 +345,20 @@ pub async fn start_session(
     }
     save_state(&state)?;
 
+    // Kick off orchestration immediately.
+    let tx_opt = state.cmd_tx.lock().unwrap().clone();
+    if let Some(tx) = tx_opt {
+        let _ = tx.send(BridgeCommand::StartOrchestration {
+            session_id: session_id.clone(),
+            prompt,
+            max_agents: cfg.max_agents,
+            mode: resolved_mode,
+            repo_context,
+            config: cfg,
+            conversation_history: None,
+        }).await;
+    }
+
     Ok(session_id)
 }
 
@@ -412,8 +368,6 @@ pub async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String>
     if let Some(tx) = tx_opt {
         let _ = tx.send(BridgeCommand::StopOrchestration).await;
     }
-
-    // Discard sandbox on stop.
     {
         let sb = state.active_sandbox.lock().unwrap().take();
         if let Some(info) = sb {
@@ -422,7 +376,6 @@ pub async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String>
             }
         }
     }
-
     {
         let mut msgs = state.messages.lock().unwrap();
         msgs.push(ChatMessage::System { content: "Session stopped.".into(), ts: now() });
@@ -434,150 +387,39 @@ pub async fn stop_session(state: State<'_, Arc<AppState>>) -> Result<(), String>
 
 #[tauri::command]
 pub async fn send_message(
-    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     message: String,
     _images: Option<Vec<ImageAttachment>>,
 ) -> Result<(), String> {
     let session_id = state.current_session_id.lock().unwrap().clone()
         .ok_or_else(|| "No active session".to_string())?;
-
     let cfg = state.config.lock().unwrap().clone();
 
-    // Add user message to history
     state.messages.lock().unwrap().push(ChatMessage::User {
         content: message.clone(),
         ts: now(),
     });
 
-    // Build conversation history for the Main LLM
-    let history: Vec<serde_json::Value> = {
-        let msgs = state.messages.lock().unwrap();
-        msgs.iter().filter_map(|m| match m {
-            ChatMessage::User { content, .. } => Some(serde_json::json!({
-                "role": "user", "content": content
-            })),
-            ChatMessage::Agent { content, .. } => Some(serde_json::json!({
-                "role": "assistant", "content": content
-            })),
-            _ => None,
-        }).collect()
-    };
-
-    // Send chat request to agentd (NOT orchestrate)
-    let bridge = Arc::clone(&state.bridge);
-    let state_clone = Arc::clone(&*state);
-    let app_clone = app.clone();
-
-    tauri::async_runtime::spawn(async move {
-        let result = chat_with_agentd(&bridge, &history).await;
-        match result {
-            Ok(ChatResult::Response(text)) => {
-                // Direct chat response — add to messages and emit
-                let msg = ChatMessage::Agent {
-                    content: text.clone(),
-                    streaming: false,
-                    ts: now(),
-                };
-                state_clone.messages.lock().unwrap().push(msg.clone());
-                if let Err(err) = sync_current_session(&state_clone, Some("running"), None) {
-                    log::warn!("Failed to persist chat message: {err}");
-                }
-                let _ = app_clone.emit("chat_message", &msg);
-                let _ = app_clone.emit("session_complete", serde_json::json!({}));
-            }
-            Ok(ChatResult::DelegateBuild { instructions, summary }) => {
-                // Main LLM wants to build — show summary, then orchestrate
-                let summary_msg = ChatMessage::Agent {
-                    content: summary.clone(),
-                    streaming: false,
-                    ts: now(),
-                };
-                state_clone.messages.lock().unwrap().push(summary_msg.clone());
-                let _ = app_clone.emit("chat_message", &summary_msg);
-
-                // Now trigger orchestration with the LLM's build instructions
-                let tx_opt = state_clone.cmd_tx.lock().unwrap().clone();
-                if let Some(tx) = tx_opt {
-                    let _ = tx.send(BridgeCommand::StartOrchestration {
-                        session_id: session_id.clone(),
-                        prompt: instructions,
-                        max_agents: cfg.max_agents,
-                        mode: cfg.mode.clone(),
-                        repo_context: None,
-                        config: cfg.clone(),
-                        conversation_history: None,
-                    }).await;
-                }
-            }
-            Err(e) => {
-                let msg = ChatMessage::Error {
-                    content: format!("Chat failed: {}", e),
-                    ts: now(),
-                };
-                state_clone.messages.lock().unwrap().push(msg.clone());
-                let _ = app_clone.emit("chat_message", &msg);
-                let _ = app_clone.emit("session_complete", serde_json::json!({}));
-            }
-        }
-    });
+    let tx_opt = state.cmd_tx.lock().unwrap().clone();
+    if let Some(tx) = tx_opt {
+        let _ = tx.send(BridgeCommand::StartOrchestration {
+            session_id,
+            prompt: message,
+            max_agents: cfg.max_agents,
+            mode: cfg.mode.clone(),
+            repo_context: None,
+            config: cfg,
+            conversation_history: None,
+        }).await;
+    }
 
     Ok(())
-}
-
-enum ChatResult {
-    Response(String),
-    DelegateBuild { instructions: String, summary: String },
-}
-
-/// Send conversation history to agentd's chat endpoint and parse the response.
-async fn chat_with_agentd(
-    bridge: &Arc<crate::backend::BackendBridge>,
-    history: &[serde_json::Value],
-) -> Result<ChatResult, String> {
-    if !bridge.is_connected() {
-        return Err("Daemon not connected".into());
-    }
-
-    let payload = serde_json::json!({
-        "type": "chat",
-        "conversation_history": history,
-    });
-
-    bridge.send(payload).await.map_err(|e| format!("Send failed: {}", e))?;
-
-    // Read single response
-    match bridge.recv_next().await {
-        Ok(Some(v)) => {
-            let resp_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            match resp_type {
-                "chat_response" => {
-                    let content = v["content"].as_str().unwrap_or("").to_string();
-                    Ok(ChatResult::Response(content))
-                }
-                "delegate_build" => {
-                    let instructions = v["build_instructions"].as_str().unwrap_or("").to_string();
-                    let summary = v["summary_for_user"].as_str().unwrap_or("Building...").to_string();
-                    Ok(ChatResult::DelegateBuild { instructions, summary })
-                }
-                "error" => {
-                    let msg = v["message"].as_str().unwrap_or("Unknown error").to_string();
-                    Err(msg)
-                }
-                _ => Err(format!("Unexpected response type: {}", resp_type)),
-            }
-        }
-        Ok(None) => Err("Connection closed".into()),
-        Err(e) => Err(format!("Read failed: {}", e)),
-    }
 }
 
 #[tauri::command]
 pub async fn get_current_session(state: State<'_, Arc<AppState>>) -> Result<Option<SessionDetail>, String> {
     let session_id = state.current_session_id.lock().unwrap().clone();
-    let Some(session_id) = session_id else {
-        return Ok(None);
-    };
+    let Some(session_id) = session_id else { return Ok(None); };
     let sessions = state.sessions.lock().unwrap();
     Ok(sessions.get(&session_id).cloned().map(SessionDetail::from))
 }
@@ -586,24 +428,15 @@ pub async fn get_current_session(state: State<'_, Arc<AppState>>) -> Result<Opti
 pub async fn load_session(state: State<'_, Arc<AppState>>, session_id: String) -> Result<SessionDetail, String> {
     let record = {
         let sessions = state.sessions.lock().unwrap();
-        sessions
-            .get(&session_id)
-            .cloned()
+        sessions.get(&session_id).cloned()
             .ok_or_else(|| format!("session not found: {session_id}"))?
     };
-
     *state.current_session_id.lock().unwrap() = Some(session_id);
     *state.messages.lock().unwrap() = record.messages.clone();
-    *state.tasks.lock().unwrap() = record
-        .tasks
-        .iter()
-        .cloned()
-        .map(|task| (task.id.clone(), task))
-        .collect();
+    *state.tasks.lock().unwrap() = record.tasks.iter().cloned().map(|t| (t.id.clone(), t)).collect();
     *state.tokens_total.lock().unwrap() = record.tokens_total;
     *state.tool_calls_total.lock().unwrap() = record.tool_calls_total;
     save_state(&state)?;
-
     Ok(SessionDetail::from(record))
 }
 
@@ -617,32 +450,27 @@ pub async fn clear_current_session(state: State<'_, Arc<AppState>>) -> Result<()
     save_state(&state)
 }
 
-
 #[tauri::command]
 pub async fn delete_session(state: State<'_, Arc<AppState>>, session_id: String) -> Result<(), String> {
     state.session_history.lock().unwrap().retain(|s| s.id != session_id);
     save_state(&state)
 }
 
-/// Return the zero-mode workspace — deprecated, returns null.
 #[tauri::command]
 pub async fn get_zero_workspace() -> Result<Option<serde_json::Value>, String> {
     Ok(None)
 }
 
-/// Return the base directory where all zero-mode workspaces are created — deprecated.
 #[tauri::command]
 pub async fn get_zero_workspace_base() -> Result<String, String> {
     Ok(String::new())
 }
 
-/// Return the active sandbox for the current session, or null if none.
 #[tauri::command]
 pub async fn get_sandbox_status(state: State<'_, Arc<AppState>>) -> Result<Option<SandboxInfo>, String> {
     Ok(state.active_sandbox.lock().unwrap().clone())
 }
 
-/// Discard the active sandbox immediately (removes the upper_dir from disk).
 #[tauri::command]
 pub async fn discard_sandbox(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let sb = state.active_sandbox.lock().unwrap().take();
@@ -652,7 +480,6 @@ pub async fn discard_sandbox(state: State<'_, Arc<AppState>>) -> Result<(), Stri
     Ok(())
 }
 
-/// Return the size in bytes of the sandbox upper_dir (0 when no sandbox is active).
 #[tauri::command]
 pub async fn get_sandbox_size(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
     let guard = state.active_sandbox.lock().unwrap();
@@ -661,18 +488,13 @@ pub async fn get_sandbox_size(state: State<'_, Arc<AppState>>) -> Result<u64, St
 
 #[tauri::command]
 pub async fn window_control(app: tauri::AppHandle, action: String) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
+    let window = app.get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
-
     match action.as_str() {
         "close" => window.close().map_err(|err| format!("close window: {err}")),
         "minimize" => window.minimize().map_err(|err| format!("minimize window: {err}")),
         "toggle_maximize" => {
-            let is_maximized = window
-                .is_maximized()
-                .map_err(|err| format!("read maximize state: {err}"))?;
-            if is_maximized {
+            if window.is_maximized().map_err(|err| format!("read maximize state: {err}"))? {
                 window.unmaximize().map_err(|err| format!("unmaximize window: {err}"))
             } else {
                 window.maximize().map_err(|err| format!("maximize window: {err}"))
@@ -716,17 +538,17 @@ pub async fn get_stats(state: State<'_, Arc<AppState>>) -> Result<serde_json::Va
     drop(tasks);
 
     let usage_history = state.usage_history.lock().unwrap().clone();
-    let lifetime_tokens: u64 = usage_history.iter().map(|item| item.tokens).sum();
-    let lifetime_tool_calls: u64 = usage_history.iter().map(|item| item.tool_calls).sum();
-    let lifetime_tasks: usize = usage_history.iter().map(|item| item.task_count).sum();
-    let lifetime_duration_secs: u64 = usage_history.iter().map(|item| item.duration_secs).sum();
+    let lifetime_tokens: u64 = usage_history.iter().map(|r| r.tokens).sum();
+    let lifetime_tool_calls: u64 = usage_history.iter().map(|r| r.tool_calls).sum();
+    let lifetime_tasks: usize = usage_history.iter().map(|r| r.task_count).sum();
+    let lifetime_duration_secs: u64 = usage_history.iter().map(|r| r.duration_secs).sum();
     let current_tokens = *state.tokens_total.lock().unwrap();
     let current_tool_calls = *state.tool_calls_total.lock().unwrap();
     let current_is_running = {
         let current_id = state.current_session_id.lock().unwrap().clone();
         let sessions = state.sessions.lock().unwrap();
         current_id
-            .and_then(|id| sessions.get(&id).map(|record| record.summary.status == "running"))
+            .and_then(|id| sessions.get(&id).map(|r| r.summary.status == "running"))
             .unwrap_or(false)
     };
     let active_tokens = if current_is_running { current_tokens } else { 0 };
@@ -748,69 +570,12 @@ pub async fn get_stats(state: State<'_, Arc<AppState>>) -> Result<serde_json::Va
     }))
 }
 
-// ── Developer Mode Commands ───────────────────────────────────────────────────
-
-#[tauri::command]
-pub async fn get_developer_config() -> Result<platform::developer_mode::DeveloperConfig, String> {
-    Ok(platform::developer_mode::DeveloperConfig::load_or_default())
-}
-
-#[tauri::command]
-pub async fn save_developer_config(config: platform::developer_mode::DeveloperConfig) -> Result<(), String> {
-    config.save().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn validate_developer_config(config: platform::developer_mode::DeveloperConfig) -> Result<Vec<String>, String> {
-    Ok(config.validate())
-}
-
-#[tauri::command]
-pub async fn start_developer_bootstrap(
-    config: platform::developer_mode::DeveloperConfig,
-) -> Result<String, String> {
-    let warnings = config.validate();
-    if !warnings.is_empty() {
-        return Err(format!(
-            "Configuration has issues:\n{}",
-            warnings.join("\n")
-        ));
-    }
-
-    config.save().map_err(|e| format!("Failed to save config: {}", e))?;
-
-    Ok(
-        "Configuration saved. The application will restart and automatically bootstrap \
-         the QEMU VM. This process takes ~60–90 seconds:\n\n\
-         1. QEMU starts with your ISO and disk\n\
-         2. Alpine Linux boots and auto-logs in\n\
-         3. Network is activated (DHCP)\n\
-         4. Persistent disk is mounted\n\
-         5. socat is installed\n\
-         6. agentd starts and bridges to TCP port\n\n\
-         The app will reconnect automatically once the VM is ready."
-            .to_string(),
-    )
-}
-
-#[tauri::command]
-pub async fn clear_developer_config() -> Result<(), String> {
-    let path = platform::developer_mode::DeveloperConfig::config_file_path();
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|e| format!("Failed to remove config: {}", e))?;
-    }
-    Ok(())
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Session workspace commands
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn get_session_workspace(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Option<String>, String> {
+pub async fn get_session_workspace(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
     let sandbox = state.active_sandbox.lock().map_err(|_| "lock poisoned".to_string())?;
     Ok(sandbox.as_ref().map(|s| s.upper_dir.clone()))
 }
@@ -834,7 +599,7 @@ pub async fn export_workspace_to(
     Ok(sandbox::upper_dir_size(&crate::sandbox::SandboxInfo {
         id: String::new(),
         lower_dir: String::new(),
-        upper_dir: upper_dir,
+        upper_dir,
     }))
 }
 
@@ -843,20 +608,11 @@ pub async fn delete_session_local(
     state: State<'_, Arc<AppState>>,
     session_id: String,
 ) -> Result<(), String> {
-    // Remove from in-memory state
-    {
-        let mut history = state.session_history.lock().map_err(|_| "lock poisoned".to_string())?;
-        history.retain(|s| s.id != session_id);
-    }
-    {
-        let mut sessions = state.sessions.lock().map_err(|_| "lock poisoned".to_string())?;
-        sessions.remove(&session_id);
-    }
-    // Persist to disk
+    state.session_history.lock().map_err(|_| "lock poisoned".to_string())?.retain(|s| s.id != session_id);
+    state.sessions.lock().map_err(|_| "lock poisoned".to_string())?.remove(&session_id);
     crate::state::save_state(&state)
 }
 
-/// Return current session streaming state: sandbox IDs, per-agent states, and session ID.
 #[tauri::command]
 pub async fn get_session_state(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let session_id = state.current_session_id.lock().unwrap().clone();
@@ -868,4 +624,3 @@ pub async fn get_session_state(state: State<'_, Arc<AppState>>) -> Result<serde_
         "agent_states": agent_states,
     }))
 }
-

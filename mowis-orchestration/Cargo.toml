@@ -1,0 +1,28 @@
+[package]
+name = "mowis-orchestration"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side orchestration engine: Conductor, Critic, Captain, Crew tiers"
+
+[dependencies]
+mowis-protocol = { path = "../mowis-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+toml = "0.8"
+reqwest = { version = "0.11", default-features = false, features = ["json", "blocking", "rustls-tls-webpki-roots", "stream"] }
+once_cell = "1"
+sha2 = "0.10"
+base64 = "0.21"
+aes-gcm = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+async-trait = "0.1"
+futures-util = "0.3"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
