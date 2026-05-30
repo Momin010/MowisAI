@@ -1,98 +1,63 @@
 ﻿# MowisAI
 
-An AI agent orchestration engine that runs thousands of isolated agents in parallel on your machine.
+An AI agent orchestration engine that runs isolated agents in parallel using QEMU VMs and overlayfs sandboxes.
 
-## What It Does
+## Status
 
-MowisAI takes a user prompt, drafts a plan with multiple tasks, and executes them in parallel using isolated AI agents. Each agent works in its own sandbox with overlay filesystem isolation.
+**This project is archived and no longer maintained.**
 
-```
-$ mowisd -p "build a cryptocurrency dashboard"
+This repository is kept publicly available for anyone who wants to explore, learn from, or use any part of the codebase. You are free to fork it, copy parts of it, or build on top of it. No further updates, bug fixes, or support will be provided.
 
-→ Conductor drafts plan (5 tasks, all parallel)
-→ Critic reviews and approves
-→ Captain spawns 5 agents simultaneously
-→ Each agent writes code, runs commands, tests
-→ Results merge back to your filesystem
-→ Done in ~90 seconds
-```
+## What's Here
 
-## Architecture
+The codebase contains a four-tier agent orchestration system (Conductor → Critic → Captain → Crew) built in Rust, with:
 
-```
-User → Conductor (LLM) → Plan → Critic (LLM) → Captain → Crews (parallel)
-                                                              ↓
-                                                     Sandbox (overlayfs)
-                                                     Tools (filesystem, shell, git, http)
-```
+- **mowis-orchestration/** — Core engine: LLM planning, task scheduling, tool execution, 7 provider integrations (Anthropic, OpenAI, Gemini, Vertex, Grok, Groq, Mimo)
+- **mowis-protocol/** — Wire protocol between host and guest VM
+- **mowis-host/** — Host-side CLI, QEMU VM lifecycle, TUI
+- **mowis-executor/** — Guest-side executor with overlayfs sandbox, tool registry
+- **mowis-desktop/** — Desktop GUI built with Tauri
+- **agentd/** — Legacy agent daemon with 28 tool integrations (filesystem, shell, git, HTTP, Docker, Kubernetes, GitHub, Jira, Slack, and more)
 
-**Four tiers:**
-- **Conductor** — User-facing planner. Drafts plans, handles mid-run messages.
-- **Critic** — Blind reviewer. Reviews plans without seeing conversation history.
-- **Captain** — Execution orchestrator. Spawns crews, manages sandboxes, merges results.
-- **Crew** — Per-task fast agent. Executes tools, writes code, runs commands.
+Total: ~68,000 lines of Rust, ~7,000 lines of JavaScript/CSS, ~1,000 lines of tests.
 
-## Quick Start
+## Open Source
+
+Everything in this repository is open source under the MIT License. You can:
+
+- Use any part of the code in your own projects
+- Fork and modify as you see fit
+- Build commercial products on top of it
+- Learn from the architecture and implementation decisions
+
+No attribution required (MIT License), but appreciated.
+
+## If You Want to Build It
 
 ```bash
-# Build
+# Build the host CLI
 cargo build --release -p mowis-host
 
-# Setup (configure AI provider)
-mowisd setup
+# Build the executor (for guest VM)
+cargo build --release -p mowis-executor
 
-# Run autonomously
-mowisd -p "build a REST API with Express.js"
-
-# Run with verbose logging
-mowisd -p "build a weather app" --log
-
-# Run interactively (TUI)
-mowisd
-```
-
-## Supported Providers
-
-- Anthropic (Claude)
-- OpenAI (GPT)
-- Google Gemini
-- Vertex AI (GCP)
-- Grok (xAI)
-- Groq
-- Mimo (Xiaomi)
-
-## Project Structure
-
-```
-MowisAI/
-├── mowis-orchestration/    # Core engine: Conductor, Critic, Captain, Crew
-├── mowis-protocol/         # Wire protocol (host ↔ guest VM)
-├── mowis-host/             # Host-side CLI + VM lifecycle
-├── mowis-executor/         # Guest-side: sandbox primitives, tool registry
-├── agentd/                 # Legacy agent daemon (being migrated)
-├── agentd-protocol/        # Legacy shared types
-├── runtime/                # Legacy control plane
-└── mowis-desktop/          # Desktop GUI (Tauri)
-```
-
-## How It Works
-
-1. **Plan** — Conductor creates a task graph (DAG) from your prompt
-2. **Review** — Critic reviews the plan for correctness, safety, and efficiency
-3. **Execute** — Captain spawns crews in parallel based on task dependencies
-4. **Isolate** — Each crew runs in its own overlayfs sandbox
-5. **Merge** — Results are merged back to the base filesystem
-6. **Output** — Final code lands in your project directory
-
-## Testing
-
-```bash
-# Rust tests
+# Run tests
 cargo test --workspace
-
-# Playwright UI tests
-npx playwright test
 ```
+
+Note: The host requires Linux with KVM support for VM-based execution. The executor runs inside the guest VM.
+
+## Why It's Archived
+
+The project explored an ambitious architecture (four-tier orchestration with QEMU VMs) but the complexity-to-value ratio didn't justify continued development. Simpler approaches (single-agent CLI tools like Aider, or IDE-integrated agents like Cursor) achieve similar results with significantly less infrastructure overhead.
+
+The code remains available for anyone interested in:
+- Rust-based LLM integration patterns
+- QEMU VM lifecycle management
+- Overlayfs sandbox implementation
+- Multi-provider LLM streaming
+- Event-driven agent orchestration
+- TUI application design with ratatui
 
 ## License
 
