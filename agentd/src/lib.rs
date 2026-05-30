@@ -38,6 +38,7 @@ pub mod openai_agent;
 pub mod gemini_agent;
 pub mod vertex_agent;
 pub mod worker_agent;
+pub mod intent;
 pub mod version;
 
 use std::sync::atomic::{AtomicBool, Ordering};
