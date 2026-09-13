@@ -12,12 +12,12 @@ This repository is kept publicly available for anyone who wants to explore, lear
 
 The codebase contains a four-tier agent orchestration system (Conductor → Critic → Captain → Crew) built in Rust, with:
 
-- **mowis-orchestration/** — Core engine: LLM planning, task scheduling, tool execution, 7 provider integrations (Anthropic, OpenAI, Gemini, Vertex, Grok, Groq, Mimo)
-- **mowis-protocol/** — Wire protocol between host and guest VM
-- **mowis-host/** — Host-side CLI, QEMU VM lifecycle, TUI
-- **mowis-executor/** — Guest-side executor with overlayfs sandbox, tool registry
-- **mowis-desktop/** — Desktop GUI built with Tauri
-- **agentd/** — Legacy agent daemon with 28 tool integrations (filesystem, shell, git, HTTP, Docker, Kubernetes, GitHub, Jira, Slack, and more)
+- **mowis-orchestration/** - Core engine: LLM planning, task scheduling, tool execution, 7 provider integrations (Anthropic, OpenAI, Gemini, Vertex, Grok, Groq, Mimo)
+- **mowis-protocol/** - Wire protocol between host and guest VM
+- **mowis-host/** - Host-side CLI, QEMU VM lifecycle, TUI
+- **mowis-executor/** - Guest-side executor with overlayfs sandbox, tool registry
+- **mowis-desktop/** - Desktop GUI built with Tauri
+- **agentd/** - Legacy agent daemon with 28 tool integrations (filesystem, shell, git, HTTP, Docker, Kubernetes, GitHub, Jira, Slack, and more)
 
 Total: ~68,000 lines of Rust, ~7,000 lines of JavaScript/CSS, ~1,000 lines of tests.
 

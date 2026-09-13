@@ -58,31 +58,31 @@ MowisAI/
 ## Key Types
 
 ### mowis-protocol
-- `Payload` — enum of all wire messages (30+ variants)
-- `Envelope` — `{ id: u64, payload: Payload }`
-- `PROTOCOL_VERSION` — 2
+- `Payload` - enum of all wire messages (30+ variants)
+- `Envelope` - `{ id: u64, payload: Payload }`
+- `PROTOCOL_VERSION` - 2
 
 ### mowis-orchestration
-- `ConductorCommand` — `UserMessage`, `CriticVerdict`, `EndConversation`
-- `ConductorReply` — `Chat`, `PlanDrafted`, `PlanRevised`, `Error`
-- `Event` — 25+ variants (PlanDrafted, CrewToolSummary, etc.)
-- `EventBus` — broadcast channel wrapper
-- `Plan` — plan.toml + tasks.toml + overview.md + ...
-- `TaskNode` — `{ id, title, description, deps, model_tier, tool_budget }`
-- `Tier` — `Conductor | Critic | Captain | Crew`
-- `ToolCall` — `{ id, name, args }`
-- `ToolOutcome` — `Ok(Value) | Err(String) | Denied`
-- `OrchConfig` — providers, tiers, sandbox config
-- `LlmConfig` — provider, model, api_key
+- `ConductorCommand` - `UserMessage`, `CriticVerdict`, `EndConversation`
+- `ConductorReply` - `Chat`, `PlanDrafted`, `PlanRevised`, `Error`
+- `Event` - 25+ variants (PlanDrafted, CrewToolSummary, etc.)
+- `EventBus` - broadcast channel wrapper
+- `Plan` - plan.toml + tasks.toml + overview.md + ...
+- `TaskNode` - `{ id, title, description, deps, model_tier, tool_budget }`
+- `Tier` - `Conductor | Critic | Captain | Crew`
+- `ToolCall` - `{ id, name, args }`
+- `ToolOutcome` - `Ok(Value) | Err(String) | Denied`
+- `OrchConfig` - providers, tiers, sandbox config
+- `LlmConfig` - provider, model, api_key
 
 ### mowis-host
-- `Connection` — vsock client with `call()` and `call_streaming()`
-- `Vmm` trait — `boot()`, `shutdown()`
-- `TuiApp` — terminal UI state machine
+- `Connection` - vsock client with `call()` and `call_streaming()`
+- `Vmm` trait - `boot()`, `shutdown()`
+- `TuiApp` - terminal UI state machine
 
 ### mowis-executor
-- `Sandbox` — overlayfs sandbox with `create()`, `create_agent_overlay()`
-- `merge_overlay()` — copy upper dir to parent
+- `Sandbox` - overlayfs sandbox with `create()`, `create_agent_overlay()`
+- `merge_overlay()` - copy upper dir to parent
 
 ## Data Flow
 
